@@ -37,6 +37,7 @@ def validate_promotion_source(
     artifacts: dict[str, Any],
     expected_repository: str,
     expected_sha: str,
+    allow_owner_dispatch: bool = False,
 ) -> dict[str, Any]:
     expected_repository = expected_repository.strip()
     expected_sha = expected_sha.strip()
@@ -47,7 +48,8 @@ def validate_promotion_source(
 
     run_id = _positive_integer(run.get("id"), field="run id")
     run_attempt = _positive_integer(run.get("run_attempt"), field="run attempt")
-    if run.get("event") != "push" or run.get("head_branch") != "main":
+    owner_dispatch = allow_owner_dispatch is True and run.get("event") == "workflow_dispatch"
+    if (run.get("event") != "push" and not owner_dispatch) or run.get("head_branch") != "main":
         raise RuntimeError("security candidate source must be a main push")
     if run.get("status") != "completed" or run.get("conclusion") != "success":
         raise RuntimeError("security candidate source must have completed successfully")
@@ -59,6 +61,38 @@ def validate_promotion_source(
         raise RuntimeError(
             "security candidate source repository does not match expected repository"
         )
+
+    if owner_dispatch:
+        # A first owner dispatch has no artifacts left over from a previous attempt.
+        if run_attempt != 1:
+            raise RuntimeError("owner dispatch must be a first run attempt")
+        owner = repository.get("owner")
+        owner_login = expected_repository.split("/", 1)[0]
+        if (
+            not isinstance(owner, dict)
+            or owner.get("type") != "User"
+            or owner.get("login") != owner_login
+        ):
+            raise RuntimeError("owner dispatch requires an identified personal repository owner")
+        owner_id = _positive_integer(owner.get("id"), field="repository owner id")
+        for actor_field in ("actor", "triggering_actor"):
+            actor = run.get(actor_field)
+            if (
+                not isinstance(actor, dict)
+                or actor.get("login") != owner_login
+                or actor.get("type") != "User"
+                or _positive_integer(actor.get("id"), field=actor_field) != owner_id
+            ):
+                raise RuntimeError(f"owner dispatch {actor_field} must be the repository owner")
+        repository_id = _positive_integer(repository.get("id"), field="repository id")
+        head_repository = run.get("head_repository")
+        if (
+            not isinstance(head_repository, dict)
+            or head_repository.get("full_name") != expected_repository
+            or _positive_integer(head_repository.get("id"), field="head repository id")
+            != repository_id
+        ):
+            raise RuntimeError("owner dispatch head repository must match the trusted repository")
 
     workflow_id = _positive_integer(workflow.get("id"), field="workflow id")
     if (
@@ -109,7 +143,7 @@ def validate_promotion_source(
             )
         verified[kind] = artifact_id
 
-    return {
+    report = {
         "valid": True,
         "repository": expected_repository,
         "main_commit_sha": expected_sha,
@@ -119,7 +153,12 @@ def validate_promotion_source(
         "workflow_path": EXPECTED_WORKFLOW_PATH,
         "candidate_artifact_id": verified["candidate"],
         "evidence_artifact_id": verified["evidence"],
+        "source_event": run["event"],
+        "run_url": f"https://github.com/{expected_repository}/actions/runs/{run_id}",
     }
+    if owner_dispatch:
+        report.update(owner_actor_id=owner_id, owner_actor_login=owner_login)
+    return report
 
 
 def main() -> int:
@@ -131,6 +170,11 @@ def main() -> int:
     parser.add_argument("--artifacts", required=True)
     parser.add_argument("--expected-repository", required=True)
     parser.add_argument("--expected-sha", required=True)
+    parser.add_argument(
+        "--allow-owner-dispatch",
+        action="store_true",
+        help="Also accept a first main workflow_dispatch by the personal repository owner",
+    )
     parser.add_argument("--output", default="security-promotion-source.json")
     args = parser.parse_args()
 
@@ -143,6 +187,7 @@ def main() -> int:
             artifacts=_read_json_object(Path(args.artifacts)),
             expected_repository=args.expected_repository,
             expected_sha=args.expected_sha,
+            allow_owner_dispatch=args.allow_owner_dispatch,
         )
     except RuntimeError as exc:
         report = {"valid": False, "error": str(exc)}

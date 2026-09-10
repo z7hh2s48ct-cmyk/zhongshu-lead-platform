@@ -980,10 +980,13 @@ def test_security_workflow_executes_policy_from_protected_base() -> None:
     assert "--candidate-sha \"$CANDIDATE_SHA\"" in source
     assert "--policy-sha \"$POLICY_SHA\"" in source
     assert "waivers-policy.json" in source
-    assert (
-        "if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
-        in source
-    )
+    assert "success() && github.ref == 'refs/heads/main'" in source
+    assert "github.event_name == 'push' ||" in source
+    assert "github.event_name == 'workflow_dispatch' && github.run_attempt == '1'" in source
+    assert "github.actor == github.repository_owner" in source
+    assert "github.triggering_actor == github.repository_owner" in source
+    assert "github.event.repository.owner.type == 'User'" in source
+    assert "github.actor_id == format('{0}', github.event.repository.owner.id)" in source
 
 
 def test_browser_entrypoints_load_safe_html_boundary_first() -> None:

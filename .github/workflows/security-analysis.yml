@@ -322,7 +322,14 @@ jobs:
             --output dist/security/security-gate.json
 
       - name: Upload exact green scanned candidate image
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: >-
+          success() && github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && github.run_attempt == '1' &&
+            github.event.repository.owner.type == 'User' &&
+            github.actor == github.repository_owner &&
+            github.triggering_actor == github.repository_owner &&
+            github.actor_id == format('{0}', github.event.repository.owner.id)))
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: security-candidate-image-${{ github.run_id }}

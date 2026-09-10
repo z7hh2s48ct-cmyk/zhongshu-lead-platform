@@ -61,6 +61,82 @@ def _artifacts(*items: dict) -> dict:
     return {"total_count": len(items), "artifacts": list(items)}
 
 
+def _owner_dispatch() -> dict:
+    owner = {"id": 123, "login": "phlong026", "type": "User"}
+    return _run(
+        event="workflow_dispatch",
+        repository={"id": 456, "full_name": REPOSITORY, "owner": owner},
+        head_repository={"id": 456, "full_name": REPOSITORY},
+        actor=dict(owner),
+        triggering_actor=dict(owner),
+    )
+
+
+def _validate_owner_dispatch(run: dict, *, enabled: bool = True) -> dict:
+    return validate_promotion_source(
+        run=run,
+        workflow=_workflow(),
+        artifacts=_artifacts(
+            _artifact(f"security-candidate-image-{RUN_ID}", 101),
+            _artifact(f"security-analysis-{RUN_ID}", 102),
+        ),
+        expected_repository=REPOSITORY,
+        expected_sha=MAIN_SHA,
+        allow_owner_dispatch=enabled,
+    )
+
+
+def test_owner_dispatch_requires_explicit_opt_in_and_records_real_event() -> None:
+    with pytest.raises(RuntimeError, match="main push"):
+        _validate_owner_dispatch(_owner_dispatch(), enabled=False)
+    report = _validate_owner_dispatch(_owner_dispatch())
+    assert report["valid"] is True
+    assert report["source_event"] == "workflow_dispatch"
+    assert report["owner_actor_id"] == 123
+    assert report["main_commit_sha"] == MAIN_SHA
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"actor": {"id": 999, "login": "phlong026", "type": "User"}},
+        {"triggering_actor": {"id": 999, "login": "other", "type": "User"}},
+        {"triggering_actor": None},
+        {"actor": {"id": 123, "login": "other", "type": "User"}},
+        {"head_repository": {"id": 999, "full_name": REPOSITORY}},
+        {"head_repository": {"id": 456, "full_name": "other/fork"}},
+        {"repository": {"id": 456, "full_name": REPOSITORY,
+                        "owner": {"id": 123, "login": "phlong026", "type": "Organization"}}},
+        {"run_attempt": 2},
+        {"head_branch": "feature"},
+        {"head_sha": "b" * 40},
+        {"conclusion": "failure"},
+        {"workflow_id": 999},
+        {"event": "pull_request_target"},
+    ],
+)
+def test_owner_dispatch_rejects_untrusted_identity_or_build(change: dict) -> None:
+    run = _owner_dispatch()
+    run.update(change)
+    with pytest.raises(RuntimeError):
+        _validate_owner_dispatch(run)
+
+
+def test_owner_dispatch_does_not_relax_artifact_checks() -> None:
+    with pytest.raises(RuntimeError, match="expired"):
+        validate_promotion_source(
+            run=_owner_dispatch(),
+            workflow=_workflow(),
+            artifacts=_artifacts(
+                _artifact(f"security-candidate-image-{RUN_ID}", 101, expired=True),
+                _artifact(f"security-analysis-{RUN_ID}", 102),
+            ),
+            expected_repository=REPOSITORY,
+            expected_sha=MAIN_SHA,
+            allow_owner_dispatch=True,
+        )
+
+
 def test_promotion_source_binds_trusted_run_workflow_and_artifacts() -> None:
     report = validate_promotion_source(
         run=_run(),
@@ -83,6 +159,8 @@ def test_promotion_source_binds_trusted_run_workflow_and_artifacts() -> None:
         "workflow_path": ".github/workflows/security-analysis.yml",
         "candidate_artifact_id": 101,
         "evidence_artifact_id": 102,
+        "source_event": "push",
+        "run_url": f"https://github.com/{REPOSITORY}/actions/runs/{RUN_ID}",
     }
 
 
