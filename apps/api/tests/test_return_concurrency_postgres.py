@@ -5,8 +5,9 @@ from threading import Event
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event, func, select, text
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from apps.api.src.core.database import Base
 from apps.api.src.core.enums import EvidenceType
@@ -26,7 +27,7 @@ def postgres_factory():
     schema = "return_probe_" + uuid4().hex
     admin = create_engine(url)
     with admin.begin() as connection:
-        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        connection.execute(CreateSchema(schema))
     engine = create_engine(url, connect_args={"options": f"-csearch_path={schema} -clock_timeout=4000 -cstatement_timeout=6000"})
     try:
         Base.metadata.create_all(engine)
@@ -38,7 +39,7 @@ def postgres_factory():
     finally:
         engine.dispose()
         with admin.begin() as connection:
-            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+            connection.execute(DropSchema(schema, cascade=True))
         admin.dispose()
 
 
