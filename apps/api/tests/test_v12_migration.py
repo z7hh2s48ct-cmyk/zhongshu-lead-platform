@@ -2,16 +2,14 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import os
+import subprocess
+import sys
 from pathlib import Path
 import uuid
 
 import pytest
 import sqlalchemy as sa
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import create_engine, inspect
-
-from apps.api.src.core.config import get_settings
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -20,21 +18,18 @@ def _alembic(database_url: str, *args: str) -> None:
     if len(args) != 2 or args[0] not in {"upgrade", "downgrade"}:
         raise ValueError("migration tests only allow upgrade or downgrade with one revision")
 
-    previous_database_url = os.environ.get("DATABASE_URL")
-    try:
-        os.environ["DATABASE_URL"] = database_url
-        get_settings.cache_clear()
-        config = Config(str(ROOT / "alembic.ini"))
-        if args[0] == "upgrade":
-            command.upgrade(config, args[1])
-        else:
-            command.downgrade(config, args[1])
-    finally:
-        if previous_database_url is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = previous_database_url
-        get_settings.cache_clear()
+    # Each historical migration needs a clean interpreter, independent of prior tests.
+    result = subprocess.run(
+        ["python", "-m", "alembic", *args],
+        executable=sys.executable,
+        cwd=ROOT,
+        env={**os.environ, "DATABASE_URL": database_url},
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stdout + result.stderr)
 
 
 def _required_row(table: sa.Table, **overrides) -> dict:
