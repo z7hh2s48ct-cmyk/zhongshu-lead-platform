@@ -23,7 +23,7 @@ SCHEMA_VERSION = 1
 DEFAULT_PROFILES = (100, 300, 500)
 PNG_FIXTURE = b"\x89PNG\r\n\x1a\nH04 synthetic performance evidence\n"
 CLAIM_APPROVAL_REFERENCE_PATTERN = re.compile(
-    r"https://github\.com/phlong026/zhongshu-lead-platform/(?:issues|pull)/[1-9]\d*"
+    r"https://github\.com/peihr666-max/zhongshu-lead-platform/(?:issues|pull)/[1-9]\d*"
 )
 
 

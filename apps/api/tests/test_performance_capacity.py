@@ -144,7 +144,7 @@ def _report() -> dict:
             "status": "APPROVED",
             "approved_by": "release-owner",
             "approved_at": "2026-08-11T04:13:00+00:00",
-            "approval_reference": "https://github.com/phlong026/zhongshu-lead-platform/issues/53",
+            "approval_reference": "https://github.com/peihr666-max/zhongshu-lead-platform/issues/53",
         },
     }
 
@@ -205,7 +205,7 @@ def test_dataset_contract_requires_an_explicit_github_approved_claim_baseline():
     document["claim_baseline"] = {
         "approved": True,
         "p95_limit_ms": 5000.0,
-        "approval_reference": "https://github.com/phlong026/zhongshu-lead-platform/issues/71",
+        "approval_reference": "https://github.com/peihr666-max/zhongshu-lead-platform/issues/71",
     }
     validate_dataset(document, runtime=True)
 
@@ -215,7 +215,8 @@ def test_dataset_contract_requires_an_explicit_github_approved_claim_baseline():
         {"approved": True, "p95_limit_ms": float("nan"), "approval_reference": "https://github.com/example/1"},
         {"approved": True, "p95_limit_ms": 5000.0, "approval_reference": "https://example.com/issues/1"},
         {"approved": True, "p95_limit_ms": 5000.0, "approval_reference": "https://github.com/other/repo/issues/71"},
-        {"approved": True, "p95_limit_ms": 5000.0, "approval_reference": "https://github.com/phlong026/zhongshu-lead-platform/issues/not-a-number"},
+        {"approved": True, "p95_limit_ms": 5000.0, "approval_reference": "https://github.com/phlong026/zhongshu-lead-platform/issues/71"},
+        {"approved": True, "p95_limit_ms": 5000.0, "approval_reference": "https://github.com/peihr666-max/zhongshu-lead-platform/issues/not-a-number"},
     ):
         document = _dataset()
         document["claim_baseline"] = invalid
@@ -448,7 +449,7 @@ def test_approved_claim_baseline_requires_reference_and_changes_only_claim_limit
     report["claim_baseline"] = {
         "approved": True,
         "p95_limit_ms": 750.0,
-        "approval_reference": "https://github.com/phlong026/zhongshu-lead-platform/issues/99",
+        "approval_reference": "https://github.com/peihr666-max/zhongshu-lead-platform/issues/99",
     }
     report["profiles"]["300"]["scenarios"]["claim"]["p95_ms"] = 700.0
     report["profiles"]["300"]["scenarios"]["claim"]["p99_ms"] = 800.0

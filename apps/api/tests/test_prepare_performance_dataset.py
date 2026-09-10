@@ -146,7 +146,7 @@ def test_prepare_dataset_embeds_only_an_explicit_approved_claim_baseline(db) -> 
     baseline = {
         "approved": True,
         "p95_limit_ms": 5000.0,
-        "approval_reference": "https://github.com/phlong026/zhongshu-lead-platform/issues/71",
+        "approval_reference": "https://github.com/peihr666-max/zhongshu-lead-platform/issues/71",
     }
     dataset = prepare_dataset(
         db,

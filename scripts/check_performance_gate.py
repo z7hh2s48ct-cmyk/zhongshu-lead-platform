@@ -47,7 +47,7 @@ TARGET_METRIC_KEYS = {
 }
 SENSITIVE_KEY_PARTS = ("password", "cookie", "authorization", "access_token", "refresh_token", "phone")
 CLAIM_APPROVAL_REFERENCE_PATTERN = re.compile(
-    r"https://github\.com/phlong026/zhongshu-lead-platform/(?:issues|pull)/[1-9]\d*"
+    r"https://github\.com/peihr666-max/zhongshu-lead-platform/(?:issues|pull)/[1-9]\d*"
 )
 
 
