@@ -348,6 +348,21 @@ def update_internal_roles(
     return user, previous_roles, True
 
 
+def update_internal_display_name(
+    db: Session,
+    *,
+    user_id: str,
+    display_name: str,
+) -> tuple[User, str, bool]:
+    user = _load_internal_user(db, user_id)
+    previous_display_name = user.display_name
+    if previous_display_name == display_name:
+        return user, previous_display_name, False
+    user.display_name = display_name
+    db.flush()
+    return user, previous_display_name, True
+
+
 def set_internal_user_status(
     db: Session,
     *,

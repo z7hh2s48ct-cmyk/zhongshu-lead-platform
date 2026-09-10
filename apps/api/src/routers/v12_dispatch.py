@@ -10,7 +10,7 @@ from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.enums import AssignmentStatus
 from ..core.errors import AppError
-from ..core.models import Assignment, Company, FollowUp, Lead
+from ..core.models import Assignment, Company, FollowUp, Lead, User
 from ..core.responses import ok, page
 from ..core.security import decrypt_text, mask_phone
 from ..core.v12_enums import LeadV12Status
@@ -242,9 +242,23 @@ def dispatch_pool(
         db,
         [item.id for item in items],
     )
+    supplier_ids = {item.supplier_company_id for item in items if item.supplier_company_id}
+    submitter_ids = {item.submitter_user_id for item in items if item.submitter_user_id}
+    supplier_names = dict(
+        db.execute(select(Company.id, Company.name).where(Company.id.in_(supplier_ids))).all()
+    ) if supplier_ids else {}
+    submitter_names = dict(
+        db.execute(select(User.id, User.display_name).where(User.id.in_(submitter_ids))).all()
+    ) if submitter_ids else {}
+    reveal_phone = principal.can("lead.dispatch.phone.read") or principal.can("*")
     payload = []
     for item in items:
-        item_payload = lead_pool_item(item)
+        item_payload = lead_pool_item(
+            item,
+            reveal_phone=reveal_phone,
+            supplier_company_name=supplier_names.get(item.supplier_company_id),
+            submitter_name=submitter_names.get(item.submitter_user_id),
+        )
         task_id = verification_task_ids.get(item.id)
         item_payload.update(
             {
@@ -253,6 +267,16 @@ def dispatch_pool(
             }
         )
         payload.append(item_payload)
+    if reveal_phone and items:
+        write_audit(
+            db,
+            principal=principal,
+            action="V12_DISPATCH_POOL_PHONE_READ",
+            resource_type="dispatch_pool",
+            after={"lead_ids": [item.id for item in items], "count": len(items)},
+            request_id=request.state.request_id,
+        )
+        db.commit()
     return ok(request, page(payload, total, page_no, page_size))
 
 
@@ -307,11 +331,18 @@ def manual_dispatch(
     principal=Depends(require_permissions("lead.dispatch")),
     db: Session = Depends(get_db),
 ):
+    if not body.employee_user_id:
+        raise AppError(
+            "DISPATCH_EMPLOYEE_REQUIRED",
+            "派发客资必须选择具体加盟商员工",
+            422,
+        )
     with manual_dispatch_idempotency_guard(body.idempotency_key):
         outcome = dispatch_manually_with_outcome(
             db,
             lead_id=lead_id,
             company_id=body.company_id,
+            employee_user_id=body.employee_user_id,
             assigned_by=principal.user_id,
             idempotency_key=body.idempotency_key,
             note=body.note,
@@ -331,6 +362,7 @@ def manual_dispatch(
                 after={
                     "lead_id": lead_id,
                     "company_id": assignment.company_id,
+                    "employee_user_id": assignment.internal_assignee_user_id,
                     "status": assignment.status,
                     "points_price": assignment.points_price,
                     "manual": True,
@@ -420,9 +452,30 @@ def claim_own_assignment(
     principal: CurrentPrincipal,
     db: Session = Depends(get_db),
 ):
-    if not principal.has_any_role("FRANCHISE_OWNER") or not principal.can("assignment.own.claim"):
-        raise AppError("FORBIDDEN", "仅加盟商负责人可领取客资", 403)
     company_id = _principal_company_id(principal)
+    assignment_scope = db.get(Assignment, assignment_id)
+    if assignment_scope is None or assignment_scope.company_id != company_id:
+        raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
+    if assignment_scope.internal_assignee_user_id:
+        employee_claim = (
+            principal.has_any_role("FRANCHISE_EMPLOYEE")
+            and principal.can("assignment.employee.claim")
+            and assignment_scope.internal_assignee_user_id == principal.user_id
+        )
+        historical_owner_replay = (
+            principal.has_any_role("FRANCHISE_OWNER")
+            and principal.can("assignment.own.claim")
+            and assignment_scope.claimed_at is not None
+            and assignment_scope.internal_assignee_user_id == principal.user_id
+            and assignment_scope.internal_assigned_by == principal.user_id
+        )
+        if not (employee_claim or historical_owner_replay):
+            raise AppError("FORBIDDEN", "该客资仅限被指定员工领取", 403)
+    elif not (
+        principal.has_any_role("FRANCHISE_OWNER")
+        and principal.can("assignment.own.claim")
+    ):
+        raise AppError("FORBIDDEN", "仅加盟商负责人可领取历史未指定员工的客资", 403)
 
     def execute_claim() -> dict:
         result = claim_assignment(
@@ -506,9 +559,22 @@ def refuse_own_assignment(
     principal: CurrentPrincipal,
     db: Session = Depends(get_db),
 ):
-    if not principal.has_any_role("FRANCHISE_OWNER") or not principal.can("assignment.own.claim"):
-        raise AppError("FORBIDDEN", "仅加盟商负责人可拒绝领取客资", 403)
     company_id = _principal_company_id(principal)
+    assignment_scope = db.get(Assignment, assignment_id)
+    if assignment_scope is None or assignment_scope.company_id != company_id:
+        raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
+    if assignment_scope.internal_assignee_user_id:
+        if not (
+            principal.has_any_role("FRANCHISE_EMPLOYEE")
+            and principal.can("assignment.employee.claim")
+            and assignment_scope.internal_assignee_user_id == principal.user_id
+        ):
+            raise AppError("FORBIDDEN", "该客资仅限被指定员工拒绝领取", 403)
+    elif not (
+        principal.has_any_role("FRANCHISE_OWNER")
+        and principal.can("assignment.own.claim")
+    ):
+        raise AppError("FORBIDDEN", "仅加盟商负责人可拒绝历史未指定员工的客资", 403)
     assignment, lead = refuse_pending_assignment(
         db,
         assignment_id=assignment_id,

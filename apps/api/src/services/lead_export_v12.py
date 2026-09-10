@@ -110,7 +110,7 @@ def _upper(value: Any) -> str | None:
 
 def _conditions(filters: dict[str, Any], current_assignment) -> list[Any]:
     values = normalized_lead_report_filters(filters)
-    conditions = [Lead.source_kind.is_not(None)]
+    conditions = [Lead.source_kind.is_not(None), Lead.deleted_at.is_(None)]
     if values["created_from"]:
         conditions.append(Lead.created_at >= values["created_from"])
     if values["created_to"]:

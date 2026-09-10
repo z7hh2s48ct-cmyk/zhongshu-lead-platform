@@ -12,6 +12,7 @@ from ..core.errors import AppError
 from ..core.models import Lead, LeadDuplicateRelation, LeadImportIssue, Region, SyncBatch
 from ..core.security import decrypt_text, encrypt_text, hash_phone, mask_phone, normalize_phone
 from ..integrations.feishu import FeishuRecord
+from .phone_uniqueness import require_unique_lead_phone
 
 
 def _field(fields: dict[str, Any], mapping: dict[str, str], key: str) -> Any:
@@ -130,6 +131,8 @@ def import_records(
             budget_max = _as_int(_field(fields, field_mapping, "budget_max"))
             cost = _as_int(_field(fields, field_mapping, "acquisition_cost")) or 0
 
+            if normalized_phone:
+                normalized_phone = require_unique_lead_phone(db, phone=normalized_phone)
             placeholder_phone = normalized_phone or f"missing-{record.record_id}"
             lead = Lead(
                 source_type="FEISHU",
@@ -220,7 +223,11 @@ def update_staging_lead(db: Session, lead: Lead, changes: dict[str, Any]) -> Lea
         if field in allowed and value is not None:
             setattr(lead, field, value)
     if changes.get("phone"):
-        normalized = normalize_phone(str(changes["phone"]))
+        normalized = require_unique_lead_phone(
+            db,
+            phone=str(changes["phone"]),
+            exclude_lead_id=lead.id,
+        )
         if len(normalized) != 11:
             raise AppError("LEAD_PHONE_INVALID", "手机号格式错误", 422)
         lead.phone_encrypted = encrypt_text(normalized)

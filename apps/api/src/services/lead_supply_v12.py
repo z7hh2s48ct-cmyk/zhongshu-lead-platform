@@ -38,6 +38,8 @@ from ..core.v12_enums import (
     RewardStatus,
 )
 from .company_profile_v12 import require_lead_capability
+from .phone_uniqueness import require_unique_lead_phone
+from .lead_deletion_v12 import require_lead_not_deleted
 from .china_regions import region_by_code
 from .dedup_v12 import DedupResult, apply_submission_decision, evaluate_phone
 from .dispatch_v12 import (
@@ -168,19 +170,23 @@ def update_draft(
     _assert_draft(lead)
     supplier = lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
     _assert_owner(lead, principal, supplier=supplier)
-    _apply_editable_values(lead, values)
+    _apply_editable_values(db, lead, values)
     db.flush()
     return lead
 
 
-def _apply_editable_values(lead: Lead, values: dict[str, Any]) -> None:
+def _apply_editable_values(db: Session, lead: Lead, values: dict[str, Any]) -> None:
     for field, raw_value in values.items():
         if field not in EDITABLE_FIELDS:
             continue
         if field == "phone":
             if raw_value is None:
                 continue
-            normalized = normalize_phone(str(raw_value))
+            normalized = require_unique_lead_phone(
+                db,
+                phone=str(raw_value),
+                exclude_lead_id=lead.id,
+            )
             if normalized and (len(normalized) != 11 or not normalized.startswith("1")):
                 raise AppError("LEAD_PHONE_INVALID", "手机号格式错误", 422)
             lead.phone_encrypted = encrypt_text(normalized)
@@ -661,7 +667,7 @@ def correct_platform_lead(
     before_phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
     before_region_code = lead.region_code
     original_status = lead.status
-    _apply_editable_values(lead, values)
+    _apply_editable_values(db, lead, values)
     after_facts = _editable_fact_snapshot(lead)
     changed_fields = tuple(
         sorted(
@@ -1503,10 +1509,7 @@ def review_supplier_lead(
 
 
 def get_lead_or_404(db: Session, lead_id: str) -> Lead:
-    lead = db.get(Lead, lead_id)
-    if lead is None:
-        raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
-    return lead
+    return require_lead_not_deleted(db.get(Lead, lead_id))
 
 
 def list_supplier_leads(
@@ -1521,10 +1524,12 @@ def list_supplier_leads(
     stmt = select(Lead).where(
         Lead.source_kind == LeadSourceKind.SUPPLIER_H5.value,
         Lead.supplier_company_id == company_id,
+        Lead.deleted_at.is_(None),
     )
     count_stmt = select(func.count(Lead.id)).where(
         Lead.source_kind == LeadSourceKind.SUPPLIER_H5.value,
         Lead.supplier_company_id == company_id,
+        Lead.deleted_at.is_(None),
     )
     if submitter_user_id:
         stmt = stmt.where(Lead.submitter_user_id == submitter_user_id)

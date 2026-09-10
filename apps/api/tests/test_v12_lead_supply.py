@@ -232,7 +232,7 @@ def test_clear_dedup_result_cannot_be_artificially_overridden(db) -> None:
         )
 
 
-def test_recent_duplicate_is_blocked_and_can_be_audited_override(db) -> None:
+def test_recent_duplicate_is_rejected_before_draft_creation(db) -> None:
     db.add(Region(code="420100", name="武汉市", level="CITY", aliases=[], active=True))
     _, user = _seed_identity(db)
     principal = _principal(user.id, None, "lead.manual.manage")
@@ -240,22 +240,14 @@ def test_recent_duplicate_is_blocked_and_can_be_audited_override(db) -> None:
     submit_draft(db, lead=first, principal=principal)
     db.commit()
 
-    second = create_draft(db, principal=principal, source_kind=LeadSourceKind.PLATFORM_MANUAL, values=_valid_values())
-    result = submit_draft(db, lead=second, principal=principal)
-    assert result.decision is DuplicateDecision.HARD_DUPLICATE
-    assert second.status == LeadV12Status.DUPLICATE.value
-
-    item = override_duplicate(
-        db,
-        lead=second,
-        event_id=result.event_id,
-        reason="业务复核确认系不同家庭成员的独立需求",
-        approved_by=user.id,
-    )
-    db.commit()
-    assert item.dedup_event_id == result.event_id
-    assert second.status == LeadV12Status.READY_DISPATCH.value
-    assert second.duplicate_status == DuplicateDecision.OVERRIDDEN.value
+    with pytest.raises(AppError) as exc_info:
+        create_draft(
+            db,
+            principal=principal,
+            source_kind=LeadSourceKind.PLATFORM_MANUAL,
+            values=_valid_values(),
+        )
+    assert exc_info.value.code == "LEAD_PHONE_DUPLICATE"
 
 
 def test_old_dedup_event_cannot_override_a_new_phone_dedup_result(db) -> None:
@@ -275,10 +267,14 @@ def test_old_dedup_event_cannot_override_a_new_phone_dedup_result(db) -> None:
         db,
         principal=principal,
         source_kind=LeadSourceKind.PLATFORM_MANUAL,
-        values=_valid_values("13800138123"),
+        values=_valid_values("13800138124"),
     )
     old_result = submit_draft(db, lead=lead, principal=principal)
-    assert old_result.decision is DuplicateDecision.HARD_DUPLICATE
+    old_event = db.get(LeadDedupEvent, old_result.event_id)
+    assert old_event is not None
+    old_event.decision = DuplicateDecision.HARD_DUPLICATE.value
+    lead.status = LeadV12Status.DUPLICATE.value
+    lead.duplicate_status = DuplicateDecision.HARD_DUPLICATE.value
     old_event_id = old_result.event_id
 
     new_fingerprint = fingerprint_phone("13900139123")

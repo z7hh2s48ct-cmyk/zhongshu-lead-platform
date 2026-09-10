@@ -312,6 +312,11 @@ class Lead(Base, TimestampMixin):
     current_follow_status: Mapped[str | None] = mapped_column(String(32), index=True)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    deleted_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", name="fk_leads_deleted_by_user", ondelete="SET NULL"), index=True
+    )
+    delete_reason: Mapped[str | None] = mapped_column(Text)
     snapshot_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     raw_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 

@@ -29,8 +29,16 @@ def qualified_leads(
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
-    stmt = select(Lead).where(Lead.status == LeadStatus.QUALIFIED, Lead.current_assignment_id.is_(None))
-    count_stmt = select(func.count(Lead.id)).where(Lead.status == LeadStatus.QUALIFIED, Lead.current_assignment_id.is_(None))
+    stmt = select(Lead).where(
+        Lead.status == LeadStatus.QUALIFIED,
+        Lead.current_assignment_id.is_(None),
+        Lead.deleted_at.is_(None),
+    )
+    count_stmt = select(func.count(Lead.id)).where(
+        Lead.status == LeadStatus.QUALIFIED,
+        Lead.current_assignment_id.is_(None),
+        Lead.deleted_at.is_(None),
+    )
     if region_code:
         stmt = stmt.where(Lead.region_code == region_code)
         count_stmt = count_stmt.where(Lead.region_code == region_code)
@@ -45,7 +53,7 @@ def qualified_leads(
 @router.get("/leads/{lead_id}/candidates")
 def candidates(lead_id: str, request: Request, principal=Depends(require_permissions("lead.dispatch")), db: Session = Depends(get_db)):
     lead = db.get(Lead, lead_id)
-    if not lead:
+    if not lead or lead.deleted_at is not None:
         raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     include_balance = principal.can("points.read") or principal.can("*")
     return ok(request, candidate_companies(db, lead, include_balance=include_balance))

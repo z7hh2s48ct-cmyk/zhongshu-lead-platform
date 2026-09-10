@@ -56,16 +56,12 @@ def test_franchise_business_report_uses_backend_statistics_contract() -> None:
     assert "消耗积分" in source
 
 
-def test_employee_deep_links_canonicalize_to_the_allowed_followup_page() -> None:
+def test_employee_deep_links_keep_the_direct_assignment_page() -> None:
     source = Path("apps/h5/public/v12-workbench.js").read_text(encoding="utf-8")
 
-    for marker in (
-        "if(!isFranchiseOwner()&&S.view==='assignments')",
-        "S.view='followups';",
-        "u.searchParams.set('view','followups');",
-        "history.replaceState(null,'',u);",
-    ):
-        assert marker in source
+    assert "FRANCHISE_EMPLOYEE:[['home','home','首页'],['assignments','hand-claim','接收']" in source
+    assert "if(!isFranchiseOwner()&&S.view==='assignments')" not in source
+    assert "if(view==='assignments')return canReadAssignments();" in source
 
 
 def test_franchise_owner_home_prioritizes_company_todos_and_internal_collaboration() -> None:

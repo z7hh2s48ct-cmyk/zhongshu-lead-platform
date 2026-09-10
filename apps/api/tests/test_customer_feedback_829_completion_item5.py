@@ -388,7 +388,7 @@ def test_dispatched_supplier_lead_requires_reason_and_rechecks_current_receiver(
     assert released_data["assignment"]["status"] == AssignmentStatus.RELEASED.value
 
 
-def test_unassigned_processing_lead_phone_change_rechecks_dedup_and_blocks_safely(
+def test_unassigned_processing_lead_duplicate_phone_change_is_rejected(
     api_client,
 ) -> None:
     client, factory = api_client
@@ -433,25 +433,25 @@ def test_unassigned_processing_lead_phone_change_rechecks_dedup_and_blocks_safel
         json={"phone": duplicate_phone, "expected_snapshot_version": 2},
     )
 
-    assert corrected.status_code == 200, corrected.text
-    data = corrected.json()["data"]
-    assert data["status"] == LeadV12Status.PENDING_TELESALES_VERIFY.value
-    assert data["pending_reason"] == "CORRECTION_REVIEW_REQUIRED"
-    assert any(issue.startswith("DEDUP_") for issue in data["correction_issues"])
+    assert corrected.status_code == 409, corrected.text
+    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
 
     with factory() as db:
         old_task = db.get(VerificationTask, submitted_task_id)
-        fresh_task = db.scalar(
+        target = db.get(Lead, target_id)
+        pending_task = db.scalar(
             select(VerificationTask)
             .where(
                 VerificationTask.lead_id == target_id,
                 VerificationTask.status == "PENDING",
             )
-            .order_by(VerificationTask.created_at.desc())
         )
-        assert old_task is not None and fresh_task is not None
-        assert old_task.status == "RELEASED"
-        assert fresh_task.id != old_task.id
+        assert old_task is not None and target is not None
+        assert old_task.status == "SUBMITTED"
+        assert pending_task is None
+        assert target.status == LeadV12Status.PENDING_OPERATION_DISPOSITION.value
+        assert target.phone_hash == hash_phone("13900139704")
+        assert target.snapshot_version == 2
         event = db.scalar(
             select(LeadDedupEvent)
             .where(
@@ -460,25 +460,7 @@ def test_unassigned_processing_lead_phone_change_rechecks_dedup_and_blocks_safel
             )
             .order_by(LeadDedupEvent.created_at.desc())
         )
-        assert event is not None
-        event_id = event.id
-
-    overridden = client.post(
-        f"/api/v1/v1.2/admin/leads/{target_id}/dedup-override",
-        json={"event_id": event_id, "reason": "已核对为不同客户，恢复原处置流程"},
-    )
-    assert overridden.status_code == 200, overridden.text
-    restored = overridden.json()["data"]["lead"]
-    assert restored["status"] == LeadV12Status.PENDING_TELESALES_VERIFY.value
-    assert restored["pending_reason"] == "CORRECTION_REVERIFY_REQUIRED"
-    assert restored["correction_issues"] == []
-
-    stale_disposition = client.post(
-        f"/api/v1/v1.2/admin/leads/{target_id}/pre-dispatch-disposition",
-        json={"decision": "APPROVE_POOL", "note": "旧核验结论不应继续生效"},
-    )
-    assert stale_disposition.status_code == 409, stale_disposition.text
-    assert stale_disposition.json()["code"] == "PRE_DISPATCH_LEAD_STATE_INVALID"
+        assert event is None
 
 
 def test_region_correction_restarts_in_progress_pre_dispatch_verification(
@@ -712,7 +694,7 @@ def test_releasing_current_receiver_without_location_enters_telesales_queue(
         assert task is not None
 
 
-def test_dedup_override_without_location_still_enters_telesales_queue(
+def test_duplicate_phone_correction_without_location_is_rejected_before_queueing(
     api_client,
 ) -> None:
     client, factory = api_client
@@ -745,34 +727,21 @@ def test_dedup_override_without_location_still_enters_telesales_queue(
         f"/api/v1/v1.2/platform/leads/{target_id}/correction",
         json={"phone": duplicate_phone, "expected_snapshot_version": 1},
     )
-    assert corrected.status_code == 200, corrected.text
-    assert corrected.json()["data"]["pending_reason"] == "CORRECTION_REVIEW_REQUIRED"
+    assert corrected.status_code == 409, corrected.text
+    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
 
     with factory() as db:
-        event = db.scalar(
-            select(LeadDedupEvent)
-            .where(LeadDedupEvent.lead_id == target_id)
-            .order_by(LeadDedupEvent.created_at.desc(), LeadDedupEvent.id.desc())
-        )
-        assert event is not None
-        event_id = event.id
-
-    overridden = client.post(
-        f"/api/v1/v1.2/admin/leads/{target_id}/dedup-override",
-        json={"event_id": event_id, "reason": "确认为不同客户，恢复地区核验"},
-    )
-    assert overridden.status_code == 200, overridden.text
-    lead = overridden.json()["data"]["lead"]
-    assert lead["status"] == LeadV12Status.PENDING_TELESALES_VERIFY.value
-    assert lead["pending_reason"] == "LOCATION_REQUIRES_TELESALES_VERIFY"
-    with factory() as db:
+        lead = db.get(Lead, target_id)
         task = db.scalar(
             select(VerificationTask).where(
                 VerificationTask.lead_id == target_id,
                 VerificationTask.status == "PENDING",
             )
         )
-        assert task is not None
+        assert lead is not None
+        assert lead.status == LeadV12Status.READY_DISPATCH.value
+        assert lead.phone_hash == hash_phone("13900139708")
+        assert task is None
 
 
 @pytest.mark.parametrize(
@@ -1346,7 +1315,7 @@ def test_rejected_supplier_revision_cannot_clear_unresolved_correction(api_clien
         assert lead.pending_reason == "CORRECTION_REVIEW_REQUIRED"
 
 
-def test_post_dispatch_recheck_override_preserves_historical_terminal_state(
+def test_historical_terminal_lead_rejects_duplicate_phone_correction(
     api_client,
 ) -> None:
     client, factory = api_client
@@ -1397,38 +1366,17 @@ def test_post_dispatch_recheck_override_preserves_historical_terminal_state(
             "expected_snapshot_version": 3,
         },
     )
-    assert corrected.status_code == 200, corrected.text
-    assert corrected.json()["data"]["status"] == LeadV12Status.CLOSED.value
-
-    rechecked = client.post(
-        f"/api/v1/v1.2/platform/leads/{lead_id}/correction/recheck",
-        json={
-            "reason": "再次核对更正后的重复结果",
-            "expected_snapshot_version": 4,
-        },
-    )
-    assert rechecked.status_code == 200, rechecked.text
+    assert corrected.status_code == 409, corrected.text
+    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
 
     with factory() as db:
-        event = db.scalar(
-            select(LeadDedupEvent)
-            .where(LeadDedupEvent.lead_id == lead_id)
-            .order_by(LeadDedupEvent.created_at.desc(), LeadDedupEvent.id.desc())
-        )
-        assert event is not None
-        assert event.checkpoint == "POST_DISPATCH_CORRECTION_RECHECK"
-        event_id = event.id
-
-    overridden = client.post(
-        f"/api/v1/v1.2/admin/leads/{lead_id}/dedup-override",
-        json={"event_id": event_id, "reason": "确认是不同客户，解除重复阻断"},
-    )
-    assert overridden.status_code == 200, overridden.text
-    lead = overridden.json()["data"]["lead"]
-    assert lead["status"] == LeadV12Status.CLOSED.value
-    assert lead["review_status"] == "REJECTED"
-    assert lead["pending_reason"] == "HISTORICAL_CLOSED"
-    assert lead["correction_issues"] == []
+        lead = db.get(Lead, lead_id)
+        assert lead is not None
+        assert lead.status == LeadV12Status.CLOSED.value
+        assert lead.review_status == "REJECTED"
+        assert lead.pending_reason == "HISTORICAL_CLOSED"
+        assert lead.phone_hash == hash_phone("13900139727")
+        assert lead.snapshot_version == 3
 
 
 def test_test_company_cleanup_does_not_clear_correction_review_blocker() -> None:

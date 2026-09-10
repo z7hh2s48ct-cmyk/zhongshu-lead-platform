@@ -414,6 +414,7 @@ def test_item_4_all_current_city_districts_accept_city_only_lead_and_claim(
         company_id = company.id
 
     payload = _item_7_quick_dispatch_payload(
+        factory,
         company_id,
         phone="13900139825",
         key="feedback-item-4-city-covered",
@@ -425,7 +426,7 @@ def test_item_4_all_current_city_districts_accept_city_only_lead_and_claim(
         json={
             key: value
             for key, value in payload.items()
-            if key not in {"company_id", "idempotency_key", "note"}
+            if key not in {"company_id", "employee_user_id", "idempotency_key", "note"}
         },
     )
     assert preview.status_code == 200, preview.text
@@ -444,7 +445,7 @@ def test_item_4_all_current_city_districts_accept_city_only_lead_and_claim(
     assert dispatched.status_code == 200, dispatched.text
     assignment_id = dispatched.json()["data"]["assignment"]["id"]
     client.post("/api/v1/auth/logout")
-    _login(client, "franchise_demo", "Franchise123!")
+    _login(client, "franchise_employee_demo", "Employee123!")
     claimed = client.post(f"/api/v1/v1.2/assignments/{assignment_id}/claim")
     assert claimed.status_code == 200, claimed.text
 
@@ -475,6 +476,7 @@ def test_item_4_missing_one_current_city_district_does_not_expand_scope(
         company_id = company.id
 
     payload = _item_7_quick_dispatch_payload(
+        factory,
         company_id,
         phone="13900139826",
         key="feedback-item-4-city-incomplete",
@@ -486,7 +488,7 @@ def test_item_4_missing_one_current_city_district_does_not_expand_scope(
         json={
             key: value
             for key, value in payload.items()
-            if key not in {"company_id", "idempotency_key", "note"}
+            if key not in {"company_id", "employee_user_id", "idempotency_key", "note"}
         },
     )
     assert preview.status_code == 200, preview.text
@@ -760,7 +762,7 @@ def test_item_5_dispatched_correction_requires_reason_version_and_rechecks_recei
     assert claimed.status_code == 200, claimed.text
 
 
-def test_item_5_post_dispatch_dedup_override_preserves_active_assignment(api_client) -> None:
+def test_item_5_post_dispatch_duplicate_phone_correction_is_rejected(api_client) -> None:
     client, factory = api_client
     now = datetime.now(timezone.utc)
     duplicate_phone = "13900139816"
@@ -817,64 +819,23 @@ def test_item_5_post_dispatch_dedup_override_preserves_active_assignment(api_cli
             "expected_snapshot_version": 3,
         },
     )
-    assert corrected.status_code == 200, corrected.text
-    assert any(
-        issue.startswith("DEDUP_")
-        for issue in corrected.json()["data"]["correction_issues"]
-    )
+    assert corrected.status_code == 409, corrected.text
+    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
     with factory() as db:
-        event = db.scalar(
-            select(LeadDedupEvent)
-            .where(
-                LeadDedupEvent.lead_id == lead_id,
-                LeadDedupEvent.checkpoint == "POST_DISPATCH_CORRECTION",
-            )
-            .order_by(LeadDedupEvent.created_at.desc())
-        )
-        assert event is not None
-        event_id = event.id
+        lead = db.get(Lead, lead_id)
+        assignment = db.get(Assignment, assignment_id)
+        assert lead is not None and assignment is not None
+        assert lead.phone_hash == hash_phone("13977779816")
+        assert lead.snapshot_version == 3
+        assert lead.pending_reason is None
+        assert assignment.status == AssignmentStatus.CLAIMED.value
         correction_audit = db.scalar(
             select(AuditLog).where(
                 AuditLog.action == "V12_PLATFORM_LEAD_FACT_CORRECTION",
                 AuditLog.resource_id == lead_id,
             )
         )
-        assert correction_audit is not None
-        assert (
-            correction_audit.before_json["phone_masked"]
-            == correction_audit.after_json["phone_masked"]
-            == "139****9816"
-        )
-        assert (
-            correction_audit.before_json["contact_fingerprint"]
-            != correction_audit.after_json["contact_fingerprint"]
-        )
-
-    client.post("/api/v1/auth/logout")
-    _login(client, "franchise_demo", "Franchise123!")
-    blocked_replay = client.post(
-        f"/api/v1/v1.2/assignments/{assignment_id}/claim"
-    )
-    assert blocked_replay.status_code == 409, blocked_replay.text
-    assert blocked_replay.json()["code"] == "LEAD_CORRECTION_REVIEW_REQUIRED"
-    client.post("/api/v1/auth/logout")
-    _login(client, "operation", "Operation123!")
-
-    overridden = client.post(
-        f"/api/v1/v1.2/admin/leads/{lead_id}/dedup-override",
-        json={"event_id": event_id, "reason": "已核对为不同客户，允许继续原派发单"},
-    )
-    assert overridden.status_code == 200, overridden.text
-    overridden_lead = overridden.json()["data"]["lead"]
-    assert overridden_lead["status"] == LeadV12Status.CLAIMED.value
-    assert overridden_lead["current_assignment_id"] == assignment_id
-    assert overridden_lead["pending_reason"] is None
-
-    client.post("/api/v1/auth/logout")
-    _login(client, "franchise_demo", "Franchise123!")
-    claimed = client.post(f"/api/v1/v1.2/assignments/{assignment_id}/claim")
-    assert claimed.status_code == 200, claimed.text
-    assert claimed.json()["data"]["idempotent"] is True
+        assert correction_audit is None
 
 
 def test_item_5_receiver_mismatch_releases_unclaimed_assignment_for_redispatch(
@@ -1238,11 +1199,22 @@ def test_item_5_completed_assignment_correction_records_warning_without_reopenin
         db.commit()
 
     _login(client, "operation", "Operation123!")
-    corrected = client.patch(
+    duplicate = client.patch(
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
         json={
             "region_code": "110000",
             "phone": "13900139827",
+            "reason": "成交归档后客户补充了真实项目所在地",
+            "expected_snapshot_version": 8,
+        },
+    )
+    assert duplicate.status_code == 409, duplicate.text
+    assert duplicate.json()["code"] == "LEAD_PHONE_DUPLICATE"
+
+    corrected = client.patch(
+        f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
+        json={
+            "region_code": "110000",
             "reason": "成交归档后客户补充了真实项目所在地",
             "expected_snapshot_version": 8,
         },
@@ -1253,36 +1225,11 @@ def test_item_5_completed_assignment_correction_records_warning_without_reopenin
     assert data["current_assignment_id"] == assignment_id
     assert data["pending_reason"] is None
     assert "SERVICE_REGION_MISMATCH" in data["correction_issues"]
-    assert any(issue.startswith("DEDUP_") for issue in data["correction_issues"])
 
     with factory() as db:
         assignment = db.get(Assignment, assignment_id)
-        event = db.scalar(
-            select(LeadDedupEvent)
-            .where(
-                LeadDedupEvent.lead_id == lead_id,
-                LeadDedupEvent.checkpoint == "POST_DISPATCH_CORRECTION",
-            )
-            .order_by(LeadDedupEvent.created_at.desc())
-        )
         assert assignment is not None
         assert assignment.status == AssignmentStatus.COMPLETED.value
-        assert event is not None
-        event_id = event.id
-
-    overridden = client.post(
-        f"/api/v1/v1.2/admin/leads/{lead_id}/dedup-override",
-        json={
-            "event_id": event_id,
-            "reason": "已核对为不同客户，成交归档归属保持不变",
-        },
-    )
-    assert overridden.status_code == 200, overridden.text
-    overridden_lead = overridden.json()["data"]["lead"]
-    assert overridden_lead["status"] == LeadV12Status.COMPLETED.value
-    assert overridden_lead["current_assignment_id"] == assignment_id
-    assert overridden_lead["pending_reason"] is None
-    assert overridden_lead["correction_issues"] == ["SERVICE_REGION_MISMATCH"]
 
 
 def test_item_5_admin_correction_uses_one_audited_request() -> None:
@@ -1388,7 +1335,12 @@ def test_item_6_admin_list_and_detail_separate_current_receiver_from_history() -
     assert "派发历史" in source
 
 
-def _item_7_quick_dispatch_payload(company_id: str, *, phone: str, key: str) -> dict:
+def _item_7_quick_dispatch_payload(factory, company_id: str, *, phone: str, key: str) -> dict:
+    with factory() as db:
+        employee_id = db.scalar(
+            select(User.id).where(User.username == "franchise_employee_demo")
+        )
+    assert employee_id is not None
     return {
         "customer_name": "快捷派发客户",
         "phone": phone,
@@ -1402,6 +1354,7 @@ def _item_7_quick_dispatch_payload(company_id: str, *, phone: str, key: str) -> 
         "need_summary": "客户希望尽快联系",
         "consent_confirmed": True,
         "company_id": company_id,
+        "employee_user_id": employee_id,
         "idempotency_key": key,
         "note": "创建后直接派发",
     }
@@ -1450,6 +1403,7 @@ def test_item_7_quick_dispatch_is_atomic_and_idempotent(api_client) -> None:
 
     _login(client, "operation", "Operation123!")
     payload = _item_7_quick_dispatch_payload(
+        factory,
         company_id,
         phone="13900139808",
         key="feedback-item-7-quick-dispatch",
@@ -1504,6 +1458,7 @@ def test_item_7_quick_dispatch_recovers_after_commit_conflict(
         company_id = company.id
     _login(client, "operation", "Operation123!")
     payload = _item_7_quick_dispatch_payload(
+        factory,
         company_id,
         phone="13900139818",
         key="feedback-item-7-commit-conflict",
@@ -1554,6 +1509,7 @@ def test_item_7_quick_dispatch_rolls_back_when_receiver_is_ineligible(api_client
     response = client.post(
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=_item_7_quick_dispatch_payload(
+            factory,
             company_id,
             phone=phone,
             key="feedback-item-7-rollback",
@@ -1577,13 +1533,18 @@ def test_item_7_quick_dispatch_candidate_preview_has_no_persistent_side_effect(a
 
     _login(client, "operation", "Operation123!")
     payload = _item_7_quick_dispatch_payload(
+        factory,
         company_id,
         phone=phone,
         key="feedback-item-7-preview",
     )
     preview = client.post(
         "/api/v1/v1.2/platform/leads/quick-dispatch/candidates",
-        json={key: value for key, value in payload.items() if key not in {"company_id", "idempotency_key", "note"}},
+        json={
+            key: value
+            for key, value in payload.items()
+            if key not in {"company_id", "employee_user_id", "idempotency_key", "note"}
+        },
     )
     assert preview.status_code == 200, preview.text
     candidates = preview.json()["data"]["candidates"]

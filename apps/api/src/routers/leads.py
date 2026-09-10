@@ -36,7 +36,7 @@ def _ensure_feishu_mock_allowed() -> None:
 def _legacy_mutation_lead_or_raise(db: Session, lead_id: str) -> Lead:
     lead = db.scalar(
         select(Lead)
-        .where(Lead.id == lead_id)
+        .where(Lead.id == lead_id, Lead.deleted_at.is_(None))
         .with_for_update()
         .execution_options(populate_existing=True)
     )
@@ -115,8 +115,11 @@ def staging_list(
     page_size: int = Query(default=20, ge=1, le=200),
 ):
     statuses = [LeadStatus.IMPORTED, LeadStatus.IMPORT_ERROR, LeadStatus.DUPLICATE_REVIEW]
-    stmt = select(Lead).where(Lead.status.in_(statuses))
-    count_stmt = select(func.count(Lead.id)).where(Lead.status.in_(statuses))
+    stmt = select(Lead).where(Lead.status.in_(statuses), Lead.deleted_at.is_(None))
+    count_stmt = select(func.count(Lead.id)).where(
+        Lead.status.in_(statuses),
+        Lead.deleted_at.is_(None),
+    )
     if status:
         stmt = stmt.where(Lead.status == status)
         count_stmt = count_stmt.where(Lead.status == status)
@@ -147,7 +150,7 @@ def staging_cleanup_preview(
 @router.get("/{lead_id}")
 def get_lead(lead_id: str, request: Request, principal: CurrentPrincipal, db: Session = Depends(get_db)):
     lead = db.get(Lead, lead_id)
-    if not lead:
+    if not lead or lead.deleted_at is not None:
         raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     reveal_phone: bool | None = None
     if principal.has_any_role("FRANCHISE_OWNER", "FRANCHISE_EMPLOYEE"):
@@ -224,5 +227,8 @@ def decide_duplicate(
 
 @router.get("/{lead_id}/issues")
 def lead_issues(lead_id: str, request: Request, principal=Depends(require_permissions("lead.read")), db: Session = Depends(get_db)):
+    lead = db.get(Lead, lead_id)
+    if lead is None or lead.deleted_at is not None:
+        raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     items = db.scalars(select(LeadImportIssue).where(LeadImportIssue.lead_id == lead_id).order_by(LeadImportIssue.created_at.desc())).all()
     return ok(request, [{"id": x.id, "type": x.issue_type, "field": x.field_name, "message": x.message, "resolved_at": x.resolved_at.isoformat() if x.resolved_at else None} for x in items])

@@ -26,6 +26,7 @@ from apps.api.src.core.models import (
     LeadExportTask,
     PointsAccount,
     PointsLedger,
+    Role,
     User,
 )
 from apps.api.src.core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12
@@ -153,6 +154,26 @@ def test_same_quick_dispatch_key_is_serialized_across_database_sessions(
             )
             db.add_all([company, operation])
             db.flush()
+            owner_role = db.scalar(select(Role).where(Role.code == "FRANCHISE_OWNER"))
+            employee_role = db.scalar(select(Role).where(Role.code == "FRANCHISE_EMPLOYEE"))
+            assert owner_role is not None and employee_role is not None
+            owner = User(
+                username=f"qdpg-owner-{suffix}",
+                display_name="快捷派发负责人",
+                status="ACTIVE",
+                company_id=company.id,
+                roles=[owner_role],
+            )
+            employee = User(
+                username=f"qdpg-employee-{suffix}",
+                display_name="快捷派发员工",
+                status="ACTIVE",
+                company_id=company.id,
+                roles=[employee_role],
+            )
+            db.add_all([owner, employee])
+            db.flush()
+            company.primary_user_id = owner.id
             db.add_all(
                 [
                     CompanyLeadCapability(
@@ -174,6 +195,7 @@ def test_same_quick_dispatch_key_is_serialized_across_database_sessions(
             db.commit()
             company_id = company.id
             operation_id = operation.id
+            employee_user_id = employee.id
 
         body = LeadQuickDispatchBody(
             customer_name="快捷派发并发客户",
@@ -187,6 +209,7 @@ def test_same_quick_dispatch_key_is_serialized_across_database_sessions(
             source_detail="并发回归测试",
             consent_confirmed=True,
             company_id=company_id,
+            employee_user_id=employee_user_id,
             idempotency_key=idempotency_key,
             note="同一幂等键并发快捷派发",
         )

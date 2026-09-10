@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..core.auth import Principal
 from ..core.enums import AssignmentStatus
 from ..core.errors import AppError
-from ..core.models import Assignment, AssignmentEvent, Role, User
+from ..core.models import Assignment, AssignmentEvent, Company, Role, User
 
 
 _ACTIVE_INTERNAL_ASSIGNMENT_STATUSES = {
@@ -18,12 +18,23 @@ _ACTIVE_INTERNAL_ASSIGNMENT_STATUSES = {
     AssignmentStatus.RETURN_PENDING.value,
 }
 
+_EMPLOYEE_BLOCKING_ASSIGNMENT_STATUSES = {
+    AssignmentStatus.PENDING_CLAIM.value,
+    *_ACTIVE_INTERNAL_ASSIGNMENT_STATUSES,
+}
+
 
 @dataclass(frozen=True)
 class InternalAssignmentChange:
     assignment: Assignment
     previous_employee_user_id: str | None
     changed: bool
+
+
+@dataclass(frozen=True)
+class DirectDispatchRecipients:
+    employee: User
+    owner: User
 
 
 def require_company_assignment_access(principal: Principal, assignment: Assignment) -> None:
@@ -91,6 +102,56 @@ def _active_employee_or_raise(db: Session, *, company_id: str, user_id: str) -> 
     return employee
 
 
+def resolve_direct_dispatch_recipients(
+    db: Session,
+    *,
+    company_id: str,
+    employee_user_id: str,
+) -> DirectDispatchRecipients:
+    employee = _active_employee_or_raise(
+        db,
+        company_id=company_id,
+        user_id=employee_user_id,
+    )
+    company = db.get(Company, company_id)
+    if company is None:
+        raise AppError("COMPANY_NOT_FOUND", "目标公司不存在", 404)
+
+    owner: User | None = None
+    if company.primary_user_id:
+        candidate = db.scalar(
+            select(User)
+            .join(User.roles)
+            .where(
+                User.id == company.primary_user_id,
+                User.company_id == company_id,
+                User.status == "ACTIVE",
+                Role.code == "FRANCHISE_OWNER",
+            )
+        )
+        owner = candidate
+    if owner is None:
+        owners = db.scalars(
+            select(User)
+            .join(User.roles)
+            .where(
+                User.company_id == company_id,
+                User.status == "ACTIVE",
+                Role.code == "FRANCHISE_OWNER",
+            )
+            .order_by(User.id.asc())
+        ).all()
+        if len(owners) == 1:
+            owner = owners[0]
+    if owner is None:
+        raise AppError(
+            "COMPANY_OWNER_RECIPIENT_REQUIRED",
+            "目标加盟商缺少唯一有效负责人，暂不能派发",
+            422,
+        )
+    return DirectDispatchRecipients(employee=employee, owner=owner)
+
+
 def assign_internal_employee(
     db: Session,
     *,
@@ -137,7 +198,7 @@ def has_active_internal_assignments(db: Session, *, company_id: str, user_id: st
         .where(
             Assignment.company_id == company_id,
             Assignment.internal_assignee_user_id == user_id,
-            Assignment.status.in_(_ACTIVE_INTERNAL_ASSIGNMENT_STATUSES),
+            Assignment.status.in_(_EMPLOYEE_BLOCKING_ASSIGNMENT_STATUSES),
         )
         .limit(1)
     ) is not None

@@ -26,6 +26,7 @@ from ..schemas.v12_lead_supply import (
     PlatformLeadPreDispatchBody,
     LeadCorrectionBody,
     LeadCorrectionRedispatchBody,
+    LeadDeleteBody,
     LeadCorrectionRecheckBody,
     LeadDraftUpdateBody,
     LeadQuickDispatchBody,
@@ -34,6 +35,7 @@ from ..schemas.v12_lead_supply import (
     SupplierReviewBody,
     TestLeadDeleteBody,
 )
+from ..services.lead_deletion_v12 import delete_own_lead, preview_lead_deletion, require_lead_not_deleted
 from ..services.audit import write_audit
 from ..services.company_profile_v12 import (
     list_capabilities,
@@ -162,6 +164,7 @@ def _quick_assignment_dict(assignment) -> dict:
         "status": assignment.status,
         "points_price": assignment.points_price,
         "assigned_by_user_id": assignment.assigned_by,
+        "internal_assignee_user_id": assignment.internal_assignee_user_id,
         "assigned_at": assignment.assigned_at.isoformat(),
     }
 
@@ -272,8 +275,7 @@ def _platform_lead_or_raise(db: Session, lead_id: str, *, lock: bool = False) ->
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if lead is None:
-            raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
+        require_lead_not_deleted(lead)
     else:
         lead = get_lead_or_404(db, lead_id)
     if lead.source_kind != LeadSourceKind.PLATFORM_MANUAL.value:
@@ -507,6 +509,12 @@ def quick_dispatch_platform_lead(
     principal=Depends(require_permissions("lead.manual.manage", "lead.dispatch")),
     db: Session = Depends(get_db),
 ):
+    if not body.employee_user_id:
+        raise AppError(
+            "DISPATCH_EMPLOYEE_REQUIRED",
+            "快捷派发必须选择具体加盟商员工",
+            422,
+        )
     request_hash = _quick_dispatch_hash(body)
     try:
         with manual_dispatch_idempotency_guard(body.idempotency_key):
@@ -529,7 +537,7 @@ def quick_dispatch_platform_lead(
                 )
 
             lead_values = body.model_dump(
-                exclude={"company_id", "idempotency_key", "note"},
+                exclude={"company_id", "employee_user_id", "idempotency_key", "note"},
                 exclude_none=True,
             )
             lead = create_draft(
@@ -590,6 +598,7 @@ def quick_dispatch_platform_lead(
                 db,
                 lead_id=lead.id,
                 company_id=body.company_id,
+                employee_user_id=body.employee_user_id,
                 assigned_by=principal.user_id,
                 idempotency_key=body.idempotency_key,
                 note=body.note,
@@ -605,6 +614,7 @@ def quick_dispatch_platform_lead(
                 after={
                     "lead_id": lead.id,
                     "company_id": assignment.company_id,
+                    "employee_user_id": assignment.internal_assignee_user_id,
                     "status": assignment.status,
                     "points_price": assignment.points_price,
                     "manual": True,
@@ -987,8 +997,14 @@ def list_platform_leads(
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
-    stmt = select(Lead).where(Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value)
-    count_stmt = select(func.count(Lead.id)).where(Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value)
+    stmt = select(Lead).where(
+        Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value,
+        Lead.deleted_at.is_(None),
+    )
+    count_stmt = select(func.count(Lead.id)).where(
+        Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value,
+        Lead.deleted_at.is_(None),
+    )
     if status:
         stmt = stmt.where(Lead.status == status)
         count_stmt = count_stmt.where(Lead.status == status)
@@ -997,6 +1013,53 @@ def list_platform_leads(
     return ok(
         request,
         page(lead_supply_list_to_dict(db, list(items), principal), total, page_no, page_size),
+    )
+
+
+@router.get("/operation/leads/{lead_id}/deletion-preview")
+def preview_operation_lead_deletion(
+    lead_id: str,
+    request: Request,
+    principal=Depends(require_permissions("lead.own.delete")),
+    db: Session = Depends(get_db),
+):
+    return ok(request, preview_lead_deletion(db, lead_id=lead_id, principal=principal))
+
+
+@router.delete("/operation/leads/{lead_id}")
+def delete_operation_lead(
+    lead_id: str,
+    body: LeadDeleteBody,
+    request: Request,
+    principal=Depends(require_permissions("lead.own.delete")),
+    db: Session = Depends(get_db),
+):
+    result = delete_own_lead(
+        db,
+        lead_id=lead_id,
+        principal=principal,
+        reason=body.reason,
+    )
+    if not result.idempotent:
+        write_audit(
+            db,
+            principal=principal,
+            action="V12_OPERATION_LEAD_DELETE",
+            resource_type="lead",
+            resource_id=result.lead.id,
+            before={"deleted_at": None},
+            after={
+                "deleted_at": result.lead.deleted_at.isoformat(),
+                "deleted_by": result.lead.deleted_by,
+            },
+            reason=body.reason,
+            request_id=request.state.request_id,
+        )
+        db.commit()
+    return ok(
+        request,
+        {"id": result.lead.id, "deleted": True, "idempotent": result.idempotent},
+        "客资已删除",
     )
 
 

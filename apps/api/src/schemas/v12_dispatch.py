@@ -5,15 +5,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 class ManualDispatchBody(BaseModel):
     company_id: str = Field(min_length=1, max_length=36)
+    employee_user_id: str | None = Field(default=None, min_length=1, max_length=36)
     idempotency_key: str = Field(min_length=8, max_length=128)
     note: str | None = Field(default=None, max_length=1000)
     return_receiver_override: bool = False
     return_receiver_override_reason: str | None = Field(default=None, max_length=1000)
 
-    @field_validator("company_id", "idempotency_key")
+    @field_validator("company_id", "employee_user_id", "idempotency_key")
     @classmethod
-    def strip_required(cls, value: str) -> str:
-        return value.strip()
+    def strip_required(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
 
     @field_validator("note", "return_receiver_override_reason")
     @classmethod

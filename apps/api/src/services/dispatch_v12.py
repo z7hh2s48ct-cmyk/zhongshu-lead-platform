@@ -25,7 +25,9 @@ from ..core.v12_enums import (
     RewardStatus,
 )
 from .company_profile_v12 import REMOVAL_REQUEST_PREFIX, has_lead_capability, require_lead_capability
+from .company_assignment_v12 import resolve_direct_dispatch_recipients
 from .lead_correction_guard import require_correction_review_resolved
+from .lead_deletion_v12 import require_lead_not_deleted
 from .points_service import change_points, resolve_price
 from .reward_rule_v12 import (
     SupplierRewardRule,
@@ -135,9 +137,7 @@ def get_dispatch_lead(db: Session, lead_id: str, *, lock: bool = False) -> Lead:
     if lock:
         stmt = stmt.with_for_update().execution_options(populate_existing=True)
     lead = db.scalar(stmt)
-    if lead is None:
-        raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
-    return lead
+    return require_lead_not_deleted(lead)
 
 
 def _region_matches(db: Session, company_id: str, lead: Lead) -> bool:
@@ -772,6 +772,7 @@ def list_dispatch_pool(
     filters = [
         Lead.status == LeadV12Status.READY_DISPATCH.value,
         Lead.current_assignment_id.is_(None),
+        Lead.deleted_at.is_(None),
     ]
     if region_code:
         filters.append(Lead.region_code == region_code)
@@ -793,6 +794,7 @@ def dispatch_manually_with_outcome(
     *,
     lead_id: str,
     company_id: str,
+    employee_user_id: str | None = None,
     assigned_by: str,
     idempotency_key: str,
     note: str | None = None,
@@ -801,7 +803,11 @@ def dispatch_manually_with_outcome(
 ) -> ManualDispatchOutcome:
     existing = db.scalar(select(Assignment).where(Assignment.idempotency_key == idempotency_key))
     if existing:
-        if existing.lead_id != lead_id or existing.company_id != company_id:
+        if (
+            existing.lead_id != lead_id
+            or existing.company_id != company_id
+            or existing.internal_assignee_user_id != employee_user_id
+        ):
             raise AppError("IDEMPOTENCY_CONFLICT", "幂等键已被其他派发请求使用", 409)
         return ManualDispatchOutcome(assignment=existing, created=False)
 
@@ -811,7 +817,11 @@ def dispatch_manually_with_outcome(
     # the lead lock. Recheck before validating the now-transitioned lead state.
     existing = db.scalar(select(Assignment).where(Assignment.idempotency_key == idempotency_key))
     if existing:
-        if existing.lead_id != lead_id or existing.company_id != company_id:
+        if (
+            existing.lead_id != lead_id
+            or existing.company_id != company_id
+            or existing.internal_assignee_user_id != employee_user_id
+        ):
             raise AppError("IDEMPOTENCY_CONFLICT", "幂等键已被其他派发请求使用", 409)
         return ManualDispatchOutcome(assignment=existing, created=False)
 
@@ -837,6 +847,15 @@ def dispatch_manually_with_outcome(
     company = db.scalar(select(Company).where(Company.id == company_id).with_for_update())
     if company is None:
         raise AppError("COMPANY_NOT_FOUND", "目标公司不存在", 404)
+    recipients = (
+        resolve_direct_dispatch_recipients(
+            db,
+            company_id=company.id,
+            employee_user_id=employee_user_id,
+        )
+        if employee_user_id
+        else None
+    )
     returned_receiver_company_ids = _returned_receiver_company_ids(db, lead.id)
     is_returned_receiver = company.id in returned_receiver_company_ids
     if return_receiver_override and not is_returned_receiver:
@@ -896,6 +915,9 @@ def dispatch_manually_with_outcome(
         },
         assigned_by=assigned_by,
         assigned_at=now,
+        internal_assignee_user_id=recipients.employee.id if recipients else None,
+        internal_assigned_by=assigned_by if recipients else None,
+        internal_assigned_at=now if recipients else None,
         expires_at=now + timedelta(hours=settings.assignment_expire_hours),
         idempotency_key=idempotency_key,
     )
@@ -911,6 +933,8 @@ def dispatch_manually_with_outcome(
             payload={
                 "lead_id": lead.id,
                 "company_id": company.id,
+                "employee_user_id": recipients.employee.id if recipients else None,
+                "owner_user_id": recipients.owner.id if recipients else None,
                 "points_price": candidate.points_price,
                 "price_rule_id": candidate.price_rule_id,
                 "manual": True,
@@ -932,6 +956,7 @@ def dispatch_manually(
     *,
     lead_id: str,
     company_id: str,
+    employee_user_id: str | None = None,
     assigned_by: str,
     idempotency_key: str,
     note: str | None = None,
@@ -940,6 +965,7 @@ def dispatch_manually(
         db,
         lead_id=lead_id,
         company_id=company_id,
+        employee_user_id=employee_user_id,
         assigned_by=assigned_by,
         idempotency_key=idempotency_key,
         note=note,
@@ -1014,6 +1040,11 @@ def claim_assignment(
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
     if assignment.company_id != company_id:
         raise AppError("ASSIGNMENT_FORBIDDEN", "无权领取其他公司的派发单", 403)
+    if (
+        assignment.internal_assignee_user_id
+        and assignment.internal_assignee_user_id != claimed_by
+    ):
+        raise AppError("ASSIGNMENT_EMPLOYEE_FORBIDDEN", "该客资仅限被指定员工领取", 403)
 
     lead = get_dispatch_lead(db, assignment.lead_id, lock=True)
     require_correction_review_resolved(lead)
@@ -1151,6 +1182,11 @@ def refuse_pending_assignment(
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
     if assignment.company_id != company_id:
         raise AppError("ASSIGNMENT_FORBIDDEN", "无权拒绝其他公司的派发单", 403)
+    if (
+        assignment.internal_assignee_user_id
+        and assignment.internal_assignee_user_id != refused_by
+    ):
+        raise AppError("ASSIGNMENT_EMPLOYEE_FORBIDDEN", "该客资仅限被指定员工拒绝领取", 403)
     if assignment.status != AssignmentStatus.PENDING_CLAIM.value:
         raise AppError(
             "ASSIGNMENT_NOT_REFUSABLE",
@@ -1185,11 +1221,19 @@ def refuse_pending_assignment(
     return assignment, lead
 
 
-def lead_pool_item(lead: Lead) -> dict[str, Any]:
+def lead_pool_item(
+    lead: Lead,
+    *,
+    reveal_phone: bool = False,
+    supplier_company_name: str | None = None,
+    submitter_name: str | None = None,
+) -> dict[str, Any]:
+    phone = decrypt_text(lead.phone_encrypted)
     return {
         "id": lead.id,
         "customer_name": lead.customer_name,
-        "phone_masked": mask_phone(decrypt_text(lead.phone_encrypted)),
+        "phone": phone if reveal_phone else None,
+        "phone_masked": mask_phone(phone),
         "city": lead.city,
         "district": lead.district,
         "region_code": lead.region_code,
@@ -1198,6 +1242,9 @@ def lead_pool_item(lead: Lead) -> dict[str, Any]:
         "need_summary": lead.need_summary,
         "source_kind": lead.source_kind,
         "supplier_company_id": lead.supplier_company_id,
+        "supplier_company_name": supplier_company_name,
+        "submitter_user_id": lead.submitter_user_id,
+        "submitter_name": submitter_name,
         "duplicate_status": lead.duplicate_status,
         "status": lead.status,
         "submitted_at": lead.submitted_at.isoformat() if lead.submitted_at else None,

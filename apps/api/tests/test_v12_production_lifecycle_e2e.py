@@ -240,6 +240,28 @@ def _bind_franchise(
     return {"Authorization": f"Bearer {bound['token']}"}
 
 
+def _create_franchise_employee(
+    client,
+    operation: dict[str, str],
+    company_id: str,
+) -> tuple[str, dict[str, str]]:
+    username = "e2e_receiver_employee"
+    password = "E2E-Employee9!"
+    employee = _data(
+        client.post(
+            f"/api/v1/companies/{company_id}/accounts",
+            headers=operation,
+            json={
+                "username": username,
+                "password": password,
+                "display_name": "E2E 接收员工",
+                "role_code": "FRANCHISE_EMPLOYEE",
+            },
+        )
+    )
+    return employee["id"], _login(client, username, password)
+
+
 def _request_profile(
     client,
     franchise: dict[str, str],
@@ -359,11 +381,12 @@ def _submit_supplier_lead(
 def _dispatch_and_claim(
     client,
     operation: dict[str, str],
-    receiver: dict[str, str],
+    receiver_employee: dict[str, str],
     verified_paths: set[str],
     *,
     lead_id: str,
     receiver_company_id: str,
+    employee_user_id: str,
     suffix: str,
 ) -> tuple[str, str]:
     assignment = _data(
@@ -372,6 +395,7 @@ def _dispatch_and_claim(
             headers=operation,
             json={
                 "company_id": receiver_company_id,
+                "employee_user_id": employee_user_id,
                 "idempotency_key": f"e2e-dispatch-{suffix}",
                 "note": "E2E 人工派发",
             },
@@ -383,6 +407,7 @@ def _dispatch_and_claim(
             headers=operation,
             json={
                 "company_id": receiver_company_id,
+                "employee_user_id": employee_user_id,
                 "idempotency_key": f"e2e-dispatch-{suffix}",
                 "note": "E2E 人工派发重放",
             },
@@ -393,14 +418,14 @@ def _dispatch_and_claim(
     before_claim = _data(
         client.get(
             f"/api/v1/v1.2/assignments/{assignment['id']}",
-            headers=receiver,
+            headers=receiver_employee,
         )
     )
     assert before_claim["phone"] is None
     claimed = _data(
         client.post(
             f"/api/v1/v1.2/assignments/{assignment['id']}/claim",
-            headers=receiver,
+            headers=receiver_employee,
         )
     )
     unlocked_phone = claimed["assignment"]["phone"]
@@ -411,7 +436,7 @@ def _dispatch_and_claim(
     replay_claim = _data(
         client.post(
             f"/api/v1/v1.2/assignments/{assignment['id']}/claim",
-            headers=receiver,
+            headers=receiver_employee,
         )
     )
     assert replay_claim["idempotent"] is True
@@ -561,6 +586,11 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
         openid="e2e-receiver-openid",
         nickname="E2E 接收商负责人",
     )
+    receiver_employee_id, receiver_employee = _create_franchise_employee(
+        client,
+        operation,
+        receiver_company_id,
+    )
     pending = _bind_franchise(
         client,
         admin,
@@ -656,10 +686,11 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     assignment_one, reward_one = _dispatch_and_claim(
         client,
         operation,
-        receiver,
+        receiver_employee,
         verified_paths,
         lead_id=lead_one,
         receiver_company_id=receiver_company_id,
+        employee_user_id=receiver_employee_id,
         suffix="reward",
     )
     cross_company = client.get(
@@ -671,7 +702,7 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     followup = _data(
         client.post(
             f"/api/v1/followups/assignments/{assignment_one}",
-            headers=receiver,
+            headers=receiver_employee,
             json={"status": "CONTACTED", "note": "E2E 已联系客户"},
         )
     )
@@ -679,7 +710,7 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     effective_confirmation = _data(
         client.post(
             f"/api/v1/followups/assignments/{assignment_one}",
-            headers=receiver,
+            headers=receiver_employee,
             json={"status": "DEAL", "note": "E2E 电话确认客资有效"},
         )
     )
@@ -722,15 +753,16 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     assignment_two, reward_two = _dispatch_and_claim(
         client,
         operation,
-        receiver,
+        receiver_employee,
         verified_paths,
         lead_id=lead_two,
         receiver_company_id=receiver_company_id,
+        employee_user_id=receiver_employee_id,
         suffix="return-approved",
     )
     return_approved = _run_return_flow(
         client,
-        receiver,
+        receiver_employee,
         operation,
         telesales,
         telesales_user_id,
@@ -747,15 +779,16 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     assignment_three, reward_three = _dispatch_and_claim(
         client,
         operation,
-        receiver,
+        receiver_employee,
         verified_paths,
         lead_id=lead_three,
         receiver_company_id=receiver_company_id,
+        employee_user_id=receiver_employee_id,
         suffix="return-rejected",
     )
     return_rejected = _run_return_flow(
         client,
-        receiver,
+        receiver_employee,
         operation,
         telesales,
         telesales_user_id,
@@ -765,7 +798,7 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     resumed_confirmation = _data(
         client.post(
             f"/api/v1/followups/assignments/{assignment_three}",
-            headers=receiver,
+            headers=receiver_employee,
             json={"status": "DEAL", "note": "E2E 退回复核可用后电话确认有效"},
         )
     )
@@ -789,10 +822,11 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     assignment_four, _ = _dispatch_and_claim(
         client,
         operation,
-        receiver,
+        receiver_employee,
         verified_paths,
         lead_id=lead_four,
         receiver_company_id=receiver_company_id,
+        employee_user_id=receiver_employee_id,
         suffix="expired-return",
     )
     with factory() as db:
@@ -802,7 +836,7 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
         db.commit()
     expired_return = client.post(
         f"/api/v1/v1.2/returns/assignments/{assignment_four}/draft",
-        headers=receiver,
+        headers=receiver_employee,
         json={
             "reason_code": "EMPTY_NUMBER",
             "description": "E2E 超过三工作日后不得创建申诉",
@@ -872,7 +906,7 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
                 VerificationTask.task_type == "RETURN_VERIFY"
             )
         ) == 2
-        assert db.scalar(select(func.count(User.id))) == 6
+        assert db.scalar(select(func.count(User.id))) == 7
         expected_negative_paths = {
             "cross_company_isolation",
             "points_insufficient",

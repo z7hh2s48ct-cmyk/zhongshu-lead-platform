@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from ..core.auth import require_permissions
@@ -19,6 +19,7 @@ from ..services.internal_user_management import (
     mark_internal_user_as_test,
     reset_internal_password,
     set_internal_user_status,
+    update_internal_display_name,
     update_internal_roles,
 )
 
@@ -49,6 +50,19 @@ class UserCreateBody(BaseModel):
 
 class UserRolesBody(BaseModel):
     role_codes: list[str] = Field(min_length=1, max_length=1)
+
+
+class UserDisplayNameBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = Field(min_length=1, max_length=64)
+
+    @field_validator("display_name")
+    @classmethod
+    def reject_blank_or_padded_name(cls, value: str) -> str:
+        if not value.strip() or value != value.strip():
+            raise ValueError("display_name must be non-empty without surrounding spaces")
+        return value
 
 
 class InternalUserDestructiveBody(BaseModel):
@@ -142,6 +156,34 @@ def update_roles(
                 "roles": sorted(role.code for role in user.roles),
                 "session_version": user.session_version,
             },
+            request_id=request.state.request_id,
+        )
+        db.commit()
+    return ok(request, _serialize_user(user))
+
+
+@router.patch("/{user_id}")
+def update_display_name(
+    user_id: str,
+    body: UserDisplayNameBody,
+    request: Request,
+    principal=Depends(require_permissions("*")),
+    db: Session = Depends(get_db),
+):
+    user, previous_display_name, changed = update_internal_display_name(
+        db,
+        user_id=user_id,
+        display_name=body.display_name,
+    )
+    if changed:
+        write_audit(
+            db,
+            principal=principal,
+            action="USER_DISPLAY_NAME_UPDATE",
+            resource_type="user",
+            resource_id=user.id,
+            before={"display_name": previous_display_name},
+            after={"display_name": user.display_name},
             request_id=request.state.request_id,
         )
         db.commit()

@@ -84,11 +84,12 @@ def test_assignment_detail_query_omits_unused_large_columns() -> None:
     assert "assignments.company_id" in statement
 
 
-def _prepare_dispatch_lead(factory, *, phone: str) -> tuple[str, str]:
+def _prepare_dispatch_lead(factory, *, phone: str) -> tuple[str, str, str]:
     with factory() as db:
         company = db.scalar(select(Company).where(Company.code == "SH-DEMO"))
         operation = db.scalar(select(User).where(User.username == "operation"))
-        assert company is not None and operation is not None
+        employee = db.scalar(select(User).where(User.username == "franchise_employee_demo"))
+        assert company is not None and operation is not None and employee is not None
         if not db.scalar(
             select(CompanyLeadCapability).where(
                 CompanyLeadCapability.company_id == company.id,
@@ -129,12 +130,12 @@ def _prepare_dispatch_lead(factory, *, phone: str) -> tuple[str, str]:
         )
         db.add(lead)
         db.commit()
-        return lead.id, company.id
+        return lead.id, company.id, employee.id
 
 
 def test_candidate_api_hides_exact_points_from_operation(api_client) -> None:
     client, factory = api_client
-    lead_id, company_id = _prepare_dispatch_lead(factory, phone="13900139201")
+    lead_id, company_id, _employee_id = _prepare_dispatch_lead(factory, phone="13900139201")
 
     _login(client, "operation", "Operation123!")
     response = client.get(f"/api/v1/v1.2/dispatch-pool/{lead_id}/candidates")
@@ -162,8 +163,8 @@ def test_candidate_api_hides_exact_points_from_operation(api_client) -> None:
 
 def test_dispatch_pool_marks_only_the_latest_submitted_pre_dispatch_verification(api_client) -> None:
     client, factory = api_client
-    verified_lead_id, _ = _prepare_dispatch_lead(factory, phone="13900139231")
-    plain_lead_id, _ = _prepare_dispatch_lead(factory, phone="13900139232")
+    verified_lead_id, _, _ = _prepare_dispatch_lead(factory, phone="13900139231")
+    plain_lead_id, _, _ = _prepare_dispatch_lead(factory, phone="13900139232")
     now = datetime.now(timezone.utc)
     with factory() as db:
         telesales = db.scalar(select(User).where(User.username == "telesales"))
@@ -215,7 +216,7 @@ def test_dispatch_pool_marks_only_the_latest_submitted_pre_dispatch_verification
 
 def test_returned_receiver_is_excluded_until_operation_records_an_exception(api_client) -> None:
     client, factory = api_client
-    lead_id, company_id = _prepare_dispatch_lead(factory, phone="13900139212")
+    lead_id, company_id, employee_id = _prepare_dispatch_lead(factory, phone="13900139212")
     with factory() as db:
         lead = db.get(Lead, lead_id)
         operation = db.scalar(select(User).where(User.username == "operation"))
@@ -255,6 +256,7 @@ def test_returned_receiver_is_excluded_until_operation_records_an_exception(api_
         f"/api/v1/v1.2/dispatch-pool/{lead_id}/dispatch",
         json={
             "company_id": company_id,
+            "employee_user_id": employee_id,
             "idempotency_key": "returned-receiver-blocked",
         },
     )
@@ -265,6 +267,7 @@ def test_returned_receiver_is_excluded_until_operation_records_an_exception(api_
         f"/api/v1/v1.2/dispatch-pool/{lead_id}/dispatch",
         json={
             "company_id": company_id,
+            "employee_user_id": employee_id,
             "idempotency_key": "returned-receiver-override",
             "return_receiver_override": True,
             "return_receiver_override_reason": "运营复核后确认原公司可继续承接",
@@ -286,10 +289,11 @@ def test_returned_receiver_is_excluded_until_operation_records_an_exception(api_
 
 def test_concurrent_manual_dispatch_replay_has_one_business_side_effect(api_client) -> None:
     client, factory = api_client
-    lead_id, company_id = _prepare_dispatch_lead(factory, phone="13900139203")
+    lead_id, company_id, employee_id = _prepare_dispatch_lead(factory, phone="13900139203")
     _login(client, "operation", "Operation123!")
     payload = {
         "company_id": company_id,
+        "employee_user_id": employee_id,
         "idempotency_key": "concurrent-v12-manual-dispatch",
         "note": "concurrent idempotency regression",
     }
@@ -329,9 +333,10 @@ def test_concurrent_manual_dispatch_replay_has_one_business_side_effect(api_clie
         ) == 1
         assert db.scalar(
             select(func.count(NotificationOutbox.id)).where(
-                NotificationOutbox.event_key == f"v12:assignment:{assignment_id}:dispatched"
+                NotificationOutbox.aggregate_id == assignment_id,
+                NotificationOutbox.event_type == "V12_ASSIGNMENT_DISPATCHED",
             )
-        ) == 1
+        ) == 2
 
 
 def test_unclaimed_released_assignment_does_not_unlock_phone(api_client) -> None:
@@ -371,14 +376,15 @@ def test_unclaimed_released_assignment_does_not_unlock_phone(api_client) -> None
     assert data["phone_masked"] == "139****9202"
 
 
-def test_owner_can_refuse_pending_claim_without_consuming_points(api_client) -> None:
+def test_assigned_employee_can_refuse_pending_claim_without_consuming_points(api_client) -> None:
     client, factory = api_client
-    lead_id, company_id = _prepare_dispatch_lead(factory, phone="13900139221")
+    lead_id, company_id, employee_id = _prepare_dispatch_lead(factory, phone="13900139221")
     _login(client, "operation", "Operation123!")
     dispatched = client.post(
         f"/api/v1/v1.2/dispatch-pool/{lead_id}/dispatch",
         json={
             "company_id": company_id,
+            "employee_user_id": employee_id,
             "idempotency_key": "refuse-pending-claim-dispatch",
         },
     )
@@ -389,15 +395,15 @@ def test_owner_can_refuse_pending_claim_without_consuming_points(api_client) -> 
     with factory() as db:
         before_balance = db.scalar(select(PointsAccount.balance).where(PointsAccount.company_id == company_id))
 
-    _login(client, "franchise_employee_demo", "Employee123!")
-    employee = client.post(
+    _login(client, "franchise_demo", "Franchise123!")
+    owner = client.post(
         f"/api/v1/v1.2/assignments/{assignment_id}/refuse",
-        json={"reason": "负责人外出，员工不能代表公司拒领"},
+        json={"reason": "负责人仅接收通知，不能替员工拒领"},
     )
-    assert employee.status_code == 403
+    assert owner.status_code == 403
     client.post("/api/v1/auth/logout")
 
-    _login(client, "franchise_demo", "Franchise123!")
+    _login(client, "franchise_employee_demo", "Employee123!")
     blank_reason = client.post(
         f"/api/v1/v1.2/assignments/{assignment_id}/refuse",
         json={"reason": "   "},

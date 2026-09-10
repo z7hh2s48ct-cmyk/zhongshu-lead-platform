@@ -70,7 +70,8 @@ def list_company_account_directory_endpoint(
     principal: CurrentPrincipal,
     db: Session = Depends(get_db),
 ):
-    require_company_owner(principal, company_id)
+    if not principal.can("company.account.manage"):
+        require_company_owner(principal, company_id)
     return ok(
         request,
         [company_account_directory_to_dict(user) for user in list_company_accounts(db, company_id)],

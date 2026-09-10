@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
@@ -17,6 +16,7 @@ from ..core.security import fingerprint_phone, hash_phone
 from ..core.v12_enums import DuplicateDecision, LeadSourceKind, LeadV12Status
 from .reward_rule_v12 import SupplierRewardRule, resolve_supplier_reward_rule
 from .lead_correction_guard import store_lead_correction_issues
+from .phone_uniqueness import acquire_phone_identity_lock as _acquire_phone_identity_lock
 
 settings = get_settings()
 
@@ -115,18 +115,6 @@ def reevaluate_existing_phone_identity(
         checkpoint=checkpoint,
         now=now,
     )
-
-
-def _acquire_phone_identity_lock(db: Session, fingerprint: str) -> None:
-    """Serialize one irreversible phone identity across PostgreSQL writers."""
-
-    if db.get_bind().dialect.name != "postgresql":
-        return
-    digest = hashlib.sha256(
-        f"v12-phone-dedup:{fingerprint}".encode("ascii")
-    ).digest()
-    lock_id = int.from_bytes(digest[:8], byteorder="big", signed=True)
-    db.execute(select(func.pg_advisory_xact_lock(lock_id)))
 
 
 def _evaluate_phone_identity(

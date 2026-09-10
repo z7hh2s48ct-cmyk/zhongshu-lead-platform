@@ -603,6 +603,7 @@ def public_pool_lead_conditions(
     filters = [
         public_pool_membership,
         Lead.current_assignment_id.is_(None),
+        Lead.deleted_at.is_(None),
     ]
     normalized_keyword = (keyword or "").strip()
     if normalized_keyword:

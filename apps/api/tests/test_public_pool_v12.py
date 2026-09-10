@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 
 from apps.api.src.core.auth import Principal
 from apps.api.src.core.errors import AppError
-from apps.api.src.core.models import AuditLog, Company, Lead, Region, User
+from apps.api.src.core.models import AuditLog, Company, Lead, LeadImportIssue, Region, User
 from apps.api.src.core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12
 from apps.api.src.core.v12_enums import (
     CustomerSource,
@@ -458,7 +458,7 @@ def test_feishu_dispatch_target_retains_incomplete_rows_and_is_idempotent(db, mo
     assert db.scalar(select(func.count(Lead.id)).where(Lead.source_kind == LeadSourceKind.FEISHU_IMPORT.value)) == 2
 
 
-def test_public_pool_import_normalizes_phone_and_records_duplicate_without_dispatch(db, monkeypatch) -> None:
+def test_public_pool_import_normalizes_and_rejects_duplicate_phone(db, monkeypatch) -> None:
     import apps.api.src.services.public_pool_v12 as module
 
     _seed_region(db)
@@ -502,11 +502,15 @@ def test_public_pool_import_normalizes_phone_and_records_duplicate_without_dispa
     db.commit()
 
     imported = db.scalar(select(Lead).where(Lead.source_record_id == "rec-duplicate-phone"))
-    assert result.duplicate_count == 1
-    assert result.public_pool_count == 1
-    assert imported is not None
-    assert imported.status == LeadV12Status.DRAFT.value
-    assert imported.duplicate_status == DuplicateDecision.HARD_DUPLICATE.value
+    assert result.duplicate_count == 0
+    assert result.public_pool_count == 0
+    assert result.error_count == 1
+    assert imported is None
+    issue = db.scalar(
+        select(LeadImportIssue).where(LeadImportIssue.sync_batch_id == result.batch.id)
+    )
+    assert issue is not None
+    assert "LEAD_PHONE_DUPLICATE" in issue.message
 
 
 def test_feishu_import_rejects_a_configured_view_id_that_is_not_customer_view(db, monkeypatch) -> None:

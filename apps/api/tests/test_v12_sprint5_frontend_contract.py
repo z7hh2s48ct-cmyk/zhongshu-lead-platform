@@ -26,7 +26,7 @@ def test_h5_workbench_supports_followup_history_and_guarded_submission() -> None
     html = Path("apps/h5/public/v12-workbench.html").read_text(encoding="utf-8")
     js = Path("apps/h5/public/v12-workbench.js").read_text(encoding="utf-8")
 
-    assert "v12-workbench.js?v=20260831-feedback-831" in html
+    assert "v12-workbench.js?v=20260910-feedback-910" in html
     assert "跟进历史" in js
     assert "新增跟进" in js
     assert 'type="datetime-local"' in js
@@ -36,7 +36,8 @@ def test_h5_workbench_supports_followup_history_and_guarded_submission() -> None
     assert "submitButton.disabled=true" in js
     assert "await assignmentDetail(assignmentId)" in js
     assert "跟进已保存，请刷新查看" in js
-    assert js.count("x.status==='PENDING_CLAIM'&&can('assignment.own.claim')") == 2
+    assert js.count("x.status==='PENDING_CLAIM'&&canClaimAssignment()") == 2
+    assert "assignment.employee.claim" in js
 
 
 def test_admin_operations_covers_review_dispatch_return_reward_report_and_audit() -> None:

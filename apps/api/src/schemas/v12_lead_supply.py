@@ -65,12 +65,15 @@ class LeadDraftUpdateBody(BaseModel):
 
 class LeadQuickDispatchBody(PlatformLeadDraftBody):
     company_id: str = Field(min_length=1, max_length=36)
+    employee_user_id: str | None = Field(default=None, min_length=1, max_length=36)
     idempotency_key: str = Field(min_length=8, max_length=64)
     note: str | None = Field(default=None, max_length=1000)
 
-    @field_validator("company_id", "idempotency_key")
+    @field_validator("company_id", "employee_user_id", "idempotency_key")
     @classmethod
-    def normalize_required_text(cls, value: str) -> str:
+    def normalize_required_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         normalized = value.strip()
         if not normalized:
             raise ValueError("必填字段不能为空")
@@ -129,6 +132,18 @@ class TestLeadDeleteBody(BaseModel):
         normalized = value.strip()
         if not normalized:
             raise ValueError("必填字段不能为空")
+        return normalized
+
+
+class LeadDeleteBody(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_delete_reason(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("删除原因至少 2 个字符")
         return normalized
 
 

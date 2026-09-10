@@ -34,6 +34,15 @@ def claim_assignment(db: Session, assignment_id: str, principal: Principal, idem
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发订单不存在", 404)
     if assignment.company_id != principal.company_id:
         raise AppError("FORBIDDEN", "无权领取该客资", 403)
+    if assignment.internal_assignee_user_id:
+        if (
+            assignment.internal_assignee_user_id != principal.user_id
+            or not principal.has_any_role("FRANCHISE_EMPLOYEE")
+            or not principal.can("assignment.employee.claim")
+        ):
+            raise AppError("ASSIGNMENT_EMPLOYEE_FORBIDDEN", "该客资仅限被指定员工领取", 403)
+    elif not principal.has_any_role("FRANCHISE_OWNER"):
+        raise AppError("FORBIDDEN", "仅加盟商负责人可领取历史未指定员工的客资", 403)
     lead = db.scalar(
         select(Lead)
         .where(Lead.id == assignment.lead_id)
