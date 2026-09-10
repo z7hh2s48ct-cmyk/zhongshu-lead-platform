@@ -26,7 +26,6 @@ from apps.api.src.services.reward_rule_v12 import (
     create_supplier_reward_rule,
     publish_supplier_reward_rule,
 )
-from apps.api.src.services.workday_calendar import CHINA_TIMEZONE, WorkdayCalendarService
 
 
 def _company(db, code: str, name: str) -> tuple[Company, User]:
@@ -278,13 +277,8 @@ def test_manual_dispatch_does_not_deduct_points_and_claim_is_atomic_and_idempote
     assert result.idempotent is False
     assert result.assignment.status == AssignmentStatus.CLAIMED.value
     assert result.assignment.claim_points == 100
-    assert result.assignment.appeal_deadline_at == result.assignment.reward_due_at
-    # N14：add_workdays 按北京时区推算，断言必须用同一时区的日期计数——
-    # 用 UTC 日期重数会在跨时区日界（UTC 周六晚=北京周日）时误判 2≠3。
-    calendar = WorkdayCalendarService(db)
-    claimed_bj = result.assignment.claimed_at.astimezone(CHINA_TIMEZONE)
-    deadline_bj = result.assignment.appeal_deadline_at.astimezone(CHINA_TIMEZONE)
-    assert calendar.workdays_between(claimed_bj.date(), deadline_bj.date()) == 3
+    assert result.assignment.appeal_deadline_at == result.assignment.claimed_at + timedelta(hours=48)
+    assert result.assignment.reward_due_at is None
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == receiver.id))
     assert account is not None and account.balance == 900
     reward = db.scalar(select(SupplierLeadReward).where(SupplierLeadReward.assignment_id == assignment.id))

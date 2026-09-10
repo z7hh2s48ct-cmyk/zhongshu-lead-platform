@@ -12,7 +12,7 @@ import argparse
 import json
 
 from apps.api.src.core.database import SessionLocal, init_database
-from apps.api.src.services.assignment_timeout_v12 import run_assignment_timeouts_active
+from apps.api.src.services.assignment_timeout_v12 import drain_assignment_timeouts_active
 from apps.api.src.services.followup_service import run_followup_overdue
 from apps.api.src.services.feishu_sync_service import fetch_and_import_feishu, writeback_feishu_results
 from apps.api.src.services.lead_export_v12 import process_lead_export_tasks
@@ -45,13 +45,17 @@ def main() -> int:
     output: dict[str, object] = {}
     with SessionLocal() as db:
         if args.job in {"assignment-timeouts", "all"}:
-            output["assignment_timeouts"] = run_assignment_timeouts_active(db)
+            output["assignment_timeouts"] = drain_assignment_timeouts_active(
+                db,
+                batch_size=args.limit,
+                max_batches=args.max_batches,
+            )
         if args.job in {"followup-overdue", "all"}:
             output["followup_overdue"] = run_followup_overdue(db)
         if args.job in {"low-points", "all"}:
             output["low_points"] = run_low_points_warnings(db)
         if args.job in {"outbox", "all"}:
-            output["outbox"] = process_outbox(db, limit=args.limit)
+            output["outbox"] = process_outbox(db, limit=args.limit, commit_batches=True)
         if args.job in {"storage-cleanup", "all"}:
             output["storage_cleanup"] = process_storage_cleanup(db, limit=args.limit)
         if args.job == "lead-exports":

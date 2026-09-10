@@ -34,10 +34,10 @@ class ReturnDraftV12Body(BaseModel):
             raise ValueError("退回原因仅支持 V1.2 冻结的四类原因")
         return normalized
 
-    @field_validator("description")
+    @field_validator("description", mode="before")
     @classmethod
     def strip_description(cls, value: str) -> str:
-        return value.strip()
+        return value.strip() if isinstance(value, str) else value
 
 
 class ReturnVerificationAssignBody(BaseModel):
@@ -47,12 +47,12 @@ class ReturnVerificationAssignBody(BaseModel):
     @field_validator("assignee_user_id")
     @classmethod
     def strip_assignee(cls, value: str) -> str:
-        return value.strip()
+        return value.strip() if isinstance(value, str) else value
 
-    @field_validator("reason")
+    @field_validator("reason", mode="before")
     @classmethod
     def strip_reason(cls, value: str) -> str:
-        return value.strip()
+        return value.strip() if isinstance(value, str) else value
 
 
 class ReturnVerificationSubmitBody(BaseModel):
@@ -78,10 +78,10 @@ class ReturnVerificationSubmitBody(BaseModel):
             raise ValueError("核验结论无效")
         return normalized
 
-    @field_validator("note")
+    @field_validator("note", mode="before")
     @classmethod
     def strip_note(cls, value: str) -> str:
-        return value.strip()
+        return value.strip() if isinstance(value, str) else value
 
 
 class ReturnFinalReviewBody(BaseModel):
@@ -93,7 +93,7 @@ class ReturnFinalReviewBody(BaseModel):
     def normalize_decision(cls, value: str) -> str:
         return value.strip().upper()
 
-    @field_validator("note")
+    @field_validator("note", mode="before")
     @classmethod
     def strip_note(cls, value: str) -> str:
-        return value.strip()
+        return value.strip() if isinstance(value, str) else value

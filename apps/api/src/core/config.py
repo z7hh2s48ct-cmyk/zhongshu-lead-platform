@@ -68,7 +68,8 @@ class Settings(BaseSettings):
     assignment_expire_hours: int = 48
     pre_dispatch_verification_hours: int = 24
     return_verification_hours: int = 24
-    # V1.0.1 compatibility only. V1.2 return appeals use the workday calendar.
+    # Continuous return window used by the legacy endpoint; V1.2 fixes the same
+    # product rule at 48 hours from the persisted claim timestamp.
     return_window_hours: int = 48
     # Development/test may keep legacy mutation APIs for historical regression tests.
     # Production validation requires this to be false so all new business facts use V1.2.

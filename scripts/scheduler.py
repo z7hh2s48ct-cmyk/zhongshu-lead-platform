@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.api.src.core.database import SessionLocal, init_database
-from apps.api.src.services.assignment_timeout_v12 import run_assignment_timeouts_active
+from apps.api.src.services.assignment_timeout_v12 import drain_assignment_timeouts_active
 from apps.api.src.services.binding_integrity import audit_primary_binding_integrity
 from apps.api.src.services.followup_service import run_followup_overdue
 from apps.api.src.services.notification_v12 import drain_due_supplier_reward_settlement_notified
@@ -54,7 +54,7 @@ def publish_heartbeat(path: Path | None = None) -> None:
 def run_cycle(run_slow_jobs: bool, run_hourly_jobs: bool, run_daily_jobs: bool = False) -> bool:
     with SessionLocal() as db:
         try:
-            outbox = process_outbox(db, limit=200)
+            outbox = process_outbox(db, limit=200, commit_batches=True)
             # N10：outbox 进度先落库——慢/小时任务异常回滚时不得把已发送
             # 状态一并回滚，否则下一轮会向用户重发同一条通知。
             db.commit()
@@ -69,7 +69,7 @@ def run_cycle(run_slow_jobs: bool, run_hourly_jobs: bool, run_daily_jobs: bool =
             if run_slow_jobs:
                 metrics.update(
                     {
-                        "timeouts": run_assignment_timeouts_active(db),
+                        "timeouts": drain_assignment_timeouts_active(db),
                         "followup_overdue": run_followup_overdue(db),
                         "low_points": run_low_points_warnings(db),
                     }

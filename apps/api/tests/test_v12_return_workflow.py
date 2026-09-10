@@ -763,7 +763,9 @@ def test_need_more_allows_new_evidence_and_creates_second_verification_round(db)
     assert first_task.status == VerificationTaskStatus.RELEASED.value
 
     owner = _principal(setup["receiver_user"], "return.own.manage")
-    _evidence(db, request, owner, EvidenceType.CALL_RECORDING.value)
+    supplementary = _evidence(db, request, owner, EvidenceType.CALL_RECORDING.value)
+    supplementary.sha256 = "b" * 64
+    db.flush()
     second = submit_return_request(db, return_id=request.id, principal=owner)
     db.commit()
 
@@ -910,8 +912,8 @@ def test_initial_submission_after_deadline_is_marked_expired(db) -> None:
     )
     _evidence(db, request, owner, EvidenceType.CHAT_SCREENSHOT.value)
     _evidence(db, request, owner, EvidenceType.CALL_RECORDING.value)
-    request.appeal_deadline_at = datetime.now(timezone.utc) - timedelta(minutes=1)
-    request.due_at = request.appeal_deadline_at
+    setup["assignment"].claimed_at = datetime.now(timezone.utc) - timedelta(hours=48, minutes=1)
+    db.flush()
     result = submit_return_request(db, return_id=request.id, principal=owner)
     db.commit()
     assert result.expired is True

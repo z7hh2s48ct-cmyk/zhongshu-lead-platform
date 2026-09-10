@@ -102,9 +102,11 @@ def failed_outbox(
 
 @router.post("/outbox/{outbox_id}/retry")
 def retry_outbox(outbox_id: str, request: Request, principal=Depends(require_permissions("notification.retry")), db: Session = Depends(get_db)):
-    item = db.get(NotificationOutbox, outbox_id)
+    item = db.scalar(select(NotificationOutbox).where(NotificationOutbox.id == outbox_id).with_for_update())
     if not item:
         raise AppError("OUTBOX_NOT_FOUND", "通知任务不存在", 404)
+    if item.status not in {"FAILED", "DEAD", "MANUAL_ACTION_REQUIRED"}:
+        raise AppError("OUTBOX_NOT_RETRYABLE", "仅失败的通知支持重新投递", 409)
     item.status = "PENDING"
     item.next_attempt_at = None
     item.last_error = None
@@ -115,7 +117,7 @@ def retry_outbox(outbox_id: str, request: Request, principal=Depends(require_per
 
 @router.post("/jobs/process-outbox")
 def process(request: Request, principal=Depends(require_permissions("*")), db: Session = Depends(get_db), limit: int = Query(default=100, ge=1, le=1000)):
-    result = process_outbox(db, limit=limit)
+    result = process_outbox(db, limit=limit, commit_batches=True)
     write_audit(db, principal=principal, action="JOB_PROCESS_OUTBOX", resource_type="job", after=result, request_id=request.state.request_id)
     db.commit()
     return ok(request, result)

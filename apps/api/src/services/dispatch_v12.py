@@ -34,7 +34,6 @@ from .reward_rule_v12 import (
     calculate_reward_points,
     resolve_supplier_reward_rule,
 )
-from .workday_calendar import WorkdayCalendarService
 
 settings = get_settings()
 
@@ -1123,7 +1122,7 @@ def claim_assignment(
         metadata={"lead_id": lead.id, "points_price": int(assignment.points_price)},
     )
 
-    deadline = WorkdayCalendarService(db).add_workdays(now, 3)
+    deadline = now + timedelta(hours=48)
     assignment.status = AssignmentStatus.CLAIMED.value
     assignment.claimed_at = now
     assignment.internal_assignee_user_id = claimed_by
@@ -1131,7 +1130,8 @@ def claim_assignment(
     assignment.internal_assigned_at = now
     assignment.claim_points = int(assignment.points_price)
     assignment.appeal_deadline_at = deadline
-    assignment.reward_due_at = deadline
+    # Actual supplier settlement is scheduled only after effective confirmation.
+    assignment.reward_due_at = None
     assignment.receiver_company_id = company_id
     assignment.supplier_company_id = lead.supplier_company_id
     assignment.first_followup_due_at = now + timedelta(hours=settings.first_followup_hours)

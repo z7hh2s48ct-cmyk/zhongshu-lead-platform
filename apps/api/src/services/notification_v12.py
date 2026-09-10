@@ -147,6 +147,44 @@ def emit_business_notification(
     )
 
 
+def emit_assignment_notifications(
+    db: Session,
+    *,
+    assignment: Assignment,
+    event_key: str,
+    event_type: str,
+    title: str,
+    body: str,
+    deep_link: str,
+) -> None:
+    """Notify the actual assignee and owner separately without widening visibility."""
+    recipients = {assignment.internal_assignee_user_id}
+    company = db.get(Company, assignment.company_id)
+    owner_id = company.primary_user_id if company else None
+    recipients.add(owner_id)
+    recipients.discard(None)
+    # Preserve an owner-visible station message for historical unbound companies.
+    for user_id in sorted(recipients) if recipients else [None]:
+        recipient_key = f"{event_key}:{user_id or 'owner'}"
+        if db.scalar(select(NotificationOutbox.id).where(NotificationOutbox.event_key == recipient_key)):
+            continue
+        notification = create_station_message(
+            db, user_id=user_id, company_id=assignment.company_id,
+            scene=event_type, title=title, body=body, deep_link=deep_link,
+        )
+        enqueue_outbox(
+            db, event_key=recipient_key, event_type=event_type,
+            aggregate_type="assignment", aggregate_id=assignment.id,
+            payload={
+                "notification_id": notification.id,
+                "company_id": assignment.company_id,
+                "user_id": user_id,
+                "deep_link": deep_link,
+                "business_ids": {"assignment_id": assignment.id, "lead_id": assignment.lead_id},
+            },
+        )
+
+
 def emit_platform_role_notifications(
     db: Session,
     *,

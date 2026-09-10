@@ -177,6 +177,12 @@ jobs:
           python -m alembic -c alembic.ini downgrade 0001_initial
           python -m alembic -c alembic.ini upgrade head
 
+      - name: Verify return and notification concurrency on PostgreSQL
+        env:
+          V12_E2E_DATABASE_URL: ${{ env.DATABASE_URL }}
+          RETURN_POSTGRES_TEST_URL: ${{ env.DATABASE_URL }}
+        run: python -m pytest apps/api/tests/test_notification_postgres_concurrency_e2e.py apps/api/tests/test_return_concurrency_postgres.py -q
+
       - name: Verify invite-used-by migration symmetry on PostgreSQL
         env:
           INVITE_MIGRATION_POSTGRES_TEST_URL: ${{ env.DATABASE_URL }}
