@@ -9,10 +9,11 @@ from sqlalchemy.orm import Session
 from ..core.auth import Principal
 from ..core.enums import AssignmentStatus, FollowStatus, LeadStatus
 from ..core.errors import AppError
-from ..core.models import Assignment, AssignmentEvent, FollowUp, Lead, Notification
+from ..core.models import Assignment, AssignmentEvent, FollowUp, Lead, Notification, NotificationOutbox
 from .company_assignment_v12 import require_company_assignment_access
 from .lead_correction_guard import require_correction_review_resolved
-from .notification_service import create_station_message, enqueue_outbox
+from .notification_service import enqueue_outbox
+from .notification_v12 import emit_assignment_notifications
 from .supplier_reward_v12 import activate_supplier_reward_after_effective_confirmation
 
 
@@ -128,7 +129,7 @@ def overdue_followups(db: Session, now: datetime | None = None) -> list[Assignme
             Assignment.first_followup_due_at.is_not(None),
             Assignment.first_followup_due_at <= now,
             ~select(FollowUp.id).where(FollowUp.assignment_id == Assignment.id).exists(),
-        )
+        ).with_for_update(skip_locked=True).execution_options(populate_existing=True)
     ).all()
 
 
@@ -158,23 +159,17 @@ def run_followup_overdue(db: Session, now: datetime | None = None) -> dict[str, 
                 Notification.deep_link.in_(compatible_links),
             )
         )
-        if not existing:
-            create_station_message(
-                db,
-                user_id=None,
-                company_id=assignment.company_id,
-                scene="FOLLOWUP_OVERDUE",
-                title="客资待跟进",
-                body="该客资已超过首次跟进时限，请尽快反馈。",
-                deep_link=deep_link,
-            )
-            notified += 1
-        enqueue_outbox(
-            db,
-            event_key=f"assignment:{assignment.id}:followup-overdue",
+        legacy_key = f"assignment:{assignment.id}:followup-overdue"
+        if db.scalar(select(NotificationOutbox.id).where(NotificationOutbox.event_key == legacy_key)):
+            continue
+        emit_assignment_notifications(
+            db, assignment=assignment,
+            event_key=legacy_key,
             event_type="FOLLOWUP_OVERDUE",
-            aggregate_type="assignment",
-            aggregate_id=assignment.id,
-            payload={"company_id": assignment.company_id, "deep_link": deep_link},
+            title="客资待跟进",
+            body="该客资已超过首次跟进时限，请尽快反馈。",
+            deep_link=deep_link,
         )
+        if not existing:
+            notified += 1
     return {"overdue": len(assignments), "notified": notified}

@@ -237,6 +237,8 @@ def test_v12_timeout_refreshes_locked_row_before_sending_reminder(api_client) ->
 
         result = run_assignment_timeouts_v12(db, now=current)
         assert result == {"reminded": 0, "expired": 0}
+        # Due-only discovery now excludes the already-reminded row entirely.
+        db.refresh(stale)
         assert stale.reminder_sent_at is not None
         reminder = db.scalar(
             select(Notification.id).where(
@@ -294,8 +296,8 @@ def test_all_timeout_entrypoints_use_shared_active_version_router() -> None:
     scheduler = Path("scripts/scheduler.py").read_text(encoding="utf-8")
     manual_jobs = Path("scripts/run_jobs.py").read_text(encoding="utf-8")
     for source in (scheduler, manual_jobs):
-        assert "run_assignment_timeouts_active" in source
+        assert "drain_assignment_timeouts_active" in source
         assert "run_assignment_timeouts_v12" not in source
         assert "from apps.api.src.services.claim_service import run_assignment_timeouts" not in source
-    assert 'output["assignment_timeouts"] = run_assignment_timeouts_active(db)' in manual_jobs
-    assert '"timeouts": run_assignment_timeouts_active(db)' in scheduler
+    assert 'output["assignment_timeouts"] = drain_assignment_timeouts_active(' in manual_jobs
+    assert '"timeouts": drain_assignment_timeouts_active(db)' in scheduler

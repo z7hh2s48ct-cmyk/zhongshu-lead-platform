@@ -58,7 +58,7 @@ def test_slow_job_failure_does_not_roll_back_outbox_progress(scheduler_session, 
     with scheduler_session() as db:
         item_id = _delivered_outbox(db)
 
-    monkeypatch.setattr(scheduler, "run_assignment_timeouts_active", lambda db: 0)
+    monkeypatch.setattr(scheduler, "drain_assignment_timeouts_active", lambda db: 0)
     monkeypatch.setattr(scheduler, "run_low_points_warnings", lambda db: 0)
     monkeypatch.setattr(
         scheduler, "run_followup_overdue",
@@ -102,7 +102,7 @@ def test_slow_job_failure_does_not_roll_back_storage_cleanup(
         db.commit()
         item_id = item.id
 
-    monkeypatch.setattr(scheduler, "run_assignment_timeouts_active", lambda db: 0)
+    monkeypatch.setattr(scheduler, "drain_assignment_timeouts_active", lambda db: 0)
     monkeypatch.setattr(scheduler, "run_low_points_warnings", lambda db: 0)
     monkeypatch.setattr(
         scheduler,

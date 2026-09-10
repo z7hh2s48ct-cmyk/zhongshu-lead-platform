@@ -832,14 +832,15 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
     with factory() as db:
         assignment = db.get(Assignment, assignment_four)
         assert assignment is not None
-        assignment.appeal_deadline_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        assignment.claimed_at = datetime.now(timezone.utc) - timedelta(hours=49)
+        assignment.appeal_deadline_at = assignment.claimed_at + timedelta(hours=48)
         db.commit()
     expired_return = client.post(
         f"/api/v1/v1.2/returns/assignments/{assignment_four}/draft",
         headers=receiver_employee,
         json={
             "reason_code": "EMPTY_NUMBER",
-            "description": "E2E 超过三工作日后不得创建申诉",
+            "description": "E2E 领取超过四十八小时后不得创建申诉",
         },
     )
     assert expired_return.status_code == 409

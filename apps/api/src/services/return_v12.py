@@ -27,7 +27,7 @@ from ..core.models import (
 from ..core.models_v12 import SupplierLeadReward
 from ..core.security import decrypt_text, mask_phone
 from ..core.state_machine_v12 import assert_lead_transition, assert_return_transition
-from ..core.time import as_utc, utcnow
+from ..core.time import as_utc
 from ..core.v12_enums import (
     LeadV12Status,
     ReturnReasonCode,
@@ -38,7 +38,6 @@ from ..core.v12_enums import (
 from .points_service import change_points
 from .company_assignment_v12 import require_return_request_access
 from .lead_correction_guard import require_correction_review_resolved
-from .workday_calendar import WorkdayCalendarService
 
 
 logger = logging.getLogger("zhongshu.return_v12")
@@ -133,17 +132,31 @@ def _get_lead(db: Session, lead_id: str, *, lock: bool = False) -> Lead:
     return item
 
 
-def _appeal_deadline(db: Session, assignment: Assignment) -> datetime:
-    existing = as_utc(assignment.appeal_deadline_at)
-    if existing:
-        return existing
+def _appeal_deadline(assignment: Assignment) -> datetime:
     claimed_at = as_utc(assignment.claimed_at)
     if not claimed_at:
         raise AppError("RETURN_NOT_CLAIMED", "未领取客资不能申请退回", 409)
-    deadline = WorkdayCalendarService(db).add_workdays(claimed_at, 3)
+    # Old unsubmitted records follow the same rule during a rolling release.
+    deadline = claimed_at + timedelta(hours=48)
     assignment.appeal_deadline_at = deadline
-    assignment.reward_due_at = assignment.reward_due_at or deadline
     return deadline
+
+
+def _initial_deadline(assignment: Assignment, request: ReturnRequest) -> datetime:
+    deadline = _appeal_deadline(assignment)
+    request.appeal_deadline_at = deadline
+    request.due_at = deadline
+    return deadline
+
+
+def _lock_return_context(db: Session, return_id: str) -> tuple[Assignment, Lead, ReturnRequest]:
+    reference = _get_return(db, return_id)
+    assignment = _get_assignment(db, reference.assignment_id, lock=True)
+    lead = _get_lead(db, assignment.lead_id, lock=True)
+    request = _get_return(db, return_id, lock=True)
+    if request.assignment_id != assignment.id or request.lead_id != lead.id:
+        raise AppError("RETURN_ASSIGNMENT_CONFLICT", "退回申请与当前派发单不一致", 409)
+    return assignment, lead, request
 
 
 def create_or_update_return_draft(
@@ -154,23 +167,16 @@ def create_or_update_return_draft(
     reason_code: str,
     description: str,
 ) -> ReturnRequest:
+    assignment = _get_assignment(db, assignment_id, lock=True)
+    lead = _get_lead(db, assignment.lead_id, lock=True)
+    # Assignment is the first lock in every return mutation. It also serializes
+    # the missing-row case so concurrent draft creators cannot both insert.
     item = db.scalar(
         select(ReturnRequest)
         .where(ReturnRequest.assignment_id == assignment_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    assignment = _get_assignment(db, assignment_id, lock=True)
-    lead = _get_lead(db, assignment.lead_id, lock=True)
-    if item is None:
-        # A concurrent creator may have committed while this transaction waited
-        # for the assignment lock. Re-read after the lock before inserting.
-        item = db.scalar(
-            select(ReturnRequest)
-            .where(ReturnRequest.assignment_id == assignment.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
     require_return_request_access(
         principal,
         assignment,
@@ -189,6 +195,10 @@ def create_or_update_return_draft(
             ReturnV12Status.NEED_MORE_EVIDENCE.value,
         }:
             raise AppError("RETURN_NOT_EDITABLE", "退回申请当前不可编辑", 409, {"status": item.status})
+        if item.submitted_at is None:
+            deadline = _initial_deadline(assignment, item)
+            if _now() >= deadline:
+                raise AppError("RETURN_WINDOW_EXPIRED", "已超过领取后 48 小时退回申诉期", 409)
         item.reason_code = reason
         item.description = description.strip()
         db.flush()
@@ -197,11 +207,12 @@ def create_or_update_return_draft(
     if assignment.status not in {
         AssignmentStatus.CLAIMED.value,
         AssignmentStatus.FOLLOWING.value,
+        AssignmentStatus.COMPLETED.value,
     }:
         raise AppError("RETURN_NOT_ALLOWED", "派发单当前不可创建退回申请", 409, {"status": assignment.status})
-    deadline = _appeal_deadline(db, assignment)
-    if utcnow() > deadline:
-        raise AppError("RETURN_WINDOW_EXPIRED", "已超过 3 个工作日退回申诉期", 409)
+    deadline = _appeal_deadline(assignment)
+    if _now() >= deadline:
+        raise AppError("RETURN_WINDOW_EXPIRED", "已超过领取后 48 小时退回申诉期", 409)
     item = ReturnRequest(
         assignment_id=assignment.id,
         lead_id=assignment.lead_id,
@@ -225,8 +236,7 @@ def prepare_return_evidence_upload(
     request: ReturnRequest,
     principal: Principal,
 ) -> ReturnRequest:
-    assignment = _get_assignment(db, request.assignment_id, lock=True)
-    locked_request = _get_return(db, request.id, lock=True)
+    assignment, _, locked_request = _lock_return_context(db, request.id)
     require_return_request_access(
         principal,
         assignment,
@@ -241,6 +251,7 @@ def prepare_return_evidence_upload(
         ReturnV12Status.DRAFT.value: {
             AssignmentStatus.CLAIMED.value,
             AssignmentStatus.FOLLOWING.value,
+            AssignmentStatus.COMPLETED.value,
         },
         ReturnV12Status.NEED_MORE_EVIDENCE.value: {
             AssignmentStatus.RETURN_PENDING.value,
@@ -254,9 +265,9 @@ def prepare_return_evidence_upload(
             {"assignment_status": assignment.status},
         )
     if locked_request.submitted_at is None:
-        deadline = as_utc(locked_request.appeal_deadline_at or locked_request.due_at)
-        if deadline and utcnow() > deadline:
-            raise AppError("RETURN_WINDOW_EXPIRED", "已超过 3 个工作日退回申诉期", 409)
+        deadline = _initial_deadline(assignment, locked_request)
+        if _now() >= deadline:
+            raise AppError("RETURN_WINDOW_EXPIRED", "已超过领取后 48 小时退回申诉期", 409)
     return locked_request
 
 
@@ -306,6 +317,38 @@ def _evidence_summary(db: Session, return_id: str) -> dict[str, int]:
     return {str(evidence_type): int(count) for evidence_type, count in rows}
 
 
+def _supplementary_evidence_count(db: Session, request: ReturnRequest) -> int:
+    if request.status != ReturnV12Status.NEED_MORE_EVIDENCE.value:
+        return 0
+    evidences = db.execute(
+        select(ReturnEvidence.sha256, ReturnEvidence.created_at)
+        .where(ReturnEvidence.return_request_id == request.id)
+    ).all()
+    event = db.scalar(
+        select(AssignmentEvent)
+        .where(AssignmentEvent.assignment_id == request.assignment_id,
+               AssignmentEvent.event_type == "V12_RETURN_NEED_MORE")
+        .order_by(AssignmentEvent.occurred_at.desc(), AssignmentEvent.id.desc())
+        .limit(1)
+    )
+    if event is None:
+        # Historical/manual NEED_MORE rows may not have a review event. Evidence
+        # that existed by the first submission is the safest recoverable baseline.
+        submitted_at = as_utc(request.submitted_at)
+        if submitted_at is None:
+            return 0
+        baseline = [digest for digest, created_at in evidences
+                    if as_utc(created_at) <= submitted_at]
+        return len({digest for digest, _ in evidences} - set(baseline))
+    baseline = (event.payload or {}).get("evidence_sha256")
+    if baseline is None:
+        # Compatibility for existing NEED_MORE records: files already present
+        # when the reviewer requested supplementation form the old baseline.
+        baseline = [digest for digest, created_at in evidences
+                    if as_utc(created_at) <= as_utc(event.occurred_at)]
+    return len({digest for digest, _ in evidences} - set(baseline))
+
+
 def _active_return_task(db: Session, return_id: str) -> VerificationTask | None:
     return db.scalar(
         select(VerificationTask)
@@ -337,14 +380,7 @@ def submit_return_request(
     return_id: str,
     principal: Principal,
 ) -> ReturnSubmitResult:
-    request = _get_return(db, return_id, lock=True)
-    assignment_for_access = _get_assignment(db, request.assignment_id, lock=True)
-    lead = _get_lead(db, assignment_for_access.lead_id, lock=True)
-    if (
-        request.assignment_id != assignment_for_access.id
-        or request.lead_id != lead.id
-    ):
-        raise AppError("RETURN_ASSIGNMENT_CONFLICT", "退回申请与当前派发单不一致", 409)
+    assignment_for_access, lead, request = _lock_return_context(db, return_id)
     require_return_request_access(
         principal,
         assignment_for_access,
@@ -368,8 +404,8 @@ def submit_return_request(
     initial_submission = request.submitted_at is None
     if initial_submission:
         require_correction_review_resolved(lead)
-    deadline = as_utc(request.appeal_deadline_at or request.due_at)
-    if initial_submission and deadline and now > deadline:
+    deadline = _initial_deadline(assignment_for_access, request) if initial_submission else None
+    if initial_submission and now >= deadline:
         assert_return_transition(ReturnV12Status.DRAFT, ReturnV12Status.EXPIRED)
         request.status = ReturnV12Status.EXPIRED.value
         db.flush()
@@ -387,11 +423,17 @@ def submit_return_request(
             {"evidence_count": evidence_count},
         )
 
+    if not initial_submission and _supplementary_evidence_count(db, request) < 1:
+        raise AppError("RETURN_SUPPLEMENT_REQUIRED", "请按审核要求补充新的证据材料后再提交", 422)
+
     assignment = assignment_for_access
+    previous_assignment_status = assignment.status
+    previous_lead_status = lead.status
     if initial_submission:
         if assignment.status not in {
             AssignmentStatus.CLAIMED.value,
             AssignmentStatus.FOLLOWING.value,
+            AssignmentStatus.COMPLETED.value,
         }:
             raise AppError("RETURN_ASSIGNMENT_STATE_INVALID", "派发单当前不可提交退回申请", 409)
         request.submitted_at = now
@@ -436,6 +478,8 @@ def submit_return_request(
                 "reason_code": request.reason_code,
                 "evidence_count": evidence_count,
                 "initial_submission": initial_submission,
+                "previous_assignment_status": previous_assignment_status,
+                "previous_lead_status": previous_lead_status,
             },
         )
     )
@@ -549,15 +593,19 @@ def submit_return_verification(
     conclusion: str,
     note: str,
 ) -> VerificationTask:
-    task = db.scalar(select(VerificationTask).where(VerificationTask.id == task_id).with_for_update())
-    if task is None or task.task_type != VerificationTaskType.RETURN_VERIFY.value:
+    reference = db.get(VerificationTask, task_id)
+    if reference is None or reference.task_type != VerificationTaskType.RETURN_VERIFY.value:
         raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    _, _, request = _lock_return_context(db, reference.return_request_id)
+    task = db.scalar(
+        select(VerificationTask).where(VerificationTask.id == task_id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
     if task.status == VerificationTaskStatus.SUBMITTED.value and task.assignee_user_id == principal.user_id:
         return task
     _require_return_task_not_overdue(task)
     if task.status != VerificationTaskStatus.IN_PROGRESS.value or task.assignee_user_id != principal.user_id:
         raise AppError("RETURN_VERIFY_TASK_NOT_OWNED", "任务不属于当前电销人员或状态已变化", 409)
-    request = _get_return(db, task.return_request_id, lock=True)
     if request.status != ReturnV12Status.VERIFYING.value:
         raise AppError("RETURN_NOT_VERIFYING", "退回申请当前不在电销核验阶段", 409)
     task.contact_result = contact_result.strip().upper()
@@ -603,7 +651,10 @@ def _claim_ledger(db: Session, request: ReturnRequest, assignment: Assignment) -
 
 
 def _current_verification_task(db: Session, request: ReturnRequest) -> VerificationTask:
-    task = db.get(VerificationTask, request.verification_task_id) if request.verification_task_id else None
+    task = db.scalar(
+        select(VerificationTask).where(VerificationTask.id == request.verification_task_id)
+        .with_for_update().execution_options(populate_existing=True)
+    ) if request.verification_task_id else None
     if task is None or task.task_type != VerificationTaskType.RETURN_VERIFY.value:
         raise AppError("RETURN_VERIFY_TASK_MISSING", "退回申请缺少后置电销核验任务", 409)
     if task.status != VerificationTaskStatus.SUBMITTED.value or not task.verification_conclusion:
@@ -612,6 +663,8 @@ def _current_verification_task(db: Session, request: ReturnRequest) -> Verificat
 
 
 def _restore_assignment_status(lead: Lead) -> str:
+    if lead.status in {LeadV12Status.CLOSED.value, LeadV12Status.COMPLETED.value}:
+        return AssignmentStatus.COMPLETED.value
     return (
         AssignmentStatus.FOLLOWING.value
         if lead.status == LeadV12Status.FOLLOWING.value
@@ -627,7 +680,7 @@ def final_review_return(
     decision: str,
     note: str,
 ) -> ReturnFinalReviewResult:
-    request = _get_return(db, return_id, lock=True)
+    assignment, lead, request = _lock_return_context(db, return_id)
     normalized_decision = decision.strip().upper()
     if request.status == ReturnV12Status.APPROVED.value and normalized_decision == "APPROVE":
         ledger = db.get(PointsLedger, request.refund_ledger_id) if request.refund_ledger_id else None
@@ -651,8 +704,6 @@ def final_review_return(
             409,
             {"decision": normalized_decision, "verification_conclusion": task.verification_conclusion},
         )
-    assignment = _get_assignment(db, request.assignment_id, lock=True)
-    lead = _get_lead(db, request.lead_id, lock=True)
     reward = db.scalar(
         select(SupplierLeadReward)
         .where(SupplierLeadReward.assignment_id == assignment.id)
@@ -677,7 +728,14 @@ def final_review_return(
                 assignment_id=assignment.id,
                 event_type="V12_RETURN_NEED_MORE",
                 actor_user_id=principal.user_id,
-                payload={"return_request_id": request.id, "verification_task_id": task.id, "note": note.strip()},
+                payload={
+                    "return_request_id": request.id,
+                    "verification_task_id": task.id,
+                    "note": note.strip(),
+                    "evidence_sha256": sorted(set(db.scalars(
+                        select(ReturnEvidence.sha256).where(ReturnEvidence.return_request_id == request.id)
+                    ).all())),
+                },
             )
         )
         db.flush()
@@ -689,7 +747,10 @@ def final_review_return(
         task.status = VerificationTaskStatus.RELEASED.value
         task.lock_version += 1
         assignment.status = _restore_assignment_status(lead)
-        if lead.status not in {LeadV12Status.CLAIMED.value, LeadV12Status.FOLLOWING.value}:
+        if lead.status not in {
+            LeadV12Status.CLAIMED.value, LeadV12Status.FOLLOWING.value,
+            LeadV12Status.COMPLETED.value, LeadV12Status.CLOSED.value,
+        }:
             lead.status = LeadV12Status.CLAIMED.value
         if reward and reward.status == RewardStatus.FROZEN.value:
             reward.status = RewardStatus.OBSERVING.value
@@ -833,6 +894,7 @@ def return_request_to_dict(
         "refund_ledger_id": item.refund_ledger_id,
     }
     if include_evidence:
+        data["supplementary_evidence_count"] = _supplementary_evidence_count(db, item)
         evidences = db.scalars(
             select(ReturnEvidence)
             .where(ReturnEvidence.return_request_id == item.id)

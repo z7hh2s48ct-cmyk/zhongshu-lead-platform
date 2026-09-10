@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from fastapi.responses import Response
@@ -135,11 +136,6 @@ def upload_return_evidence(
         assignment,
         submitted_by=item.submitted_by,
     )
-    item = prepare_return_evidence_upload(
-        db,
-        request=item,
-        principal=principal,
-    )
     content = file.file.read()
     normalized_type = evidence_type.strip().upper()
     if normalized_type == EvidenceType.CHAT_SCREENSHOT.value:
@@ -158,6 +154,11 @@ def upload_return_evidence(
         content=content,
     )
 
+    item = prepare_return_evidence_upload(
+        db,
+        request=item,
+        principal=principal,
+    )
     stored = get_storage().save(
         content,
         prefix=f"evidence/v1.2/{datetime.utcnow():%Y/%m}/{item.id}",
@@ -224,7 +225,7 @@ def submit_return(
     )
     db.commit()
     if result.expired:
-        raise AppError("RETURN_WINDOW_EXPIRED", "已超过 3 个工作日退回申诉期", 409)
+        raise AppError("RETURN_WINDOW_EXPIRED", "已超过领取后 48 小时退回申诉期", 409)
     return ok(
         request,
         return_request_to_dict(db, result.request, include_evidence=True),
@@ -326,11 +327,12 @@ def download_return_evidence_v12(
         request_id=request.state.request_id,
     )
     db.commit()
-    safe_name = evidence.original_name.replace('"', "")
+    safe_name = "".join(char for char in evidence.original_name if ord(char) >= 32 and ord(char) != 127)
+    encoded_name = quote(safe_name or "evidence", safe="")
     return Response(
         content=content,
         media_type=evidence.mime_type,
-        headers={"Content-Disposition": f'inline; filename="{safe_name}"'},
+        headers={"Content-Disposition": f"inline; filename=\"evidence\"; filename*=UTF-8''{encoded_name}"},
     )
 
 
