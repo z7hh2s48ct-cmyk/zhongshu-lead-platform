@@ -11,8 +11,29 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
-def run(label: str, command: list[str]) -> tuple[bool, str]:
-    proc = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+def run(label: str) -> tuple[bool, str]:
+    options = {
+        "executable": sys.executable,
+        "cwd": ROOT,
+        "text": True,
+        "capture_output": True,
+    }
+    if label == "Python 编译":
+        proc = subprocess.run(
+            ["python", "-m", "compileall", "-q", "apps/api/src", "scripts"],
+            **options,
+        )
+    elif label == "后端测试":
+        proc = subprocess.run(
+            ["python", "-m", "pytest", "apps/api/tests", "-q"],
+            **options,
+        )
+    elif label == "前端 JavaScript 语法":
+        proc = subprocess.run(["python", "scripts/check_js.py"], **options)
+    elif label == "敏感信息扫描":
+        proc = subprocess.run(["python", "scripts/secret_scan.py"], **options)
+    else:
+        raise ValueError(f"未知评审检查：{label}")
     out = (proc.stdout + "\n" + proc.stderr).strip()
     return proc.returncode == 0, out[-8000:]
 
@@ -25,16 +46,16 @@ def main() -> int:
     args = parser.parse_args()
 
     checks = [
-        ("Python 编译", [sys.executable, "-m", "compileall", "-q", "apps/api/src", "scripts"]),
-        ("后端测试", [sys.executable, "-m", "pytest", "apps/api/tests", "-q"]),
-        ("前端 JavaScript 语法", [sys.executable, "scripts/check_js.py"]),
-        ("敏感信息扫描", [sys.executable, "scripts/secret_scan.py"]),
+        "Python 编译",
+        "后端测试",
+        "前端 JavaScript 语法",
+        "敏感信息扫描",
     ]
 
     results = []
     all_ok = True
-    for label, cmd in checks:
-        ok, output = run(label, cmd)
+    for label in checks:
+        ok, output = run(label)
         results.append((label, ok, output))
         all_ok &= ok
 

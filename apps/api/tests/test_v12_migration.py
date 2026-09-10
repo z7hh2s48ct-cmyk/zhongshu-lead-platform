@@ -3,28 +3,38 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import os
 from pathlib import Path
-import subprocess
-import sys
 import uuid
 
 import pytest
 import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import create_engine, inspect
+
+from apps.api.src.core.config import get_settings
 
 ROOT = Path(__file__).resolve().parents[3]
 
 
 def _alembic(database_url: str, *args: str) -> None:
-    env = os.environ.copy()
-    env["DATABASE_URL"] = database_url
-    subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
-        cwd=ROOT,
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    if len(args) != 2 or args[0] not in {"upgrade", "downgrade"}:
+        raise ValueError("migration tests only allow upgrade or downgrade with one revision")
+
+    previous_database_url = os.environ.get("DATABASE_URL")
+    try:
+        os.environ["DATABASE_URL"] = database_url
+        get_settings.cache_clear()
+        config = Config(str(ROOT / "alembic.ini"))
+        if args[0] == "upgrade":
+            command.upgrade(config, args[1])
+        else:
+            command.downgrade(config, args[1])
+    finally:
+        if previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = previous_database_url
+        get_settings.cache_clear()
 
 
 def _required_row(table: sa.Table, **overrides) -> dict:
@@ -296,9 +306,9 @@ def test_storage_cleanup_downgrade_refuses_to_drop_unfinished_jobs(tmp_path: Pat
             )
         )
 
-    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         _alembic(database_url, "downgrade", "0013_internal_user_test")
-    assert "unfinished storage cleanup jobs" in exc_info.value.stderr
+    assert "unfinished storage cleanup jobs" in str(exc_info.value)
     assert "storage_cleanup_outbox" in set(inspect(engine).get_table_names())
 
     with engine.begin() as connection:
@@ -532,10 +542,10 @@ def test_pre_dispatch_template_downgrade_refuses_referenced_template(
             )
         )
 
-    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         _alembic(database_url, "downgrade", "0016_lead_test_flag")
 
-    assert "verification tasks reference the seeded template" in exc_info.value.stderr
+    assert "verification tasks reference the seeded template" in str(exc_info.value)
     with engine.connect() as connection:
         assert connection.execute(
             sa.select(templates.c.id).where(templates.c.id == template_id)
@@ -580,9 +590,9 @@ def test_feedback_migration_downgrade_refuses_to_drop_business_data(
             )
         )
 
-    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         _alembic(database_url, "downgrade", "0014_storage_cleanup")
-    assert "lead source details exist" in exc_info.value.stderr
+    assert "lead source details exist" in str(exc_info.value)
     inspector = inspect(engine)
     assert "lead_export_tasks" in set(inspector.get_table_names())
     assert "source_detail" in {
@@ -610,9 +620,9 @@ def test_feedback_migration_downgrade_refuses_to_drop_business_data(
             )
         )
 
-    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         _alembic(database_url, "downgrade", "0014_storage_cleanup")
-    assert "lead export tasks exist" in exc_info.value.stderr
+    assert "lead export tasks exist" in str(exc_info.value)
     assert "lead_export_tasks" in set(inspect(engine).get_table_names())
 
     with engine.begin() as connection:

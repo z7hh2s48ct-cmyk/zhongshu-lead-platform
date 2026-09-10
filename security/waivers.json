@@ -3,28 +3,6 @@
   "waivers": [
     {
       "scanner": "semgrep",
-      "id": "dangerous-subprocess-use-tainted-env-args",
-      "scope": "scripts/verify_production.py",
-      "occurrence": "L214:C33-L214:C40",
-      "reason": "Production verification invokes Docker with an argv list and shell=False; environment-derived values are passed as individual arguments, not evaluated by a shell. Re-review this exact source occurrence rather than suppressing the rule elsewhere in the file.",
-      "owner": "platform-security",
-      "created_on": "2026-08-08",
-      "first_waived_on": "2026-08-08",
-      "expires_on": "2026-09-07"
-    },
-    {
-      "scanner": "semgrep",
-      "id": "dangerous-subprocess-use-audit",
-      "scope": "apps/api/tests/test_v12_migration.py",
-      "occurrence": "L20:C5-L27:C6",
-      "reason": "The migration test invokes the current Python interpreter with a fixed Alembic module/config prefix and test-owned migration arguments. It never enables a shell and runs only in the isolated test database workflow.",
-      "owner": "platform-security",
-      "created_on": "2026-08-10",
-      "first_waived_on": "2026-08-10",
-      "expires_on": "2026-09-07"
-    },
-    {
-      "scanner": "semgrep",
       "id": "dangerous-subprocess-use-audit",
       "scope": "apps/api/tests/test_customer_feedback_831_return_evidence.py",
       "occurrence": "L53:C5-L58:C6",
@@ -33,50 +11,6 @@
       "created_on": "2026-08-31",
       "first_waived_on": "2026-08-31",
       "expires_on": "2026-09-30"
-    },
-    {
-      "scanner": "semgrep",
-      "id": "dangerous-subprocess-use-audit",
-      "scope": "scripts/preflight_v12.py",
-      "occurrence": "L99:C18-L99:C92",
-      "reason": "The production preflight runner accepts only command arrays assembled by this script from fixed Docker Compose and Python entrypoints. subprocess receives an argv list with shell disabled; sensitive values are separately redacted from evidence.",
-      "owner": "platform-security",
-      "created_on": "2026-08-10",
-      "first_waived_on": "2026-08-10",
-      "expires_on": "2026-09-07"
-    },
-    {
-      "scanner": "semgrep",
-      "id": "dangerous-subprocess-use-audit",
-      "scope": "scripts/task_review.py",
-      "occurrence": "L15:C12-L15:C77",
-      "reason": "The review helper executes only the four fixed compile, pytest, JavaScript, and secret-scan argv lists declared in the same file. It does not accept a command from CLI input and never enables a shell.",
-      "owner": "platform-security",
-      "created_on": "2026-08-10",
-      "first_waived_on": "2026-08-10",
-      "expires_on": "2026-09-07"
-    },
-    {
-      "scanner": "semgrep",
-      "id": "dangerous-subprocess-use-audit",
-      "scope": "scripts/verify_production.py",
-      "occurrence": "L58:C18-L64:C10",
-      "reason": "Image inspection uses the Docker executable resolved by shutil.which and a fixed argv structure. The image reference is one argument, shell execution is disabled, and validation requires an immutable production reference.",
-      "owner": "platform-security",
-      "created_on": "2026-08-10",
-      "first_waived_on": "2026-08-10",
-      "expires_on": "2026-09-07"
-    },
-    {
-      "scanner": "semgrep",
-      "id": "dangerous-subprocess-use-audit",
-      "scope": "scripts/verify_production.py",
-      "occurrence": "L214:C18-L214:C83",
-      "reason": "Compose validation uses a fixed Docker Compose argv prefix; environment-derived paths are passed as distinct arguments, never evaluated by a shell. This occurrence is paired with the existing taint-rule review at the same call site.",
-      "owner": "platform-security",
-      "created_on": "2026-08-10",
-      "first_waived_on": "2026-08-10",
-      "expires_on": "2026-09-07"
     },
     {
       "scanner": "semgrep",
