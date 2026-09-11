@@ -2,7 +2,7 @@ import { amountToWan, wanToAmount } from '/h5/business-units.js';
 
 const API='/api/v1',app=document.querySelector('#app'),toastBox=document.querySelector('#toast'),sheet=document.querySelector('#sheet-root');
 const S={me:null,view:'home',id:'',page:1,unreadNotifications:0};
-const LABEL={DRAFT:'待完善',PENDING:'审核中',PENDING_REVIEW:'平台审核中',PUBLIC_POOL:'等待当地接收方',READY_DISPATCH:'已进入派发',DUPLICATE:'重复信息复核中',PENDING_CLAIM:'待领取',CLAIMED:'已领取',FOLLOWING:'跟进中',RETURN_PENDING:'退回处理中',RETURNED:'已退回',RELEASED:'已释放',EXPIRED:'已过期',CLOSED:'已关闭',COMPLETED:'已完成',UNCONTACTED:'未联系',CONTACTED:'已联系',INTERESTED:'有意向',NOT_INTERESTED:'无意向',DEAL:'电话确认有效',INVALID:'需要修改',SUBMITTED:'已提交',VERIFYING:'核验中',REVIEWING:'待终审',NEED_MORE_EVIDENCE:'待补证',APPROVED:'审核通过',REJECTED:'需要修改',CLEAR:'未发现重复',HARD_DUPLICATE:'近期已有相同客户',REWARD_DUPLICATE:'已有相同客户记录',HISTORICAL_SUSPECT:'历史记录待确认',OVERRIDDEN:'已人工确认',OBSERVING:'待结算',FROZEN:'暂缓结算',SETTLED:'已结算',CANCELLED:'已取消',REVERSED:'已调整',WAITING_CLAIM:'等待有效确认',READ:'已读',UNREAD:'未读',EMPTY_NUMBER:'空号或停机',OUT_OF_SERVICE_REGION:'超出服务区域',DUPLICATE_TO_RECEIVER:'接收方重复客户',NON_HOUSING_CONSULTATION:'非建房装修咨询',ASSIGNED:'待处理',IN_PROGRESS:'核验中',SUPPORT_RETURN:'支持退回',DOES_NOT_SUPPORT_RETURN:'不支持退回',INCONCLUSIVE:'信息不足'};
+const LABEL={DRAFT:'待完善',PENDING:'审核中',PENDING_REVIEW:'平台审核中',PUBLIC_POOL:'等待当地接收方',READY_DISPATCH:'已进入派发',DUPLICATE:'重复信息复核中',PENDING_CLAIM:'待领取',CLAIMED:'已领取',FOLLOWING:'跟进中',RETURN_PENDING:'退回处理中',RETURNED:'已退回',RELEASED:'已释放',EXPIRED:'已过期',CLOSED:'已关闭',COMPLETED:'已完成',UNCONTACTED:'未联系',CONTACTED:'已联系',INTERESTED:'有意向',NOT_INTERESTED:'无意向',DEAL:'电话确认有效',INVALID:'需要修改',SUBMITTED:'已提交',VERIFYING:'核验中',REVIEWING:'待终审',NEED_MORE_EVIDENCE:'待补证',APPROVED:'审核通过',REJECTED:'需要修改',CLEAR:'未发现重复',HARD_DUPLICATE:'近期已有相同客户',REWARD_DUPLICATE:'已有相同客户记录',HISTORICAL_SUSPECT:'历史记录待确认',OVERRIDDEN:'已人工确认',OBSERVING:'待结算',FROZEN:'暂缓结算',SETTLED:'已结算',CANCELLED:'已取消',REVERSED:'已调整',WAITING_CLAIM:'等待有效确认',READ:'已读',UNREAD:'未读',EMPTY_NUMBER:'空号或停机',OUT_OF_SERVICE_REGION:'超出服务区域',DUPLICATE_TO_RECEIVER:'接收方重复客户',NON_HOUSING_CONSULTATION:'非建房装修咨询',ASSIGNED:'待处理',IN_PROGRESS:'核验中',SUPPORT_RETURN:'支持退回',DOES_NOT_SUPPORT_RETURN:'不支持退回',INCONCLUSIVE:'信息不足',UNCLAIMED_TIMEOUT:'未在领取截止前确认接收',CLAIM_TIMEOUT:'未在领取截止前确认接收',REFUSED_CLAIM:'接收方拒绝领取',RETURN_APPROVED:'退回审核通过',V12_RETURN_APPROVED:'退回审核通过'};
 const ROLE_HOME_CONTRACT={FRANCHISE_OWNER:'加盟商工作台',FRANCHISE_EMPLOYEE:'加盟商工作台'};
 const ROLE_HOME_PRIORITY=['FRANCHISE_OWNER','FRANCHISE_EMPLOYEE'];
 const FRANCHISE_NAV={
@@ -187,7 +187,8 @@ async function loadSupplyCities(){
 
 async function loadSupplyDistricts(cityCode){
   const cities=await loadSupplyCities();
-  supplyState.districts=cities.find(city=>city.code===cityCode)?.districts||[];
+  const city=cities.find(item=>item.code===cityCode);
+  supplyState.districts=(city?.districts||[]).map(district=>({...district,province_name:city.province_name,city_name:city.name,option_name:`${city.province_name} · ${city.name} · ${district.name}`}));
   return supplyState.districts;
 }
 
@@ -201,12 +202,25 @@ async function loadSupplyTownships(districtCode){
 function filterSupplyRegionOptions(select,items,value,emptyLabel){
   const keyword=String(value||'').trim().toLocaleLowerCase('zh-CN');
   const selectedCode=select.value;
-  const matches=(items||[]).filter(item=>{
+  const matchedItems=(items||[]).filter(item=>{
     const label=String(item.option_name||item.name||'').toLocaleLowerCase('zh-CN');
-    return item.code===selectedCode||!keyword||label.includes(keyword);
+    return !keyword||label.includes(keyword);
   });
-  zsSetSafeHtml(select,`<option value="">${esc(emptyLabel)}</option>${matches.map(item=>`<option value="${esc(item.code)}">${esc(item.option_name||item.name)}</option>`).join('')}`);
-  if(matches.some(item=>item.code===selectedCode))select.value=selectedCode;
+  const selectedItem=(items||[]).find(item=>item.code===selectedCode);
+  const options=selectedItem&&!matchedItems.some(item=>item.code===selectedCode)?[selectedItem,...matchedItems]:matchedItems;
+  zsSetSafeHtml(select,`<option value="">${esc(emptyLabel)}</option>${options.map(item=>`<option value="${esc(item.code)}">${esc(item.option_name||item.name)}</option>`).join('')}`);
+  if(selectedItem)select.value=selectedCode;
+  const emptyState=document.querySelector(`#${select.id}-empty`);
+  if(emptyState){emptyState.textContent=matchedItems.length===0?'未找到匹配地区，请更换关键词。':'';emptyState.hidden=matchedItems.length!==0;}
+}
+
+function bindSupplyRegionEmpty(searchInput){
+  const emptyState=document.createElement('span');
+  emptyState.id=`${searchInput.id.replace('-search','')}-empty`;
+  emptyState.className='wb-region-empty';
+  emptyState.setAttribute('role','status');
+  emptyState.hidden=true;
+  searchInput.insertAdjacentElement('afterend',emptyState);
 }
 
 function normalizeSupplyPhone(value){
@@ -303,6 +317,15 @@ async function saveSupplyLead(item,submitAfter){
   }
 }
 
+function supplyIdentityView(){
+  const companyName=String(S.me?.company_name||'').trim();
+  const submitterName=String(S.me?.display_name||'').trim();
+  const companyLabel=S.me?.company_id&&companyName?companyName:'未绑定有效加盟商，请联系平台管理员';
+  const submitterLabel=submitterName||'姓名未配置，请联系平台管理员';
+  const incomplete=!(S.me?.company_id&&companyName&&submitterName);
+  return `<section class="wb-supply-identity" aria-readonly="true"><div><small>供资加盟商</small><b>${esc(companyLabel)}</b></div><div><small>实际录入人</small><b>${esc(submitterLabel)}</b></div>${incomplete?'<p>身份信息由当前登录账号确定，异常时请先联系平台管理员。</p>':''}</section>`;
+}
+
 async function openSupplyForm(item=null){
   const cities=await loadSupplyCities();
   const selectedCity=cities.find(row=>row.name===item?.city||row.code===item?.region_code);
@@ -311,20 +334,29 @@ async function openSupplyForm(item=null){
   const townships=await loadSupplyTownships(selectedDistrict?.code||'');
   const selectedTownship=townships.find(row=>row.code===item?.region_code);
   const title=item?'完善客资资料':'上传客资';
-  const note=item?.review_note?`<div class="wb-notice">平台修改说明：${esc(item.review_note)}</div>`:'';
+  const note=(item?.review_note?`<div class="wb-notice">平台修改说明：${esc(item.review_note)}</div>`:'')+supplyIdentityView();
   openSheet(title,`${note}<form class="wb-form wb-supply-form" id="supply-form" novalidate><div class="wb-form-error" id="supply-form-error" role="alert" hidden></div><section class="wb-supply-section"><h3>客户信息</h3><div class="wb-row"><div class="wb-field"><label for="supply-name">客户姓名</label><input class="wb-input" id="supply-name" data-supply-field maxlength="64" autocomplete="name" value="${esc(item?.customer_name==='未填写'?'':item?.customer_name||'')}"></div><div class="wb-field"><label for="supply-phone">客户手机号 *</label><input class="wb-input" id="supply-phone" data-supply-field inputmode="tel" maxlength="32" autocomplete="tel" placeholder="请输入 11 位手机号" value="${esc(item?.phone||'')}"></div></div><div class="wb-row"><div class="wb-field"><label for="supply-city">所在地城市</label><input class="wb-input wb-region-search" id="supply-city-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索省份或城市" aria-controls="supply-city"><select class="wb-select" id="supply-city" data-supply-field><option value="">暂不确定，提交后由电销补充</option>${cities.map(row=>`<option value="${esc(row.code)}" ${selectedCity?.code===row.code?'selected':''}>${esc(row.option_name||row.name)}</option>`).join('')}</select></div><div class="wb-field"><label for="supply-district">所在地区县</label><input class="wb-input wb-region-search" id="supply-district-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索区县" aria-controls="supply-district"><select class="wb-select" id="supply-district"><option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}" ${selectedDistrict?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></div><div class="wb-field"><label for="supply-township">所在地乡镇/街道</label><select class="wb-select" id="supply-township"><option value="">可选，精确到乡镇/街道</option>${townships.map(row=>`<option value="${esc(row.code)}" ${selectedTownship?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></section><section class="wb-supply-section"><h3>客户需求</h3><div class="wb-row"><div class="wb-field"><label for="supply-source">获客来源</label><select class="wb-select" id="supply-source">${supplyOptions(SUPPLY_SOURCES,item?.source_channel||'供应商推荐','请选择获客来源')}</select></div><div class="wb-field"><label for="supply-category">需求类型</label><select class="wb-select" id="supply-category">${supplyOptions(SUPPLY_CATEGORIES,item?.category_code||'','请选择需求类型')}</select></div></div><div class="wb-field"><label for="supply-need">需求说明</label><textarea class="wb-textarea" id="supply-need" data-supply-field maxlength="2000" placeholder="可填写建房或装修地点、计划、时间等关键信息">${esc(item?.need_summary||'')}</textarea></div><div class="wb-row"><div class="wb-field"><label for="supply-budget-min">预算最低（万元）</label><input class="wb-input" id="supply-budget-min" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_min))}"></div><div class="wb-field"><label for="supply-budget-max">预算最高（万元）</label><input class="wb-input" id="supply-budget-max" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_max))}"></div></div></section><label class="wb-choice wb-supply-consent"><input type="checkbox" id="supply-consent" data-supply-field ${item?.consent_confirmed?'checked':''}><span><b>我确认已获得客户授权 *</b><small>客户知晓其联系方式和需求将用于业务对接。</small></span></label><div class="wb-actions"><button class="wb-btn" type="button" id="supply-save-draft">保存草稿</button><button class="wb-btn primary" type="button" id="supply-submit">提交审核</button></div></form>`,()=>{
     document.querySelector('#supply-form').onsubmit=event=>event.preventDefault();
     const citySelect=document.querySelector('#supply-city');
     const districtSelect=document.querySelector('#supply-district');
     const districtSearch=document.querySelector('#supply-district-search');
+    const citySearch=document.querySelector('#supply-city-search');
+    const townshipSelect=document.querySelector('#supply-township');
+    bindSupplyRegionEmpty(citySearch);
+    bindSupplyRegionEmpty(districtSearch);
+    filterSupplyRegionOptions(citySelect,supplyState.cities,'','暂不确定，提交后由电销补充');
+    filterSupplyRegionOptions(districtSelect,supplyState.districts,'','暂不确定 / 全市范围');
     document.querySelector('#supply-city-search').oninput=event=>filterSupplyRegionOptions(citySelect,supplyState.cities,event.target.value,'暂不确定，提交后由电销补充');
     districtSearch.oninput=event=>filterSupplyRegionOptions(districtSelect,supplyState.districts,event.target.value,'暂不确定 / 全市范围');
     citySelect.onchange=async event=>{
       const districts=await loadSupplyDistricts(event.target.value);
-      zsSetSafeHtml(districtSelect,`<option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}">${esc(row.name)}</option>`).join('')}`);
+      districtSelect.value='';
+      townshipSelect.value='';
+      zsSetSafeHtml(districtSelect,`<option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}">${esc(row.option_name||row.name)}</option>`).join('')}`);
       districtSearch.value='';
+      document.querySelector('#supply-district-empty').hidden=true;
       await loadSupplyTownships('');
-      zsSetSafeHtml(document.querySelector('#supply-township'),'<option value="">请先选择区县</option>');
+      zsSetSafeHtml(townshipSelect,'<option value="">请先选择区县</option>');
     };
     districtSelect.onchange=async event=>{
       const townships=await loadSupplyTownships(event.target.value);
@@ -442,7 +474,7 @@ async function assignments(){
   document.querySelectorAll('[data-internal-assignment]').forEach(b=>b.onclick=()=>manageInternalAssignment(b.dataset.internalAssignment));
   if(S.id){const id=S.id;S.id='';assignmentDetail(id)}
 }
-async function assignmentDetail(id){const [x,followups]=await Promise.all([api(`/v1.2/assignments/${id}`),api(`/followups/assignments/${id}`)]);const history=(followups||[]).map(row=>`<article class="wb-item"><div class="wb-item-top"><div><h3>${esc(readableLabel(row.status,'状态已更新'))}</h3><p>${esc(row.note||'无备注')}</p><p>记录时间 ${fmt(row.created_at)}${row.next_followup_at?` · 下次跟进 ${fmt(row.next_followup_at)}`:''}</p></div></div></article>`).join('');const currentFollow=x.current_follow_status||followups?.[0]?.status;const receiveConfirmation=x.receive_confirmation_status==='CONFIRMED'?`已确认${x.receive_confirmed_at?` · ${fmt(x.receive_confirmed_at)}`:''}`:'待确认';const correctionBlocked=x.lead_pending_reason==='CORRECTION_REVIEW_REQUIRED';const canFollow=!correctionBlocked&&['CLAIMED','FOLLOWING'].includes(x.status)&&can('followup.own.manage');openSheet('派发单详情',`${correctionBlocked?'<div class="wb-notice">客资信息已更正，当前接收资格需运营处理，处理前暂停确认接收和跟进。</div>':''}<div class="wb-detail-grid">${[['派发编号',recordCode(x.id,'PF')],['客户',x.customer_name],['电话',x.phone||x.phone_masked||'确认接收后查看'],['派发状态',readableLabel(x.status)],['客资状态',readableLabel(x.lead_status)],['接收确认',receiveConfirmation],['当前跟进',currentFollow?readableLabel(currentFollow):'暂无'],['客资积分',x.points_price],['领取截止',fmt(x.expires_at)],['退回截止',fmt(x.appeal_deadline_at)]].map(([a,b])=>`<div class="wb-detail"><small>${a}</small><b>${esc(b||'--')}</b></div>`).join('')}</div><p class="wb-muted">${x.status==='PENDING_CLAIM'?deadlineNotice(x.expires_at,'领取截止'):deadlineNotice(x.appeal_deadline_at,x.status==='RETURN_PENDING'?'首次申诉截止':'领取后 48 小时退回截止')}</p><div class="wb-actions">${!correctionBlocked&&x.status==='PENDING_CLAIM'&&canClaimAssignment()?`<button class="wb-btn primary" id="sheet-claim" ${deadlineButtonAttributes(x.expires_at)}>确认接收</button><button class="wb-btn danger" id="sheet-refuse" ${deadlineButtonAttributes(x.expires_at)}>拒绝领取</button>`:''}${canFollow?`<button class="wb-btn primary" id="sheet-followup">新增跟进</button>`:''}${!correctionBlocked&&['CLAIMED','FOLLOWING','COMPLETED'].includes(x.status)&&can('return.own.manage')?`<button class="wb-btn danger" id="sheet-return" ${deadlineButtonAttributes(x.appeal_deadline_at)}>发起退回</button>`:''}</div><div class="wb-card"><h3>跟进历史</h3><div class="wb-list">${history||'<div class="wb-empty">暂无跟进记录</div>'}</div></div>`,()=>{document.querySelector('#sheet-claim')?.addEventListener('click',()=>claim(id));document.querySelector('#sheet-refuse')?.addEventListener('click',()=>refuseAssignment(id));document.querySelector('#sheet-followup')?.addEventListener('click',()=>followupDraft(id,x.appeal_deadline_at));document.querySelector('#sheet-return')?.addEventListener('click',()=>returnDraft(id,'',x.appeal_deadline_at))})}
+async function assignmentDetail(id){const [x,followups]=await Promise.all([api(`/v1.2/assignments/${id}`),api(`/followups/assignments/${id}`)]);const history=(followups||[]).map(row=>`<article class="wb-item"><div class="wb-item-top"><div><h3>${esc(readableLabel(row.status,'状态已更新'))}</h3><p>${esc(row.note||'无备注')}</p><p>记录时间 ${fmt(row.created_at)}${row.next_followup_at?` · 下次跟进 ${fmt(row.next_followup_at)}`:''}</p></div></div></article>`).join('');const currentFollow=x.current_follow_status||followups?.[0]?.status;const receiveConfirmation=x.receive_confirmation_status==='CONFIRMED'?`已确认${x.receive_confirmed_at?` · ${fmt(x.receive_confirmed_at)}`:''}`:'待确认';const correctionBlocked=x.lead_pending_reason==='CORRECTION_REVIEW_REQUIRED';const canFollow=!correctionBlocked&&['CLAIMED','FOLLOWING'].includes(x.status)&&can('followup.own.manage');openSheet('派发单详情',`${correctionBlocked?'<div class="wb-notice">客资信息已更正，当前接收资格需运营处理，处理前暂停确认接收和跟进。</div>':''}<div class="wb-detail-grid">${[['派发编号',recordCode(x.id,'PF')],['客户',x.customer_name],['电话',x.phone||x.phone_masked||'确认接收后查看'],['派发状态',readableLabel(x.status)],['客资状态',readableLabel(x.lead_status)],['接收确认',receiveConfirmation],['当前跟进',currentFollow?readableLabel(currentFollow):'暂无'],['客资积分',x.points_price],['派发时间',fmt(x.assigned_at)],['领取时间',fmt(x.claimed_at)],['领取截止',fmt(x.expires_at)],['退回截止',fmt(x.appeal_deadline_at)],['过期原因',x.release_reason?readableLabel(x.release_reason):'未过期']].map(([a,b])=>`<div class="wb-detail"><small>${a}</small><b>${esc(b||'--')}</b></div>`).join('')}</div><p class="wb-muted">${x.status==='PENDING_CLAIM'?deadlineNotice(x.expires_at,'领取截止'):deadlineNotice(x.appeal_deadline_at,x.status==='RETURN_PENDING'?'首次申诉截止':'领取后 48 小时退回截止')}</p><div class="wb-actions">${!correctionBlocked&&x.status==='PENDING_CLAIM'&&canClaimAssignment()?`<button class="wb-btn primary" id="sheet-claim" ${deadlineButtonAttributes(x.expires_at)}>确认接收</button><button class="wb-btn danger" id="sheet-refuse" ${deadlineButtonAttributes(x.expires_at)}>拒绝领取</button>`:''}${canFollow?`<button class="wb-btn primary" id="sheet-followup">新增跟进</button>`:''}${!correctionBlocked&&['CLAIMED','FOLLOWING','COMPLETED'].includes(x.status)&&can('return.own.manage')?`<button class="wb-btn danger" id="sheet-return" ${deadlineButtonAttributes(x.appeal_deadline_at)}>发起退回</button>`:''}</div><div class="wb-card"><h3>跟进历史</h3><div class="wb-list">${history||'<div class="wb-empty">暂无跟进记录</div>'}</div></div>`,()=>{document.querySelector('#sheet-claim')?.addEventListener('click',()=>claim(id));document.querySelector('#sheet-refuse')?.addEventListener('click',()=>refuseAssignment(id));document.querySelector('#sheet-followup')?.addEventListener('click',()=>followupDraft(id,x.appeal_deadline_at));document.querySelector('#sheet-return')?.addEventListener('click',()=>returnDraft(id,'',x.appeal_deadline_at))})}
 async function claim(id){try{await api(`/v1.2/assignments/${id}/claim`,{method:'POST'});toast('已确认接收');closeSheet();render()}catch(e){toast(e.message,true)}}
 function refuseAssignment(id){openSheet('拒绝领取',`<div class="wb-notice">拒绝后，这条客资会立即回到平台待派发池；该动作与领取后的“发起退回”分开记录和统计。</div><form class="wb-form" id="refuse-assignment-form"><div class="wb-field"><label>拒绝原因</label><textarea class="wb-textarea" name="reason" required minlength="2" maxlength="500" placeholder="请说明当前无法承接的原因"></textarea></div><button class="wb-btn danger" id="refuse-assignment-submit">确认拒绝领取</button></form>`,()=>{const form=document.querySelector('#refuse-assignment-form'),submit=document.querySelector('#refuse-assignment-submit');form.onsubmit=async event=>{event.preventDefault();const reason=String(new FormData(form).get('reason')||'').trim();if(reason.length<2){toast('请至少填写 2 个字的拒绝原因',true);return}submit.disabled=true;try{await api(`/v1.2/assignments/${encodeURIComponent(id)}/refuse`,{method:'POST',body:JSON.stringify({reason})});closeSheet();toast('已拒绝领取，客资已退回平台待派发池');await render()}catch(error){submit.disabled=false;toast(error.message,true)}}})}
 async function manageInternalAssignment(assignmentId){

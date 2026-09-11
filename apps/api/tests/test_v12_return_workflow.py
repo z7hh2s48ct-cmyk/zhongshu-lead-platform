@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 from starlette.requests import Request
 
 from apps.api.src.core.auth import Principal
@@ -40,7 +40,9 @@ from apps.api.src.services.return_v12 import (
     assign_return_verification_task,
     claim_return_verification_task,
     create_or_update_return_draft,
+    direct_invalid_return,
     final_review_return,
+    return_request_to_dict,
     return_request_list_to_dict,
     return_verification_task_list_to_dict,
     return_verification_task_to_dict,
@@ -639,6 +641,188 @@ def test_final_approve_refunds_once_closes_invalid_lead_and_cancels_reward(db) -
     ).all()
     assert len(refunds) == 1
     assert db.get(PointsAccount, setup["account"].id).balance == 1000
+
+
+def test_operation_can_directly_confirm_invalid_before_telesales_submission(db) -> None:
+    setup = _workflow_setup(db, suffix="-DIRECT")
+    owner = _principal(setup["receiver_user"], "return.own.manage")
+    request = create_or_update_return_draft(
+        db,
+        assignment_id=setup["assignment"].id,
+        principal=owner,
+        reason_code="EMPTY_NUMBER",
+        description="运营可从证据直接确认空号",
+    )
+    _evidence(db, request, owner, EvidenceType.CALL_RECORDING.value)
+    submitted = submit_return_request(db, return_id=request.id, principal=owner)
+    reviewer = _principal(setup["reviewer"], "return.review")
+
+    result = direct_invalid_return(
+        db,
+        return_id=request.id,
+        principal=reviewer,
+        note="运营复核录音后确认号码为空号",
+    )
+    db.commit()
+
+    assert result.request.status == ReturnV12Status.APPROVED.value
+    assert result.refund_ledger is not None
+    assert result.refund_ledger.delta == 100
+    assert submitted.task is not None
+    assert submitted.task.status == VerificationTaskStatus.CANCELLED.value
+    assert setup["assignment"].status == AssignmentStatus.RETURNED.value
+    assert setup["lead"].status == LeadV12Status.CLOSED.value
+    assert setup["reward"].status == RewardStatus.CANCELLED.value
+    assert db.get(PointsAccount, setup["account"].id).balance == 1000
+    event = db.scalar(
+        select(AssignmentEvent).where(
+            AssignmentEvent.assignment_id == setup["assignment"].id,
+            AssignmentEvent.event_type == "V12_RETURN_DIRECT_INVALID",
+        )
+    )
+    assert event is not None
+    assert event.payload["note"] == "运营复核录音后确认号码为空号"
+    repeated = direct_invalid_return(
+        db,
+        return_id=request.id,
+        principal=reviewer,
+        note="重复确认不得重复返分",
+    )
+    db.commit()
+    assert repeated.idempotent is True
+    assert db.scalar(
+        select(func.count(AssignmentEvent.id)).where(
+            AssignmentEvent.assignment_id == setup["assignment"].id,
+            AssignmentEvent.event_type == "V12_RETURN_DIRECT_INVALID",
+        )
+    ) == 1
+    assert db.scalar(
+        select(func.count(PointsLedger.id)).where(
+            PointsLedger.business_type == "V12_RETURN_REFUND",
+            PointsLedger.business_id == request.id,
+        )
+    ) == 1
+
+
+def test_return_verification_records_selected_evidence_separately(db) -> None:
+    setup = _workflow_setup(db, suffix="-VERIFY-EVIDENCE")
+    owner = _principal(setup["receiver_user"], "return.own.manage")
+    request = create_or_update_return_draft(
+        db,
+        assignment_id=setup["assignment"].id,
+        principal=owner,
+        reason_code="EMPTY_NUMBER",
+        description="提交证据供电销核验",
+    )
+    evidence = _evidence(db, request, owner, EvidenceType.CALL_RECORDING.value)
+    submitted = submit_return_request(db, return_id=request.id, principal=owner)
+    assert submitted.task is not None
+    assignment = assign_return_verification_task(
+        db,
+        task_id=submitted.task.id,
+        assignee_user_id=setup["telesales"].id,
+        assigned_by=setup["operator"].id,
+        reason="核验空号证据",
+    )
+    telesales = _principal(
+        setup["telesales"],
+        "verification.task.read",
+        "verification.task.start",
+        "verification.submit",
+        "lead.phone.read",
+    )
+    claim_return_verification_task(db, task_id=assignment.task.id, principal=telesales)
+    submit_return_verification(
+        db,
+        task_id=assignment.task.id,
+        principal=telesales,
+        contact_result="EMPTY_NUMBER",
+        conclusion="SUPPORT_RETURN",
+        note="录音可确认号码为空号",
+        evidence_ids=[evidence.id],
+    )
+
+    detail = return_verification_task_to_dict(
+        db,
+        assignment.task,
+        telesales,
+        include_verification_info=True,
+    )
+    verification_evidences = detail["verification_info"]["evidences"]
+    assert detail["return_request"]["available_evidences"][0]["id"] == evidence.id
+    assert verification_evidences == [
+        {
+            "id": evidence.id,
+            "type": EvidenceType.CALL_RECORDING.value,
+            "original_name": "call.mp3",
+            "mime_type": "audio/mpeg",
+            "file_size": 1024,
+            "duration_seconds": 30,
+            "created_at": evidence.created_at.isoformat(),
+        }
+    ]
+    return_detail = return_request_to_dict(db, request, include_evidence=True)
+    assert return_detail["verification"]["evidences"] == verification_evidences
+
+
+def test_return_verification_rejects_evidence_from_outside_the_request(db) -> None:
+    setup = _workflow_setup(db, suffix="-VERIFY-FOREIGN-EVIDENCE")
+    owner = _principal(setup["receiver_user"], "return.own.manage")
+    request = create_or_update_return_draft(
+        db,
+        assignment_id=setup["assignment"].id,
+        principal=owner,
+        reason_code="EMPTY_NUMBER",
+        description="不得引用其他退回申请的证据",
+    )
+    _evidence(db, request, owner, EvidenceType.CALL_RECORDING.value)
+    submitted = submit_return_request(db, return_id=request.id, principal=owner)
+    assert submitted.task is not None
+    assign_return_verification_task(
+        db,
+        task_id=submitted.task.id,
+        assignee_user_id=setup["telesales"].id,
+        assigned_by=setup["operator"].id,
+        reason="核验空号证据",
+    )
+    telesales = _principal(
+        setup["telesales"],
+        "verification.task.read",
+        "verification.task.start",
+        "verification.submit",
+        "lead.phone.read",
+    )
+    claim_return_verification_task(db, task_id=submitted.task.id, principal=telesales)
+
+    with pytest.raises(AppError) as exc_info:
+        submit_return_verification(
+            db,
+            task_id=submitted.task.id,
+            principal=telesales,
+            contact_result="EMPTY_NUMBER",
+            conclusion="SUPPORT_RETURN",
+            note="尝试引用外部证据",
+            evidence_ids=["not-this-return-evidence"],
+        )
+
+    assert exc_info.value.code == "RETURN_VERIFY_EVIDENCE_INVALID"
+    assert submitted.task.status == VerificationTaskStatus.IN_PROGRESS.value
+
+
+def test_direct_invalid_rejects_an_existing_telesales_conclusion(db) -> None:
+    setup = _workflow_setup(db, suffix="-DIRECT-CONFLICT")
+    request, _ = _submit_and_verify(db, setup)
+    reviewer = _principal(setup["reviewer"], "return.review")
+
+    with pytest.raises(AppError) as exc_info:
+        direct_invalid_return(
+            db,
+            return_id=request.id,
+            principal=reviewer,
+            note="不得绕过已有电销结论",
+        )
+
+    assert exc_info.value.code == "RETURN_VERIFY_CONCLUSION_EXISTS"
 
 
 def test_missing_return_submission_event_never_misattributed_review_note(db, caplog) -> None:

@@ -175,6 +175,7 @@ def test_pre_dispatch_http_flow_never_allows_telesales_to_self_assign(api_client
     assert history_item["status"] == "RELEASED"
     assert history_item["submitted_at"]
     assert history_item["conclusion"] == "QUALIFIED"
+    assert history_item["lead"]["phone"] == "13900139010"
     assert "verification_info" not in history_item
 
     with factory() as db:
@@ -188,8 +189,14 @@ def test_pre_dispatch_http_flow_never_allows_telesales_to_self_assign(api_client
             headers=telesales_headers,
         )
     )
+    assert released_detail["lead"]["phone"] == "13900139010"
     assert released_detail["is_overdue"] is False
     assert released_detail["lead"]["next_owner"] is None
+    forbidden_detail = client.get(
+        f"/api/v1/v1.2/pre-dispatch-verifications/tasks/{task_id}",
+        headers=other_headers,
+    )
+    assert forbidden_detail.status_code == 403
     assert other_id != telesales_id
 
 

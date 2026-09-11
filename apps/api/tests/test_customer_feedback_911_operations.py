@@ -78,6 +78,68 @@ def test_lead_report_filters_by_supplier_company_and_pending_reason(db) -> None:
     assert [row.lead.customer_name for row in rows] == ["待运营补充 A"]
 
 
+def test_company_provided_count_matches_supplier_drilldown_scope(api_client) -> None:
+    client, factory = api_client
+    operation_headers = _login(client, "operation", "Operation123!")
+    with factory() as db:
+        operation = db.scalar(select(User).where(User.username == "operation"))
+        company = Company(code="SUP-911-COUNT", name="供资口径验收加盟商", status="ACTIVE")
+        db.add(company)
+        db.flush()
+        visible = _lead(
+            submitter_id=operation.id,
+            supplier_company_id=company.id,
+            phone="13900139731",
+            name="有效加盟商供资",
+        )
+        deleted = _lead(
+            submitter_id=operation.id,
+            supplier_company_id=company.id,
+            phone="13900139732",
+            name="已删除加盟商供资",
+        )
+        deleted.deleted_at = datetime.now(timezone.utc)
+        platform = _lead(
+            submitter_id=operation.id,
+            supplier_company_id=company.id,
+            phone="13900139733",
+            name="平台录入客资",
+        )
+        platform.source_type = "PLATFORM_MANUAL"
+        platform.source_kind = "PLATFORM_MANUAL"
+        db.add_all([visible, deleted, platform])
+        db.commit()
+        company_id = company.id
+
+    company_page = client.get(
+        "/api/v1/companies?page=1&page_size=200",
+        headers=operation_headers,
+    )
+    assert company_page.status_code == 200, company_page.text
+    company_item = next(
+        item
+        for item in company_page.json()["data"]["items"]
+        if item["id"] == company_id
+    )
+
+    drilldown = client.post(
+        "/api/v1/v1.2/reports/leads/search",
+        headers=operation_headers,
+        json={
+            "source_kind": "SUPPLIER_H5",
+            "supplier_company_id": company_id,
+            "page": 1,
+            "page_size": 20,
+        },
+    )
+    assert drilldown.status_code == 200, drilldown.text
+    assert company_item["provided"]["total"] == 1
+    assert drilldown.json()["data"]["total"] == 1
+    assert [item["customer_name"] for item in drilldown.json()["data"]["items"]] == [
+        "有效加盟商供资"
+    ]
+
+
 def test_operation_role_can_read_full_phone() -> None:
     assert "lead.phone.read" in ROLE_PERMISSION_MATRIX["OPERATION"][1]
 
@@ -135,5 +197,19 @@ def test_operations_ui_covers_feedback_entries_and_details() -> None:
     assert "data-company-provided-total" in source
     assert "data-detail-assign" in source
     assert "核验备注" in source
-    assert "forcePublicPool:lead.source_kind==='FEISHU_IMPORT'" in source
+    assert "forcePublicPool:['PLATFORM_MANUAL','FEISHU_IMPORT'].includes(lead.source_kind)" in source
     assert "correction&&id&&!forcePublicPool" in source
+
+
+def test_telesales_cannot_use_operation_direct_invalid_endpoint(api_client) -> None:
+    client, factory = api_client
+    _, return_id, _, _ = _seed_return_verification(factory)
+    telesales = _login(client, "telesales", "Telesales123!")
+
+    response = client.post(
+        f"/api/v1/v1.2/returns/{return_id}/direct-invalid",
+        headers=telesales,
+        json={"note": "电销角色不得执行运营直接判无效"},
+    )
+
+    assert response.status_code == 403

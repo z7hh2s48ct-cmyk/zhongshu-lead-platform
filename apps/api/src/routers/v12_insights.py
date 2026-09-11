@@ -36,6 +36,7 @@ from ..core.models import (
     PointsAccount,
     PointsLedger,
     ReturnRequest,
+    Role,
     User,
     VerificationTask,
 )
@@ -1219,10 +1220,27 @@ def lead_report_filter_options(
     _principal=Depends(require_permissions("lead.read")),
     db: Session = Depends(get_db),
 ):
+    active_supplier_company_ids = select(CompanyLeadCapability.company_id).where(
+        CompanyLeadCapability.capability_code == "LEAD_SUPPLIER",
+        CompanyLeadCapability.active.is_(True),
+        CompanyLeadCapability.review_status == "APPROVED",
+    )
+    historical_submitter_ids = select(Lead.submitter_user_id).where(
+        Lead.source_kind.is_not(None),
+        Lead.submitter_user_id.is_not(None),
+    )
     submitters = db.execute(
-        select(User.id, User.display_name)
-        .join(Lead, Lead.submitter_user_id == User.id)
-        .where(Lead.source_kind.is_not(None))
+        select(User.id, User.display_name, User.company_id, User.status)
+        .where(
+            or_(
+                User.id.in_(historical_submitter_ids),
+                and_(
+                    User.status == "ACTIVE",
+                    User.company_id.in_(active_supplier_company_ids),
+                    User.roles.any(Role.code.in_(("FRANCHISE_OWNER", "FRANCHISE_EMPLOYEE"))),
+                ),
+            )
+        )
         .distinct()
         .order_by(User.display_name.asc(), User.id.asc())
     ).all()
@@ -1234,8 +1252,18 @@ def lead_report_filter_options(
     ).all()
     supplier_companies = db.execute(
         select(Company.id, Company.name, Company.status)
-        .join(Lead, Lead.supplier_company_id == Company.id)
-        .where(Lead.source_kind.is_not(None), Lead.deleted_at.is_(None))
+        .where(
+            or_(
+                Company.id.in_(active_supplier_company_ids),
+                Company.id.in_(
+                    select(Lead.supplier_company_id).where(
+                        Lead.source_kind.is_not(None),
+                        Lead.deleted_at.is_(None),
+                        Lead.supplier_company_id.is_not(None),
+                    )
+                ),
+            )
+        )
         .distinct()
         .order_by(Company.name.asc(), Company.id.asc())
     ).all()
@@ -1251,7 +1279,13 @@ def lead_report_filter_options(
         request,
         {
             "submitters": [
-                {"id": item.id, "name": item.display_name} for item in submitters
+                {
+                    "id": item.id,
+                    "name": item.display_name,
+                    "company_id": item.company_id,
+                    "status": item.status,
+                }
+                for item in submitters
             ],
             "receiver_companies": [
                 {"id": item.id, "name": item.name, "status": item.status}

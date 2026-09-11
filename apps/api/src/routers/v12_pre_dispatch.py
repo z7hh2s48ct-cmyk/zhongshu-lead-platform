@@ -70,15 +70,17 @@ def _task_to_dict(
     operation_can_view_phone = principal.has_any_role("OPERATION", "SUPER_ADMIN") and (
         principal.can("lead.phone.read") or principal.can("*")
     )
-    active_assignee_can_view_phone = (
+    assignee_can_view_phone = (
         principal.has_any_role("TELESALES")
         and task.assignee_user_id == principal.user_id
-        and task.status == VerificationTaskStatus.IN_PROGRESS.value
         and principal.can("lead.phone.read")
-        and not is_overdue
+        and (
+            (task.status == VerificationTaskStatus.IN_PROGRESS.value and not is_overdue)
+            or task.submitted_at is not None
+        )
     )
     can_view_phone = bool(
-        include_phone and (operation_can_view_phone or active_assignee_can_view_phone)
+        include_phone and (operation_can_view_phone or assignee_can_view_phone)
     )
     phone = decrypt_text(lead.phone_encrypted) if lead and can_view_phone else None
     next_owner = None
@@ -237,8 +239,12 @@ def list_pre_dispatch_tasks(
                 db,
                 tasks,
                 principal,
-                include_phone=principal.has_any_role("OPERATION", "SUPER_ADMIN")
-                and (principal.can("*") or principal.can("lead.phone.read")),
+                include_phone=(
+                    submitted_history and principal.has_any_role("TELESALES")
+                ) or (
+                    principal.has_any_role("OPERATION", "SUPER_ADMIN")
+                    and (principal.can("*") or principal.can("lead.phone.read"))
+                ),
             ),
             total,
             page_no,

@@ -190,6 +190,86 @@ def test_manual_and_inline_entries_share_public_pool_and_transfer_revalidates(db
     assert lead.status == LeadV12Status.READY_DISPATCH.value
 
 
+def test_customer_name_is_optional_when_other_dispatch_fields_are_complete(db) -> None:
+    _seed_region(db)
+    _, principal = _operation(db)
+    lead = create_public_pool_lead(
+        db,
+        principal=principal,
+        values={
+            "phone": "13800138009",
+            "region_code": "420100",
+            "city": "武汉市",
+            "source_channel": "OTHER",
+            "source_detail": "线下活动",
+            "consent_confirmed": True,
+        },
+    )
+
+    assert lead.customer_name == "未填写"
+    assert lead.pending_reason is None
+    assert "customer_name" not in lead.raw_payload.get(
+        "public_pool_validation_errors",
+        {},
+    )
+
+    transferred = transfer_public_pool_lead(db, lead=lead, principal=principal)
+
+    assert transferred.transferred is True
+    assert transferred.validation_errors == {}
+    assert lead.status == LeadV12Status.READY_DISPATCH.value
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    [LeadSourceKind.PLATFORM_MANUAL.value, LeadSourceKind.FEISHU_IMPORT.value],
+)
+def test_rework_reason_stays_until_successful_dispatch_transfer(db, source_kind) -> None:
+    _seed_region(db)
+    _, principal = _operation(db)
+    lead = create_public_pool_lead(
+        db,
+        principal=principal,
+        values={"customer_name": "待补充客户", "phone": "13800138008"},
+    )
+    lead.source_kind = source_kind
+    lead.source_type = source_kind
+    lead.pending_reason = "PRE_DISPATCH_REWORK_REQUIRED"
+
+    update_public_pool_lead(
+        db,
+        lead=lead,
+        principal=principal,
+        values={"source_channel": "OTHER", "source_detail": "补充来源"},
+    )
+
+    assert lead.pending_reason == "PRE_DISPATCH_REWORK_REQUIRED"
+    assert set(lead.raw_payload["public_pool_validation_errors"]) >= {
+        "region_code",
+        "consent_confirmed",
+    }
+
+    update_public_pool_lead(
+        db,
+        lead=lead,
+        principal=principal,
+        values={
+            "region_code": "420100",
+            "city": "武汉市",
+            "consent_confirmed": True,
+        },
+    )
+
+    assert lead.pending_reason == "PRE_DISPATCH_REWORK_REQUIRED"
+    assert "public_pool_validation_errors" not in lead.raw_payload
+
+    transferred = transfer_public_pool_lead(db, lead=lead, principal=principal)
+
+    assert transferred.transferred is True
+    assert lead.status == LeadV12Status.READY_DISPATCH.value
+    assert lead.pending_reason is None
+
+
 def test_editing_public_pool_lead_refreshes_completeness_immediately(db) -> None:
     _seed_region(db)
     _, principal = _operation(db)

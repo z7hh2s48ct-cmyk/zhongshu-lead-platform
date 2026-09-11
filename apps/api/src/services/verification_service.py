@@ -192,9 +192,9 @@ def submit_verification(db: Session, task: VerificationTask, principal: Principa
     corrections = payload.get("corrections") or {}
     _apply_corrections(lead, corrections)
     if result == VerificationResult.QUALIFIED:
-        required = [lead.customer_name, lead.region_code, lead.category_code]
+        required = [lead.region_code, lead.category_code]
         if not all(required):
-            raise AppError("VERIFICATION_REQUIRED_FIELDS", "姓名、标准地区和业务类目完整后才能通过", 422)
+            raise AppError("VERIFICATION_REQUIRED_FIELDS", "标准地区和业务类目完整后才能通过", 422)
         lead.status = LeadStatus.QUALIFIED
         lead.pending_reason = None
         lead.verified_at = datetime.now(timezone.utc)

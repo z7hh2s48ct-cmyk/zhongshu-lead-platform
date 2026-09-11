@@ -61,6 +61,7 @@ class ReturnVerificationSubmitBody(BaseModel):
     contact_result: str = Field(min_length=2, max_length=64)
     conclusion: str = Field(min_length=2, max_length=64)
     note: str = Field(min_length=2, max_length=1000)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("contact_result")
     @classmethod
@@ -77,6 +78,25 @@ class ReturnVerificationSubmitBody(BaseModel):
         if normalized not in VALID_VERIFICATION_CONCLUSIONS:
             raise ValueError("核验结论无效")
         return normalized
+
+    @field_validator("note", mode="before")
+    @classmethod
+    def strip_note(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("evidence_ids")
+    @classmethod
+    def normalize_evidence_ids(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value if item and item.strip()]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("核验证据不能重复")
+        return normalized
+
+
+class ReturnDirectInvalidBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str = Field(min_length=2, max_length=1000)
 
     @field_validator("note", mode="before")
     @classmethod

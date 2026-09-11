@@ -160,8 +160,6 @@ def _feishu_values(
 
 def public_pool_validation_errors(db: Session, lead: Lead) -> dict[str, str]:
     errors: dict[str, str] = {}
-    if not _clean_text(lead.customer_name) or lead.customer_name == "未填写":
-        errors["customer_name"] = "客户姓名必填"
     phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
     if len(phone) != 11 or not phone.startswith("1"):
         errors["phone"] = "手机号必填且必须为 11 位有效号码"
@@ -240,8 +238,14 @@ def update_public_pool_lead(
     require_public_pool_lead(lead)
     if lead.status != LeadV12Status.DRAFT.value:
         raise AppError("PUBLIC_POOL_LEAD_NOT_EDITABLE", "当前公海池客资不可直接编辑", 409)
+    preserve_rework_reason = (
+        lead.source_kind in PUBLIC_POOL_OPERATION_SOURCE_KINDS
+        and lead.pending_reason == "PRE_DISPATCH_REWORK_REQUIRED"
+    )
     updated = update_draft(db, lead=lead, principal=principal, values=values)
     _refresh_public_pool_validation(db, updated)
+    if preserve_rework_reason:
+        updated.pending_reason = "PRE_DISPATCH_REWORK_REQUIRED"
     db.flush()
     return updated
 
@@ -323,7 +327,8 @@ def transfer_public_pool_lead(
     errors = public_pool_validation_errors(db, lead)
     _store_validation_errors(lead, errors)
     if errors:
-        lead.pending_reason = "PUBLIC_POOL_INCOMPLETE"
+        if lead.pending_reason != "PRE_DISPATCH_REWORK_REQUIRED":
+            lead.pending_reason = "PUBLIC_POOL_INCOMPLETE"
         db.flush()
         return PublicPoolTransferResult(
             lead=lead,
@@ -564,7 +569,6 @@ def public_pool_lead_conditions(
     submitter_user_id: str | None = None,
 ) -> list[Any]:
     incomplete_condition = or_(
-        Lead.customer_name == "未填写",
         Lead.phone_fingerprint.is_(None),
         Lead.region_code.is_(None),
         Lead.region_code == "",

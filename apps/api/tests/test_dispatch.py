@@ -6,6 +6,7 @@ from apps.api.src.core.errors import AppError
 from apps.api.src.core.models import Assignment, Lead, LeadPriceRule
 from apps.api.src.core.security import encrypt_text, hash_phone
 from apps.api.src.schemas.company import CompanyCreateBody
+from apps.api.src.services.claim_service import claim_assignment
 from apps.api.src.services.company_service import create_company
 from apps.api.src.services.dispatch_service import candidate_companies, dispatch_lead
 from apps.api.src.services.points_service import change_points
@@ -29,6 +30,25 @@ def test_candidate_and_single_active_dispatch(db) -> None:
     assignment = dispatch_lead(db, lead_id=lead.id, company_id=company.id, principal=operation_principal(), idempotency_key="dispatch-0001")
     db.commit()
     assert assignment.status == "PENDING_CLAIM"
+    assert assignment.points_price == 150
+    assert assignment.price_rule_id is not None
+    assert assignment.price_version == 1
     assert db.get(Lead, lead.id).current_assignment_id == assignment.id
+    claimed, ledger = claim_assignment(
+        db,
+        assignment.id,
+        Principal(
+            user_id="wechat-user",
+            display_name="负责人",
+            company_id=company.id,
+            role_codes=frozenset({"FRANCHISE_OWNER"}),
+            permission_codes=frozenset({"assignment.own.claim", "lead.own.phone.read"}),
+            session_version=1,
+        ),
+        "claim-price-150",
+    )
+    db.commit()
+    assert claimed.points_price == 150
+    assert ledger.delta == -150
     with pytest.raises(AppError):
         dispatch_lead(db, lead_id=lead.id, company_id=company.id, principal=operation_principal(), idempotency_key="dispatch-0002")

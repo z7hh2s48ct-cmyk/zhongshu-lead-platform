@@ -35,6 +35,46 @@ def test_verification_qualified_flow(db) -> None:
     assert db.get(VerificationTask, task.id).status == "SUBMITTED"
 
 
+def test_verification_can_qualify_lead_without_customer_name(db) -> None:
+    user = create_internal_user(
+        db,
+        username="tel-no-name",
+        password="password1",
+        display_name="电销",
+        role_code="TELESALES",
+    )
+    lead = Lead(
+        customer_name="未填写",
+        phone_encrypted=encrypt_text("13800138001"),
+        phone_hash=hash_phone("13800138001"),
+        city="上海市",
+        region_code="310100",
+        category_code="OLD_RENOVATION",
+        status="IMPORTED",
+    )
+    db.add(lead)
+    publish_template(db, code="NO_NAME", name="姓名选填核验", schema={"fields": []})
+    db.commit()
+    task = create_tasks(
+        db,
+        lead_ids=[lead.id],
+        assignee_user_id=user.id,
+        assigned_by=user.id,
+        template_code="NO_NAME",
+    )[0]
+    claim_task(db, task, principal(user.id))
+
+    submission = submit_verification(
+        db,
+        task,
+        principal(user.id),
+        {"result": "QUALIFIED", "answers": {}, "corrections": {}, "note": "姓名未知不影响核验"},
+    )
+
+    assert submission.result == "QUALIFIED"
+    assert lead.status == "QUALIFIED"
+
+
 def test_telesales_cannot_start_unassigned_verification_task(db) -> None:
     user = create_internal_user(db, username="tel-unassigned", password="password1", display_name="电销", role_code="TELESALES")
     lead = Lead(customer_name="王先生", phone_encrypted=encrypt_text("13900139001"), phone_hash=hash_phone("13900139001"), city="上海市", region_code="310100", category_code="OLD_RENOVATION", status="IMPORTED")
