@@ -23,7 +23,7 @@ from ..core.models_v12 import SupplierLeadReward
 from ..core.time import as_utc
 from ..core.v12_enums import RewardStatus
 from .notification_service import create_station_message, enqueue_outbox
-from .company_assignment_v12 import resolve_direct_dispatch_recipients
+from .company_assignment_v12 import resolve_company_owner
 
 
 def build_v12_deep_link(target: str, business_id: str, *, admin: bool = False) -> str:
@@ -528,13 +528,20 @@ def project_v12_notifications(
         assignment = db.get(Assignment, resource_id)
         if assignment:
             receiver_company_id = assignment.receiver_company_id or assignment.company_id
+            recipient_role = (assignment.lead_snapshot or {}).get(
+                "direct_recipient_role_code"
+            )
             owner_user_id = None
+            assigned_to_employee = False
             if assignment.internal_assignee_user_id:
-                owner_user_id = resolve_direct_dispatch_recipients(
-                    db,
-                    company_id=receiver_company_id,
-                    employee_user_id=assignment.internal_assignee_user_id,
-                ).owner.id
+                if recipient_role == "FRANCHISE_OWNER":
+                    owner_user_id = assignment.internal_assignee_user_id
+                else:
+                    owner_user_id = resolve_company_owner(
+                        db, company_id=receiver_company_id
+                    ).id
+                    assigned_to_employee = True
+            if assigned_to_employee:
                 emit_business_notification(
                     db,
                     event_key=f"v12:assignment:{assignment.id}:dispatched:employee",
@@ -554,16 +561,16 @@ def project_v12_notifications(
                 db,
                 event_key=(
                     f"v12:assignment:{assignment.id}:dispatched:owner"
-                    if assignment.internal_assignee_user_id
+                    if assigned_to_employee
                     else f"v12:assignment:{assignment.id}:dispatched"
                 ),
                 event_type="V12_ASSIGNMENT_DISPATCHED",
                 company_id=receiver_company_id,
                 user_id=owner_user_id,
-                title="新客资已直派给员工" if assignment.internal_assignee_user_id else "新客资已派发",
+                title="新客资已直派给员工" if assigned_to_employee else "新客资已派发给您",
                 body=(
                     "平台已将一条新客资直接派发给公司员工，请及时关注处理进度。"
-                    if assignment.internal_assignee_user_id
+                    if assigned_to_employee
                     else "您有一条新的客资待领取，请在有效期内处理。"
                 ),
                 target="assignment",

@@ -44,7 +44,7 @@ def test_existing_correction_form_renders_read_only_verification_and_uses_caller
         assert label in verification
     assert "esc(info.note" in verification
     assert "preDispatchVerificationInfo(options.verificationInfo)" in form
-    assert "savePlatformLead(item,correction,options.refresh)" in form
+    assert "savePlatformLead(item,correction,options.refresh,options.forcePublicPool)" in form
     assert "refresh||" in save
 
 

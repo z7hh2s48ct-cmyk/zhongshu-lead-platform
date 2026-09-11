@@ -7,7 +7,7 @@ from sqlalchemy import event, inspect, select
 
 from apps.api.src.core.enums import AssignmentStatus
 from apps.api.src.core.errors import AppError
-from apps.api.src.core.models import Assignment, Company, Lead, PointsAccount, PointsLedger, Region, User
+from apps.api.src.core.models import Assignment, Company, Lead, PointsAccount, PointsLedger, Region, Role, User
 from apps.api.src.core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12, SupplierLeadReward
 # N14：reward mapper 由该模块打补丁——不显式导入则单文件运行必 TypeError
 # （全套件靠字母序在前的 test_pre_go_live_security.py 先导入才侥幸通过）。
@@ -33,8 +33,15 @@ def _company(db, code: str, name: str) -> tuple[Company, User]:
     db.add(company)
     db.flush()
     user = User(username=f"{code.lower()}_owner", display_name=f"{name}负责人", status="ACTIVE", company_id=company.id)
+    owner_role = db.scalar(select(Role).where(Role.code == "FRANCHISE_OWNER"))
+    if owner_role is None:
+        owner_role = Role(code="FRANCHISE_OWNER", name="加盟商负责人")
+        db.add(owner_role)
+        db.flush()
+    user.roles.append(owner_role)
     db.add(user)
     db.flush()
+    company.primary_user_id = user.id
     return company, user
 
 

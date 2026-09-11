@@ -509,12 +509,6 @@ def quick_dispatch_platform_lead(
     principal=Depends(require_permissions("lead.manual.manage", "lead.dispatch")),
     db: Session = Depends(get_db),
 ):
-    if not body.employee_user_id:
-        raise AppError(
-            "DISPATCH_EMPLOYEE_REQUIRED",
-            "快捷派发必须选择具体加盟商员工",
-            422,
-        )
     request_hash = _quick_dispatch_hash(body)
     try:
         with manual_dispatch_idempotency_guard(body.idempotency_key):
@@ -614,7 +608,11 @@ def quick_dispatch_platform_lead(
                 after={
                     "lead_id": lead.id,
                     "company_id": assignment.company_id,
-                    "employee_user_id": assignment.internal_assignee_user_id,
+                    "employee_user_id": body.employee_user_id,
+                    "recipient_user_id": assignment.internal_assignee_user_id,
+                    "recipient_role_code": (assignment.lead_snapshot or {}).get(
+                        "direct_recipient_role_code"
+                    ),
                     "status": assignment.status,
                     "points_price": assignment.points_price,
                     "manual": True,

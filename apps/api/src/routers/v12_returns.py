@@ -277,7 +277,16 @@ def list_returns_v12(
     ).all()
     return ok(
         request,
-        page(return_request_list_to_dict(db, list(items)), int(total), page_no, page_size),
+        page(
+            return_request_list_to_dict(
+                db,
+                list(items),
+                include_phone=principal.can("*") or principal.can("lead.phone.read"),
+            ),
+            int(total),
+            page_no,
+            page_size,
+        ),
     )
 
 
@@ -293,7 +302,12 @@ def return_detail_v12(
         raise AppError("RETURN_NOT_FOUND", "退回申请不存在", 404)
     if not _can_read_return(db, principal, item):
         raise AppError("FORBIDDEN", "无权查看退回申请", 403)
-    data = return_request_to_dict(db, item, include_evidence=True)
+    data = return_request_to_dict(
+        db,
+        item,
+        include_evidence=True,
+        include_phone=principal.can("*") or principal.can("lead.phone.read"),
+    )
     for evidence in data.get("evidences", []):
         evidence["access_token"] = create_file_access_token(evidence["id"], principal.user_id)
     return ok(request, data)
@@ -387,7 +401,13 @@ def list_return_verification_tasks(
     return ok(
         request,
         page(
-            return_verification_task_list_to_dict(db, tasks, principal),
+            return_verification_task_list_to_dict(
+                db,
+                tasks,
+                principal,
+                include_phone=principal.has_any_role("OPERATION", "SUPER_ADMIN")
+                and (principal.can("*") or principal.can("lead.phone.read")),
+            ),
             int(total),
             page_no,
             page_size,
@@ -420,8 +440,11 @@ def return_verification_task_detail(
             task,
             principal,
             include_phone=(
-                task.assignee_user_id == principal.user_id
-                and task.status == VerificationTaskStatus.IN_PROGRESS.value
+                principal.has_any_role("OPERATION", "SUPER_ADMIN")
+                or (
+                    task.assignee_user_id == principal.user_id
+                    and task.status == VerificationTaskStatus.IN_PROGRESS.value
+                )
             ),
             include_verification_info=True,
         ),

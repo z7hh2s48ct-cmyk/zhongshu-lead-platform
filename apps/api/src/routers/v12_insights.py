@@ -1232,6 +1232,13 @@ def lead_report_filter_options(
             Company.id.asc(),
         )
     ).all()
+    supplier_companies = db.execute(
+        select(Company.id, Company.name, Company.status)
+        .join(Lead, Lead.supplier_company_id == Company.id)
+        .where(Lead.source_kind.is_not(None), Lead.deleted_at.is_(None))
+        .distinct()
+        .order_by(Company.name.asc(), Company.id.asc())
+    ).all()
     assigners = db.execute(
         select(User.id, User.display_name, User.status)
         .join(Assignment, Assignment.assigned_by == User.id)
@@ -1250,6 +1257,10 @@ def lead_report_filter_options(
                 {"id": item.id, "name": item.name, "status": item.status}
                 for item in receiver_companies
             ],
+            "supplier_companies": [
+                {"id": item.id, "name": item.name, "status": item.status}
+                for item in supplier_companies
+            ],
             "assigners": [
                 {"id": item.id, "name": item.display_name, "status": item.status}
                 for item in assigners
@@ -1266,12 +1277,14 @@ def lead_report_list(
     created_from: datetime | None = Query(default=None),
     created_to: datetime | None = Query(default=None),
     source_kind: str | None = Query(default=None),
+    supplier_company_id: str | None = Query(default=None),
     submitter_user_id: str | None = Query(default=None),
     region: str | None = Query(default=None, max_length=64),
     receiver_company_id: str | None = Query(default=None),
     lead_status: str | None = Query(default=None),
     assignment_status: str | None = Query(default=None),
     assigned_by_user_id: str | None = Query(default=None),
+    pending_reason: str | None = Query(default=None),
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
@@ -1283,6 +1296,7 @@ def lead_report_list(
         "created_from": created_from,
         "created_to": created_to,
         "source_kind": source_kind,
+        "supplier_company_id": supplier_company_id,
         "submitter_user_id": submitter_user_id,
         "phone_hash": None,
         "region": region,
@@ -1290,6 +1304,7 @@ def lead_report_list(
         "lead_status": lead_status,
         "assignment_status": assignment_status,
         "assigned_by_user_id": assigned_by_user_id,
+        "pending_reason": pending_reason,
     }
     rows, total = list_lead_report_rows(
         db,
@@ -1299,7 +1314,16 @@ def lead_report_list(
     )
     return ok(
         request,
-        page(lead_report_to_dicts(db, rows), total, page_no, page_size),
+        page(
+            lead_report_to_dicts(
+                db,
+                rows,
+                include_full_phone=principal.can("*") or principal.can("lead.phone.read"),
+            ),
+            total,
+            page_no,
+            page_size,
+        ),
     )
 
 
@@ -1321,7 +1345,16 @@ def search_lead_report(
     )
     return ok(
         request,
-        page(lead_report_to_dicts(db, rows), total, body.page, body.page_size),
+        page(
+            lead_report_to_dicts(
+                db,
+                rows,
+                include_full_phone=principal.can("*") or principal.can("lead.phone.read"),
+            ),
+            total,
+            body.page,
+            body.page_size,
+        ),
     )
 
 
@@ -1770,7 +1803,13 @@ def my_processed_operations(
     return ok(request, data)
 
 
-def _trace(db: Session, business_id: str, *, evidence_user_id: str | None = None) -> dict[str, Any]:
+def _trace(
+    db: Session,
+    business_id: str,
+    *,
+    evidence_user_id: str | None = None,
+    include_phone: bool = False,
+) -> dict[str, Any]:
     lead = db.get(Lead, business_id)
     assignment = db.get(Assignment, business_id)
     return_request = db.get(ReturnRequest, business_id)
@@ -1871,7 +1910,12 @@ def _trace(db: Session, business_id: str, *, evidence_user_id: str | None = None
     timeline.sort(key=lambda item: (item["at"], item["kind"], item["id"]))
     trace_returns = []
     for item in returns:
-        data = return_request_to_dict(db, item, include_evidence=True)
+        data = return_request_to_dict(
+            db,
+            item,
+            include_evidence=True,
+            include_phone=include_phone,
+        )
         data["company_name"] = companies.get(item.company_id).name if item.company_id in companies else None
         data["submitted_by_name"] = _display_name(users.get(item.submitted_by))
         data["reviewed_by_name"] = _display_name(users.get(item.reviewed_by))
@@ -1884,6 +1928,7 @@ def _trace(db: Session, business_id: str, *, evidence_user_id: str | None = None
         "lead": {
             "id": resolved_lead.id,
             "customer_name": resolved_lead.customer_name,
+            "phone": decrypt_text(resolved_lead.phone_encrypted) if include_phone else None,
             "phone_masked": mask_phone(decrypt_text(resolved_lead.phone_encrypted)),
             "status": resolved_lead.status,
             "source_kind": resolved_lead.source_kind,
@@ -1953,7 +1998,12 @@ def _trace(db: Session, business_id: str, *, evidence_user_id: str | None = None
 
 @router.get("/trace/{business_id}")
 def business_trace(business_id: str, request: Request, principal=Depends(require_permissions("audit.read")), db: Session = Depends(get_db)):
-    data = _trace(db, business_id, evidence_user_id=principal.user_id)
+    data = _trace(
+        db,
+        business_id,
+        evidence_user_id=principal.user_id,
+        include_phone=principal.can("*") or principal.can("lead.phone.read"),
+    )
     if len(data["linked_ids"]) == 1 and not data["audit_events"] and not data["notifications"] and data["lead"] is None:
         raise AppError("BUSINESS_TRACE_NOT_FOUND", "未找到该业务 ID", 404)
     return ok(request, data)

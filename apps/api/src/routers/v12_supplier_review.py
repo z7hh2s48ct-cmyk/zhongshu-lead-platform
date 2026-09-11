@@ -18,13 +18,6 @@ from ..services.lead_supply_v12 import (
 router = APIRouter(prefix="/v1.2/admin/supplier-leads", tags=["v1.2-supplier-review"])
 
 
-def _queue_item(item: dict) -> dict:
-    """Use data minimisation in list views even for privileged reviewers."""
-
-    item["phone"] = None
-    return item
-
-
 @router.get("")
 def supplier_review_queue(
     request: Request,
@@ -51,7 +44,7 @@ def supplier_review_queue(
     return ok(
         request,
         page(
-            [_queue_item(item) for item in lead_supply_list_to_dict(db, list(items), principal)],
+            lead_supply_list_to_dict(db, list(items), principal),
             total,
             page_no,
             page_size,

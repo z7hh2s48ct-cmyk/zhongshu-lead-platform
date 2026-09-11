@@ -331,12 +331,6 @@ def manual_dispatch(
     principal=Depends(require_permissions("lead.dispatch")),
     db: Session = Depends(get_db),
 ):
-    if not body.employee_user_id:
-        raise AppError(
-            "DISPATCH_EMPLOYEE_REQUIRED",
-            "派发客资必须选择具体加盟商员工",
-            422,
-        )
     with manual_dispatch_idempotency_guard(body.idempotency_key):
         outcome = dispatch_manually_with_outcome(
             db,
@@ -362,7 +356,11 @@ def manual_dispatch(
                 after={
                     "lead_id": lead_id,
                     "company_id": assignment.company_id,
-                    "employee_user_id": assignment.internal_assignee_user_id,
+                    "employee_user_id": body.employee_user_id,
+                    "recipient_user_id": assignment.internal_assignee_user_id,
+                    "recipient_role_code": (assignment.lead_snapshot or {}).get(
+                        "direct_recipient_role_code"
+                    ),
                     "status": assignment.status,
                     "points_price": assignment.points_price,
                     "manual": True,
@@ -469,7 +467,14 @@ def claim_own_assignment(
             and assignment_scope.internal_assignee_user_id == principal.user_id
             and assignment_scope.internal_assigned_by == principal.user_id
         )
-        if not (employee_claim or historical_owner_replay):
+        direct_owner_assignment = (
+            principal.has_any_role("FRANCHISE_OWNER")
+            and principal.can("assignment.own.claim")
+            and assignment_scope.internal_assignee_user_id == principal.user_id
+            and (assignment_scope.lead_snapshot or {}).get("direct_recipient_role_code")
+            == "FRANCHISE_OWNER"
+        )
+        if not (employee_claim or historical_owner_replay or direct_owner_assignment):
             raise AppError("FORBIDDEN", "该客资仅限被指定员工领取", 403)
     elif not (
         principal.has_any_role("FRANCHISE_OWNER")
@@ -564,11 +569,19 @@ def refuse_own_assignment(
     if assignment_scope is None or assignment_scope.company_id != company_id:
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
     if assignment_scope.internal_assignee_user_id:
-        if not (
+        employee_refusal = (
             principal.has_any_role("FRANCHISE_EMPLOYEE")
             and principal.can("assignment.employee.claim")
             and assignment_scope.internal_assignee_user_id == principal.user_id
-        ):
+        )
+        direct_owner_refusal = (
+            principal.has_any_role("FRANCHISE_OWNER")
+            and principal.can("assignment.own.claim")
+            and assignment_scope.internal_assignee_user_id == principal.user_id
+            and (assignment_scope.lead_snapshot or {}).get("direct_recipient_role_code")
+            == "FRANCHISE_OWNER"
+        )
+        if not (employee_refusal or direct_owner_refusal):
             raise AppError("FORBIDDEN", "该客资仅限被指定员工拒绝领取", 403)
     elif not (
         principal.has_any_role("FRANCHISE_OWNER")

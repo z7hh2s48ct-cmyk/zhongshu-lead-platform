@@ -838,6 +838,7 @@ def return_request_to_dict(
     item: ReturnRequest,
     *,
     include_evidence: bool = False,
+    include_phone: bool = False,
     leads_by_id: dict[str, Lead] | None = None,
     assignments_by_id: dict[str, Assignment] | None = None,
     users_by_id: dict[str, User] | None = None,
@@ -872,6 +873,7 @@ def return_request_to_dict(
         "company_id": item.company_id,
         "assignment_code": f"PF-{item.assignment_id[:8].upper()}",
         "customer_name": snapshot.get("customer_name") or (lead.customer_name if lead else None),
+        "phone": decrypt_text(lead.phone_encrypted) if lead and include_phone else None,
         "phone_masked": phone_masked,
         "city": snapshot.get("city") or (lead.city if lead else None),
         "district": snapshot.get("district") or (lead.district if lead else None),
@@ -932,6 +934,25 @@ def return_request_to_dict(
             "due_at": task.due_at.isoformat() if task.due_at else None,
             "is_overdue": _return_task_is_overdue(task),
         }
+        if include_evidence and task.submitted_at is not None:
+            submission_event = next(
+                (
+                    event
+                    for event in db.scalars(
+                        select(AssignmentEvent)
+                        .where(
+                            AssignmentEvent.assignment_id == task.assignment_id,
+                            AssignmentEvent.event_type == "V12_RETURN_VERIFY_SUBMITTED",
+                        )
+                        .order_by(AssignmentEvent.occurred_at.desc(), AssignmentEvent.id.desc())
+                    ).all()
+                    if (event.payload or {}).get("verification_task_id") == task.id
+                ),
+                None,
+            )
+            data["verification"]["note"] = (
+                (submission_event.payload or {}).get("note") if submission_event else None
+            )
     reward = (
         rewards_by_assignment_id.get(item.assignment_id)
         if rewards_by_assignment_id is not None
@@ -954,6 +975,8 @@ def return_request_to_dict(
 def return_request_list_to_dict(
     db: Session,
     items: list[ReturnRequest],
+    *,
+    include_phone: bool = False,
 ) -> list[dict[str, Any]]:
     """Serialize one return-request page with a fixed number of relation queries."""
     if not items:
@@ -998,6 +1021,7 @@ def return_request_list_to_dict(
         return_request_to_dict(
             db,
             item,
+            include_phone=include_phone,
             leads_by_id=leads_by_id,
             assignments_by_id=assignments_by_id,
             users_by_id=users_by_id,
@@ -1012,6 +1036,8 @@ def return_verification_task_list_to_dict(
     db: Session,
     tasks: list[VerificationTask],
     principal: Principal,
+    *,
+    include_phone: bool = False,
 ) -> list[dict[str, Any]]:
     """Serialize a verification-task page without per-row relation queries."""
     if not tasks:
@@ -1046,6 +1072,7 @@ def return_verification_task_list_to_dict(
             db,
             task,
             principal,
+            include_phone=include_phone,
             requests_by_id=requests_by_id,
             leads_by_id=leads_by_id,
             assignments_by_id=assignments_by_id,
@@ -1078,11 +1105,16 @@ def return_verification_task_to_dict(
         else db.get(Assignment, task.assignment_id) if task.assignment_id else None
     )
     is_overdue = _return_task_is_overdue(task)
-    can_view_phone = bool(
-        include_phone
-        and task.assignee_user_id == principal.user_id
+    operation_can_view_phone = principal.has_any_role("OPERATION", "SUPER_ADMIN") and (
+        principal.can("lead.phone.read") or principal.can("*")
+    )
+    active_assignee_can_view_phone = (
+        task.assignee_user_id == principal.user_id
         and (principal.can("lead.phone.read") or principal.can("*"))
         and not is_overdue
+    )
+    can_view_phone = bool(
+        include_phone and (operation_can_view_phone or active_assignee_can_view_phone)
     )
     phone = decrypt_text(lead.phone_encrypted) if lead and can_view_phone else None
     snapshot = assignment.lead_snapshot if assignment and assignment.lead_snapshot else {}
