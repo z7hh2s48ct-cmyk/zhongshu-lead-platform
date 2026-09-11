@@ -33,8 +33,48 @@ class InternalAssignmentChange:
 
 @dataclass(frozen=True)
 class DirectDispatchRecipients:
-    employee: User
+    assignee: User
     owner: User
+    assignee_role_code: str
+
+
+def resolve_company_owner(db: Session, *, company_id: str) -> User:
+    company = db.get(Company, company_id)
+    if company is None:
+        raise AppError("COMPANY_NOT_FOUND", "目标公司不存在", 404)
+
+    owner: User | None = None
+    if company.primary_user_id:
+        owner = db.scalar(
+            select(User)
+            .join(User.roles)
+            .where(
+                User.id == company.primary_user_id,
+                User.company_id == company_id,
+                User.status == "ACTIVE",
+                Role.code == "FRANCHISE_OWNER",
+            )
+        )
+    if owner is None:
+        owners = db.scalars(
+            select(User)
+            .join(User.roles)
+            .where(
+                User.company_id == company_id,
+                User.status == "ACTIVE",
+                Role.code == "FRANCHISE_OWNER",
+            )
+            .order_by(User.id.asc())
+        ).all()
+        if len(owners) == 1:
+            owner = owners[0]
+    if owner is None:
+        raise AppError(
+            "COMPANY_OWNER_RECIPIENT_REQUIRED",
+            "目标加盟商缺少唯一有效负责人，暂不能派发",
+            422,
+        )
+    return owner
 
 
 def require_company_assignment_access(principal: Principal, assignment: Assignment) -> None:
@@ -106,50 +146,42 @@ def resolve_direct_dispatch_recipients(
     db: Session,
     *,
     company_id: str,
-    employee_user_id: str,
+    employee_user_id: str | None,
 ) -> DirectDispatchRecipients:
-    employee = _active_employee_or_raise(
-        db,
-        company_id=company_id,
-        user_id=employee_user_id,
-    )
-    company = db.get(Company, company_id)
-    if company is None:
-        raise AppError("COMPANY_NOT_FOUND", "目标公司不存在", 404)
-
-    owner: User | None = None
-    if company.primary_user_id:
-        candidate = db.scalar(
-            select(User)
-            .join(User.roles)
-            .where(
-                User.id == company.primary_user_id,
-                User.company_id == company_id,
-                User.status == "ACTIVE",
-                Role.code == "FRANCHISE_OWNER",
-            )
+    owner = resolve_company_owner(db, company_id=company_id)
+    if employee_user_id:
+        employee = _active_employee_or_raise(
+            db,
+            company_id=company_id,
+            user_id=employee_user_id,
         )
-        owner = candidate
-    if owner is None:
-        owners = db.scalars(
-            select(User)
-            .join(User.roles)
-            .where(
-                User.company_id == company_id,
-                User.status == "ACTIVE",
-                Role.code == "FRANCHISE_OWNER",
-            )
-            .order_by(User.id.asc())
-        ).all()
-        if len(owners) == 1:
-            owner = owners[0]
-    if owner is None:
+        return DirectDispatchRecipients(
+            assignee=employee,
+            owner=owner,
+            assignee_role_code="FRANCHISE_EMPLOYEE",
+        )
+
+    active_employee_id = db.scalar(
+        select(User.id)
+        .join(User.roles)
+        .where(
+            User.company_id == company_id,
+            User.status == "ACTIVE",
+            Role.code == "FRANCHISE_EMPLOYEE",
+        )
+        .limit(1)
+    )
+    if active_employee_id is not None:
         raise AppError(
-            "COMPANY_OWNER_RECIPIENT_REQUIRED",
-            "目标加盟商缺少唯一有效负责人，暂不能派发",
+            "DISPATCH_EMPLOYEE_REQUIRED",
+            "该加盟商有在职员工，请选择具体接收员工",
             422,
         )
-    return DirectDispatchRecipients(employee=employee, owner=owner)
+    return DirectDispatchRecipients(
+        assignee=owner,
+        owner=owner,
+        assignee_role_code="FRANCHISE_OWNER",
+    )
 
 
 def assign_internal_employee(

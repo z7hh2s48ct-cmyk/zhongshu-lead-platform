@@ -44,7 +44,7 @@ def test_existing_correction_form_renders_read_only_verification_and_uses_caller
         assert label in verification
     assert "esc(info.note" in verification
     assert "preDispatchVerificationInfo(options.verificationInfo)" in form
-    assert "savePlatformLead(item,correction,options.refresh)" in form
+    assert "savePlatformLead(item,correction,options.refresh,options.forcePublicPool)" in form
     assert "refresh||" in save
 
 
@@ -252,5 +252,5 @@ def test_changed_frontend_assets_have_feedback_94_cache_busters() -> None:
     admin_index = ADMIN_INDEX.read_text(encoding="utf-8")
     call_index = CALL_INDEX.read_text(encoding="utf-8")
 
-    assert "v12-operations.js?v=20260910-feedback-910" in admin_index
-    assert "app.js?v=20260904-verification-info" in call_index
+    assert "v12-operations.js?v=20260911-feedback-911-complete" in admin_index
+    assert "app.js?v=20260911-history-evidence" in call_index

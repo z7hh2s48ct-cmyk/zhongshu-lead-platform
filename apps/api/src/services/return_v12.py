@@ -289,6 +289,33 @@ def add_return_evidence(
         request=request,
         principal=principal,
     )
+    return _create_return_evidence(
+        db,
+        request=request,
+        principal=principal,
+        evidence_type=evidence_type,
+        object_key=object_key,
+        original_name=original_name,
+        mime_type=mime_type,
+        file_size=file_size,
+        sha256=sha256,
+        duration_seconds=duration_seconds,
+    )
+
+
+def _create_return_evidence(
+    db: Session,
+    *,
+    request: ReturnRequest,
+    principal: Principal,
+    evidence_type: str,
+    object_key: str,
+    original_name: str,
+    mime_type: str,
+    file_size: int,
+    sha256: str,
+    duration_seconds: int | None,
+) -> ReturnEvidence:
     normalized_type = evidence_type.strip().upper()
     if normalized_type not in RETURN_EVIDENCE_TYPES:
         raise AppError("EVIDENCE_TYPE_INVALID", "证据类型无效", 422)
@@ -308,6 +335,61 @@ def add_return_evidence(
     return evidence
 
 
+def prepare_return_verification_evidence_upload(
+    db: Session,
+    *,
+    task_id: str,
+    principal: Principal,
+) -> tuple[VerificationTask, ReturnRequest]:
+    task = db.scalar(
+        select(VerificationTask).where(VerificationTask.id == task_id).with_for_update()
+    )
+    if task is None or task.task_type != VerificationTaskType.RETURN_VERIFY.value:
+        raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    _require_return_task_not_overdue(task)
+    if (
+        task.status != VerificationTaskStatus.IN_PROGRESS.value
+        or task.assignee_user_id != principal.user_id
+    ):
+        raise AppError("RETURN_VERIFY_TASK_NOT_OWNED", "仅进行中的本人任务可上传核验证据", 409)
+    request = db.get(ReturnRequest, task.return_request_id) if task.return_request_id else None
+    if request is None or request.status != ReturnV12Status.VERIFYING.value:
+        raise AppError("RETURN_NOT_VERIFYING", "退回申请当前不在电销核验阶段", 409)
+    return task, request
+
+
+def add_return_verification_evidence(
+    db: Session,
+    *,
+    task_id: str,
+    principal: Principal,
+    evidence_type: str,
+    object_key: str,
+    original_name: str,
+    mime_type: str,
+    file_size: int,
+    sha256: str,
+    duration_seconds: int | None,
+) -> ReturnEvidence:
+    _, request = prepare_return_verification_evidence_upload(
+        db,
+        task_id=task_id,
+        principal=principal,
+    )
+    return _create_return_evidence(
+        db,
+        request=request,
+        principal=principal,
+        evidence_type=evidence_type,
+        object_key=object_key,
+        original_name=original_name,
+        mime_type=mime_type,
+        file_size=file_size,
+        sha256=sha256,
+        duration_seconds=duration_seconds,
+    )
+
+
 def _evidence_summary(db: Session, return_id: str) -> dict[str, int]:
     rows = db.execute(
         select(ReturnEvidence.evidence_type, func.count(ReturnEvidence.id))
@@ -315,6 +397,36 @@ def _evidence_summary(db: Session, return_id: str) -> dict[str, int]:
         .group_by(ReturnEvidence.evidence_type)
     ).all()
     return {str(evidence_type): int(count) for evidence_type, count in rows}
+
+
+def _verification_evidence_payloads(
+    db: Session,
+    *,
+    return_request_id: str,
+    evidence_ids: list[str],
+) -> list[dict[str, Any]]:
+    if not evidence_ids:
+        return []
+    evidences = db.scalars(
+        select(ReturnEvidence).where(
+            ReturnEvidence.return_request_id == return_request_id,
+            ReturnEvidence.id.in_(evidence_ids),
+        )
+    ).all()
+    evidences_by_id = {evidence.id: evidence for evidence in evidences}
+    return [
+        {
+            "id": evidence.id,
+            "type": evidence.evidence_type,
+            "original_name": evidence.original_name,
+            "mime_type": evidence.mime_type,
+            "file_size": evidence.file_size,
+            "duration_seconds": evidence.duration_seconds,
+            "created_at": evidence.created_at.isoformat(),
+        }
+        for evidence_id in evidence_ids
+        if (evidence := evidences_by_id.get(evidence_id)) is not None
+    ]
 
 
 def _supplementary_evidence_count(db: Session, request: ReturnRequest) -> int:
@@ -592,6 +704,7 @@ def submit_return_verification(
     contact_result: str,
     conclusion: str,
     note: str,
+    evidence_ids: list[str] | None = None,
 ) -> VerificationTask:
     reference = db.get(VerificationTask, task_id)
     if reference is None or reference.task_type != VerificationTaskType.RETURN_VERIFY.value:
@@ -608,6 +721,20 @@ def submit_return_verification(
         raise AppError("RETURN_VERIFY_TASK_NOT_OWNED", "任务不属于当前电销人员或状态已变化", 409)
     if request.status != ReturnV12Status.VERIFYING.value:
         raise AppError("RETURN_NOT_VERIFYING", "退回申请当前不在电销核验阶段", 409)
+    normalized_evidence_ids = list(dict.fromkeys(evidence_ids or []))
+    if normalized_evidence_ids:
+        matched_evidence_ids = set(db.scalars(
+            select(ReturnEvidence.id).where(
+                ReturnEvidence.return_request_id == request.id,
+                ReturnEvidence.id.in_(normalized_evidence_ids),
+            )
+        ).all())
+        if matched_evidence_ids != set(normalized_evidence_ids):
+            raise AppError(
+                "RETURN_VERIFY_EVIDENCE_INVALID",
+                "核验证据不存在或不属于当前退回申请",
+                422,
+            )
     task.contact_result = contact_result.strip().upper()
     task.verification_conclusion = conclusion.strip().upper()
     task.status = VerificationTaskStatus.SUBMITTED.value
@@ -627,6 +754,7 @@ def submit_return_verification(
                 "contact_result": task.contact_result,
                 "conclusion": task.verification_conclusion,
                 "note": note.strip(),
+                "verification_evidence_ids": normalized_evidence_ids,
             },
         )
     )
@@ -672,13 +800,14 @@ def _restore_assignment_status(lead: Lead) -> str:
     )
 
 
-def final_review_return(
+def _final_review_return(
     db: Session,
     *,
     return_id: str,
     principal: Principal,
     decision: str,
     note: str,
+    require_verification: bool = True,
 ) -> ReturnFinalReviewResult:
     assignment, lead, request = _lock_return_context(db, return_id)
     normalized_decision = decision.strip().upper()
@@ -692,12 +821,12 @@ def final_review_return(
     if normalized_decision not in {"APPROVE", "REJECT", "NEED_MORE"}:
         raise AppError("RETURN_FINAL_DECISION_INVALID", "终审决定无效", 422)
 
-    task = _current_verification_task(db, request)
+    task = _current_verification_task(db, request) if require_verification else None
     required_conclusion = {
         "APPROVE": "SUPPORT_RETURN",
         "REJECT": "DOES_NOT_SUPPORT_RETURN",
     }.get(normalized_decision)
-    if required_conclusion and task.verification_conclusion != required_conclusion:
+    if required_conclusion and task is not None and task.verification_conclusion != required_conclusion:
         raise AppError(
             "RETURN_FINAL_DECISION_CONFLICT",
             "终审决定必须与电销核实结论一致；客资可用时仍由原领取人继续跟进",
@@ -721,8 +850,9 @@ def final_review_return(
     if normalized_decision == "NEED_MORE":
         assert_return_transition(ReturnV12Status.REVIEWING, ReturnV12Status.NEED_MORE_EVIDENCE)
         request.status = ReturnV12Status.NEED_MORE_EVIDENCE.value
-        task.status = VerificationTaskStatus.RELEASED.value
-        task.lock_version += 1
+        if task is not None:
+            task.status = VerificationTaskStatus.RELEASED.value
+            task.lock_version += 1
         db.add(
             AssignmentEvent(
                 assignment_id=assignment.id,
@@ -730,7 +860,7 @@ def final_review_return(
                 actor_user_id=principal.user_id,
                 payload={
                     "return_request_id": request.id,
-                    "verification_task_id": task.id,
+                    "verification_task_id": task.id if task else None,
                     "note": note.strip(),
                     "evidence_sha256": sorted(set(db.scalars(
                         select(ReturnEvidence.sha256).where(ReturnEvidence.return_request_id == request.id)
@@ -744,8 +874,9 @@ def final_review_return(
     if normalized_decision == "REJECT":
         assert_return_transition(ReturnV12Status.REVIEWING, ReturnV12Status.REJECTED)
         request.status = ReturnV12Status.REJECTED.value
-        task.status = VerificationTaskStatus.RELEASED.value
-        task.lock_version += 1
+        if task is not None:
+            task.status = VerificationTaskStatus.RELEASED.value
+            task.lock_version += 1
         assignment.status = _restore_assignment_status(lead)
         if lead.status not in {
             LeadV12Status.CLAIMED.value, LeadV12Status.FOLLOWING.value,
@@ -761,8 +892,8 @@ def final_review_return(
                 actor_user_id=principal.user_id,
                 payload={
                     "return_request_id": request.id,
-                    "verification_task_id": task.id,
-                    "verification_conclusion": task.verification_conclusion,
+                    "verification_task_id": task.id if task else None,
+                    "verification_conclusion": task.verification_conclusion if task else None,
                     "note": note.strip(),
                 },
             )
@@ -795,8 +926,9 @@ def final_review_return(
     request.status = ReturnV12Status.APPROVED.value
     request.refund_points = refund_points
     request.refund_ledger_id = refund_ledger.id
-    task.status = VerificationTaskStatus.RELEASED.value
-    task.lock_version += 1
+    if task is not None:
+        task.status = VerificationTaskStatus.RELEASED.value
+        task.lock_version += 1
     assignment.status = AssignmentStatus.RETURNED.value
     assignment.released_at = now
     assignment.release_reason = "V12_RETURN_APPROVED"
@@ -820,8 +952,8 @@ def final_review_return(
             actor_user_id=principal.user_id,
             payload={
                 "return_request_id": request.id,
-                "verification_task_id": task.id,
-                "verification_conclusion": task.verification_conclusion,
+                "verification_task_id": task.id if task else None,
+                "verification_conclusion": task.verification_conclusion if task else None,
                 "refund_points": refund_points,
                 "refund_ledger_id": refund_ledger.id,
                 "reward_id": reward.id if reward else None,
@@ -833,11 +965,98 @@ def final_review_return(
     return ReturnFinalReviewResult(request=request, refund_ledger=refund_ledger)
 
 
+def final_review_return(
+    db: Session,
+    *,
+    return_id: str,
+    principal: Principal,
+    decision: str,
+    note: str,
+) -> ReturnFinalReviewResult:
+    return _final_review_return(
+        db,
+        return_id=return_id,
+        principal=principal,
+        decision=decision,
+        note=note,
+        require_verification=True,
+    )
+
+
+def direct_invalid_return(
+    db: Session,
+    *,
+    return_id: str,
+    principal: Principal,
+    note: str,
+) -> ReturnFinalReviewResult:
+    assignment, _, request = _lock_return_context(db, return_id)
+    normalized_note = note.strip()
+    if not normalized_note:
+        raise AppError("RETURN_DIRECT_INVALID_NOTE_REQUIRED", "运营直接判无效必须填写说明", 422)
+    if request.status == ReturnV12Status.APPROVED.value:
+        return _final_review_return(
+            db,
+            return_id=return_id,
+            principal=principal,
+            decision="APPROVE",
+            note=normalized_note,
+            require_verification=False,
+        )
+    task = db.get(VerificationTask, request.verification_task_id) if request.verification_task_id else None
+    if task and (
+        task.submitted_at is not None
+        or task.status == VerificationTaskStatus.SUBMITTED.value
+        or task.verification_conclusion
+    ):
+        raise AppError(
+            "RETURN_VERIFY_CONCLUSION_EXISTS",
+            "已有电销核验结论，请继续走终审流程",
+            409,
+        )
+    if request.status not in {
+        ReturnV12Status.SUBMITTED.value,
+        ReturnV12Status.VERIFYING.value,
+    }:
+        raise AppError(
+            "RETURN_NOT_DIRECT_INVALIDABLE",
+            "退回申请当前不可由运营直接判无效",
+            409,
+            {"status": request.status},
+        )
+    if task is not None:
+        task.status = VerificationTaskStatus.CANCELLED.value
+        task.lock_version += 1
+    request.status = ReturnV12Status.REVIEWING.value
+    db.add(
+        AssignmentEvent(
+            assignment_id=assignment.id,
+            event_type="V12_RETURN_DIRECT_INVALID",
+            actor_user_id=principal.user_id,
+            payload={
+                "return_request_id": request.id,
+                "verification_task_id": task.id if task else None,
+                "note": normalized_note,
+            },
+        )
+    )
+    db.flush()
+    return _final_review_return(
+        db,
+        return_id=return_id,
+        principal=principal,
+        decision="APPROVE",
+        note=normalized_note,
+        require_verification=False,
+    )
+
+
 def return_request_to_dict(
     db: Session,
     item: ReturnRequest,
     *,
     include_evidence: bool = False,
+    include_phone: bool = False,
     leads_by_id: dict[str, Lead] | None = None,
     assignments_by_id: dict[str, Assignment] | None = None,
     users_by_id: dict[str, User] | None = None,
@@ -872,6 +1091,7 @@ def return_request_to_dict(
         "company_id": item.company_id,
         "assignment_code": f"PF-{item.assignment_id[:8].upper()}",
         "customer_name": snapshot.get("customer_name") or (lead.customer_name if lead else None),
+        "phone": decrypt_text(lead.phone_encrypted) if lead and include_phone else None,
         "phone_masked": phone_masked,
         "city": snapshot.get("city") or (lead.city if lead else None),
         "district": snapshot.get("district") or (lead.district if lead else None),
@@ -932,6 +1152,35 @@ def return_request_to_dict(
             "due_at": task.due_at.isoformat() if task.due_at else None,
             "is_overdue": _return_task_is_overdue(task),
         }
+        if include_evidence and task.submitted_at is not None:
+            submission_event = next(
+                (
+                    event
+                    for event in db.scalars(
+                        select(AssignmentEvent)
+                        .where(
+                            AssignmentEvent.assignment_id == task.assignment_id,
+                            AssignmentEvent.event_type == "V12_RETURN_VERIFY_SUBMITTED",
+                        )
+                        .order_by(AssignmentEvent.occurred_at.desc(), AssignmentEvent.id.desc())
+                    ).all()
+                    if (event.payload or {}).get("verification_task_id") == task.id
+                ),
+                None,
+            )
+            data["verification"]["note"] = (
+                (submission_event.payload or {}).get("note") if submission_event else None
+            )
+            evidence_ids = (
+                (submission_event.payload or {}).get("verification_evidence_ids", [])
+                if submission_event
+                else []
+            )
+            data["verification"]["evidences"] = _verification_evidence_payloads(
+                db,
+                return_request_id=item.id,
+                evidence_ids=evidence_ids,
+            )
     reward = (
         rewards_by_assignment_id.get(item.assignment_id)
         if rewards_by_assignment_id is not None
@@ -954,6 +1203,8 @@ def return_request_to_dict(
 def return_request_list_to_dict(
     db: Session,
     items: list[ReturnRequest],
+    *,
+    include_phone: bool = False,
 ) -> list[dict[str, Any]]:
     """Serialize one return-request page with a fixed number of relation queries."""
     if not items:
@@ -998,6 +1249,7 @@ def return_request_list_to_dict(
         return_request_to_dict(
             db,
             item,
+            include_phone=include_phone,
             leads_by_id=leads_by_id,
             assignments_by_id=assignments_by_id,
             users_by_id=users_by_id,
@@ -1012,6 +1264,8 @@ def return_verification_task_list_to_dict(
     db: Session,
     tasks: list[VerificationTask],
     principal: Principal,
+    *,
+    include_phone: bool = False,
 ) -> list[dict[str, Any]]:
     """Serialize a verification-task page without per-row relation queries."""
     if not tasks:
@@ -1046,6 +1300,7 @@ def return_verification_task_list_to_dict(
             db,
             task,
             principal,
+            include_phone=include_phone,
             requests_by_id=requests_by_id,
             leads_by_id=leads_by_id,
             assignments_by_id=assignments_by_id,
@@ -1078,11 +1333,17 @@ def return_verification_task_to_dict(
         else db.get(Assignment, task.assignment_id) if task.assignment_id else None
     )
     is_overdue = _return_task_is_overdue(task)
-    can_view_phone = bool(
-        include_phone
+    operation_can_view_phone = principal.has_any_role("OPERATION", "SUPER_ADMIN") and (
+        principal.can("lead.phone.read") or principal.can("*")
+    )
+    active_assignee_can_view_phone = (
+        principal.has_any_role("TELESALES")
         and task.assignee_user_id == principal.user_id
         and (principal.can("lead.phone.read") or principal.can("*"))
         and not is_overdue
+    )
+    can_view_phone = bool(
+        include_phone and (operation_can_view_phone or active_assignee_can_view_phone)
     )
     phone = decrypt_text(lead.phone_encrypted) if lead and can_view_phone else None
     snapshot = assignment.lead_snapshot if assignment and assignment.lead_snapshot else {}
@@ -1180,7 +1441,37 @@ def return_verification_task_to_dict(
                 if submission_event
                 else None
             ),
+            "evidences": [],
         }
+        evidence_ids = (
+            (submission_event.payload or {}).get("verification_evidence_ids", [])
+            if submission_event
+            else []
+        )
+        if evidence_ids:
+            result["verification_info"]["evidences"] = _verification_evidence_payloads(
+                db,
+                return_request_id=task.return_request_id,
+                evidence_ids=evidence_ids,
+            )
     elif include_verification_info:
         result["verification_info"] = None
+    if include_verification_info and request is not None:
+        available_evidences = db.scalars(
+            select(ReturnEvidence)
+            .where(ReturnEvidence.return_request_id == request.id)
+            .order_by(ReturnEvidence.created_at.asc(), ReturnEvidence.id.asc())
+        ).all()
+        result["return_request"]["available_evidences"] = [
+            {
+                "id": evidence.id,
+                "type": evidence.evidence_type,
+                "original_name": evidence.original_name,
+                "mime_type": evidence.mime_type,
+                "file_size": evidence.file_size,
+                "duration_seconds": evidence.duration_seconds,
+                "created_at": evidence.created_at.isoformat(),
+            }
+            for evidence in available_evidences
+        ]
     return result

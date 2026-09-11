@@ -55,7 +55,7 @@ function toast(message, type = '') {
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
-  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  if (options.body !== undefined && !(options.body instanceof FormData)) headers['Content-Type'] = 'application/json';
   const response = await fetch(API + path, { ...options, headers, credentials: 'include' });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload.code !== 'OK') {
@@ -386,9 +386,12 @@ function taskFacts(kind, data) {
   return [['任务类型', '退回核验'], ['处理期限', fmt(data.due_at)], ['退回原因', returnReasonLabels[request.reason_code] || '待确认'], ['证据数量', `${evidenceCount(request)} 份`], ['下一步', data.submitted_at ? '已提交运营终审' : '完成退回事实核验']];
 }
 
-function taskForm(kind) {
+function taskForm(kind, data = {}) {
   const conclusions = TASK_KIND[kind].conclusions;
-  return `<section class="card" id="result-form"><h2>填写结果</h2><div class="form"><label>联系结果 *</label><select id="contact_result" class="select">${Object.entries(contactLabels).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></div><div class="form"><label>事实结论 *</label><div class="radio-grid">${Object.entries(conclusions).map(([value, label], index) => `<label class="choice"><input type="radio" name="conclusion" value="${value}" ${index === 0 ? 'checked' : ''}> ${label}</label>`).join('')}</div></div><div class="form"><label>核验备注 *</label><textarea id="note" class="textarea" placeholder="记录客户说明和核验依据"></textarea></div><button id="submit" class="btn primary block">提交核验结果</button></section>`;
+  const availableEvidence = kind === 'RETURN' ? (data.return_request?.available_evidences || []) : [];
+  const evidenceChoices = availableEvidence.length ? `<div class="form"><label>本次采用的已有证据</label><div class="radio-grid">${availableEvidence.map((item) => `<label class="choice"><input type="checkbox" name="verification_evidence" value="${esc(item.id)}"> ${esc(item.original_name || item.type || '证据')}</label>`).join('')}</div></div>` : '';
+  const evidenceUpload = kind === 'RETURN' ? '<div class="form"><label>上传新的核验证据</label><input id="verification-evidence-files" type="file" multiple accept="image/jpeg,image/png,image/webp,audio/mpeg,audio/wav,audio/mp4,audio/aac"><small class="muted">支持 JPG、PNG、WEBP、MP3、WAV、M4A、AAC；提交时自动上传并绑定。</small></div>' : '';
+  return `<section class="card" id="result-form"><h2>填写结果</h2><div class="form"><label>联系结果 *</label><select id="contact_result" class="select">${Object.entries(contactLabels).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></div><div class="form"><label>事实结论 *</label><div class="radio-grid">${Object.entries(conclusions).map(([value, label], index) => `<label class="choice"><input type="radio" name="conclusion" value="${value}" ${index === 0 ? 'checked' : ''}> ${label}</label>`).join('')}</div></div>${evidenceChoices}${evidenceUpload}<div class="form"><label>核验备注 *</label><textarea id="note" class="textarea" placeholder="记录客户说明和核验依据"></textarea></div><button id="submit" class="btn primary block">提交核验结果</button></section>`;
 }
 
 async function task(kind, id) {
@@ -399,7 +402,12 @@ async function task(kind, id) {
   const details = taskFacts(kind, data).map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('');
   const overdue = Boolean(data.is_overdue&&!data.submitted_at);
   const canContact = data.status === 'IN_PROGRESS' && !overdue;
-  const action = overdue ? '<section class="card"><h2>任务已超时</h2><p class="muted">为保证核验结论有效，本任务不能继续处理。请等待运营人员改派。</p></section>' : data.status === 'ASSIGNED' ? `<section class="card"><h2>开始核验</h2><p class="muted">该任务已由运营派发给您。开始后可查看完整手机号；这不是自主领取。</p><button class="btn primary block" id="start">开始核验</button></section>` : data.status === 'IN_PROGRESS' ? taskForm(kind) : `<section class="card"><h2>已提交结论</h2><dl class="detail"><div><dt>联系结果</dt><dd>${esc(contactLabels[data.contact_result] || '待确认')}</dd></div><div><dt>事实结论</dt><dd>${esc(TASK_KIND[kind].conclusions[data.conclusion] || '待确认')}</dd></div><div><dt>核验备注</dt><dd>${esc(data.verification_info?.note || '暂无核验备注')}</dd></div></dl><p class="muted">结论已经提交运营人员处置，不能由电销人员直接改变客资状态。</p></section>`;
+  const verificationEvidence = (data.verification_info?.evidences || []).map((item) => {
+    const label = esc(item.original_name || item.type || '核验证据');
+    const url = item.access_token ? `${API}/v1.2/return-evidences/${encodeURIComponent(item.id)}/download?token=${encodeURIComponent(item.access_token)}` : '';
+    return `<li>${url ? `<a href="${url}" target="_blank" rel="noopener">${label}</a>` : label}</li>`;
+  }).join('');
+  const action = overdue ? '<section class="card"><h2>任务已超时</h2><p class="muted">为保证核验结论有效，本任务不能继续处理。请等待运营人员改派。</p></section>' : data.status === 'ASSIGNED' ? `<section class="card"><h2>开始核验</h2><p class="muted">该任务已由运营派发给您。开始后可查看完整手机号；这不是自主领取。</p><button class="btn primary block" id="start">开始核验</button></section>` : data.status === 'IN_PROGRESS' ? taskForm(kind, data) : `<section class="card"><h2>已提交结论</h2><dl class="detail"><div><dt>联系结果</dt><dd>${esc(contactLabels[data.contact_result] || '待确认')}</dd></div><div><dt>事实结论</dt><dd>${esc(TASK_KIND[kind].conclusions[data.conclusion] || '待确认')}</dd></div><div><dt>核验备注</dt><dd>${esc(data.verification_info?.note || '暂无核验备注')}</dd></div></dl>${verificationEvidence ? `<h3>本次核验证据</h3><ul>${verificationEvidence}</ul>` : ''}<p class="muted">结论已经提交运营人员处置，不能由电销人员直接改变客资状态。</p></section>`;
   const contactActions = canContact ? `<div class="detail-actions"><button id="dial" class="btn gold">${icon('phone')}<span>一键拨号</span></button><button id="copy-phone" class="btn outline">复制号码</button></div>` : '';
   const guide = canContact ? '<section class="quick-guide"><b>核验说明</b><span>拨号由您主动确认；桌面端可复制号码，只提交事实结论，不决定派发、退款或终审。</span><a href="#result-form">填写结果</a></section>' : '';
   zsSetSafeHtml(app, shell(`<button class="btn small outline" data-history-back>返回</button><section class="detail-hero"><div><p class="eyebrow">${esc(TASK_KIND[kind].label)}</p><h1>${esc(lead.customer_name || '待核验客户')}</h1><span class="badge ${statusClass(displayStatus)}">${esc(overdue ? '已超时' : statusLabel(displayStatus))}</span></div>${contactActions}</section>${guide}<section class="card compact"><dl class="detail"><div><dt>手机号</dt><dd><strong>${esc(lead.phone || lead.phone_masked || '--')}</strong></dd></div><div><dt>地区</dt><dd>${esc(lead.city || '--')} ${esc(lead.district || '')}</dd></div>${details}</dl></section>${action}`, data.submitted_at ? 'records' : 'verify', '核验详情'));
@@ -418,7 +426,16 @@ async function submit(kind, id) {
   const note = document.querySelector('#note').value.trim();
   if (note.length < 2) { toast('请填写至少 2 个字的核验备注', 'error'); return; }
   try {
-    await api(taskPath(kind, id, 'submit'), { method: 'POST', body: JSON.stringify({ contact_result: document.querySelector('#contact_result').value, conclusion: document.querySelector('input[name=conclusion]:checked').value, note }) });
+    const evidence_ids = [...document.querySelectorAll('input[name=verification_evidence]:checked')].map((item) => item.value);
+    const files = [...(document.querySelector('#verification-evidence-files')?.files || [])];
+    for (const file of files) {
+      const form = new FormData();
+      form.append('evidence_type', file.type.startsWith('audio/') ? 'CALL_RECORDING' : 'CHAT_SCREENSHOT');
+      form.append('file', file, file.name);
+      const uploaded = await api(taskPath(kind, id, 'evidence'), { method: 'POST', body: form });
+      evidence_ids.push(uploaded.id);
+    }
+    await api(taskPath(kind, id, 'submit'), { method: 'POST', body: JSON.stringify({ contact_result: document.querySelector('#contact_result').value, conclusion: document.querySelector('input[name=conclusion]:checked').value, note, evidence_ids }) });
     submittedHistoryState = null;
     toast('事实核验已提交运营处置');
     task(kind, id);

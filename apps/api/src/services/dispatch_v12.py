@@ -802,10 +802,14 @@ def dispatch_manually_with_outcome(
 ) -> ManualDispatchOutcome:
     existing = db.scalar(select(Assignment).where(Assignment.idempotency_key == idempotency_key))
     if existing:
+        requested_employee_user_id = (existing.lead_snapshot or {}).get(
+            "requested_employee_user_id",
+            existing.internal_assignee_user_id,
+        )
         if (
             existing.lead_id != lead_id
             or existing.company_id != company_id
-            or existing.internal_assignee_user_id != employee_user_id
+            or requested_employee_user_id != employee_user_id
         ):
             raise AppError("IDEMPOTENCY_CONFLICT", "幂等键已被其他派发请求使用", 409)
         return ManualDispatchOutcome(assignment=existing, created=False)
@@ -816,10 +820,14 @@ def dispatch_manually_with_outcome(
     # the lead lock. Recheck before validating the now-transitioned lead state.
     existing = db.scalar(select(Assignment).where(Assignment.idempotency_key == idempotency_key))
     if existing:
+        requested_employee_user_id = (existing.lead_snapshot or {}).get(
+            "requested_employee_user_id",
+            existing.internal_assignee_user_id,
+        )
         if (
             existing.lead_id != lead_id
             or existing.company_id != company_id
-            or existing.internal_assignee_user_id != employee_user_id
+            or requested_employee_user_id != employee_user_id
         ):
             raise AppError("IDEMPOTENCY_CONFLICT", "幂等键已被其他派发请求使用", 409)
         return ManualDispatchOutcome(assignment=existing, created=False)
@@ -846,14 +854,10 @@ def dispatch_manually_with_outcome(
     company = db.scalar(select(Company).where(Company.id == company_id).with_for_update())
     if company is None:
         raise AppError("COMPANY_NOT_FOUND", "目标公司不存在", 404)
-    recipients = (
-        resolve_direct_dispatch_recipients(
-            db,
-            company_id=company.id,
-            employee_user_id=employee_user_id,
-        )
-        if employee_user_id
-        else None
+    recipients = resolve_direct_dispatch_recipients(
+        db,
+        company_id=company.id,
+        employee_user_id=employee_user_id,
     )
     returned_receiver_company_ids = _returned_receiver_company_ids(db, lead.id)
     is_returned_receiver = company.id in returned_receiver_company_ids
@@ -911,12 +915,14 @@ def dispatch_manually_with_outcome(
             "source_kind": lead.source_kind,
             "duplicate_status": lead.duplicate_status,
             "note": note.strip() if note else None,
+            "requested_employee_user_id": employee_user_id,
+            "direct_recipient_role_code": recipients.assignee_role_code,
         },
         assigned_by=assigned_by,
         assigned_at=now,
-        internal_assignee_user_id=recipients.employee.id if recipients else None,
-        internal_assigned_by=assigned_by if recipients else None,
-        internal_assigned_at=now if recipients else None,
+        internal_assignee_user_id=recipients.assignee.id,
+        internal_assigned_by=assigned_by,
+        internal_assigned_at=now,
         expires_at=now + timedelta(hours=settings.assignment_expire_hours),
         idempotency_key=idempotency_key,
     )
@@ -932,8 +938,14 @@ def dispatch_manually_with_outcome(
             payload={
                 "lead_id": lead.id,
                 "company_id": company.id,
-                "employee_user_id": recipients.employee.id if recipients else None,
-                "owner_user_id": recipients.owner.id if recipients else None,
+                "employee_user_id": (
+                    recipients.assignee.id
+                    if recipients.assignee_role_code == "FRANCHISE_EMPLOYEE"
+                    else None
+                ),
+                "owner_user_id": recipients.owner.id,
+                "recipient_user_id": recipients.assignee.id,
+                "recipient_role_code": recipients.assignee_role_code,
                 "points_price": candidate.points_price,
                 "price_rule_id": candidate.price_rule_id,
                 "manual": True,

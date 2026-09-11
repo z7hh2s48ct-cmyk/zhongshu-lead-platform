@@ -67,7 +67,7 @@ def test_supplier_review_queue_only_returns_supplier_sources(api_client) -> None
     data = response.json()["data"]
     assert data["total"] == 1
     assert [item["id"] for item in data["items"]] == [supplier_id]
-    assert data["items"][0]["phone"] is None
+    assert data["items"][0]["phone"] == "13900139001"
     assert data["items"][0]["phone_masked"] == "139****9001"
 
     detail = client.get(f"/api/v1/v1.2/admin/supplier-leads/{supplier_id}")

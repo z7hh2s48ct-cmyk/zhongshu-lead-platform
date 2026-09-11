@@ -8,8 +8,8 @@ def test_admin_public_pool_is_shared_by_management_and_operations_only() -> None
     source = WORKBENCH.read_text(encoding="utf-8")
 
     assert "publicPool:['公海池'" in source
-    assert "SUPER_ADMIN:['overview','leads','publicPool','companies','finance']" in source
-    assert "OPERATION:['overview','leads','publicPool','telesales','dispatch','companies']" in source
+    assert "SUPER_ADMIN:['overview','leads','supplements','publicPool','companies','finance']" in source
+    assert "OPERATION:['overview','leads','supplements','publicPool','telesales','dispatch','companies']" in source
     assert "FRANCHISE_OWNER" not in source[source.index("const ADMIN_VIEW_CONTRACT"):source.index("const ROLE_HOME_PRIORITY")]
 
 

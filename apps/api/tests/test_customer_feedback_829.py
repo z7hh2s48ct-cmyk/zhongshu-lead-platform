@@ -1647,7 +1647,7 @@ def test_item_8_operation_list_filters_created_time_and_separate_statuses(api_cl
     assert row["assigned_by_user_id"] == operation_id
     assert row["assigned_by_name"] == "运营管理员"
     assert row["latest_followup"]["note"] == "加盟商已与客户约好量房"
-    assert row["phone"] is None
+    assert row["phone"] == "13900139811"
     assert row["phone_masked"] == "139****9811"
 
 

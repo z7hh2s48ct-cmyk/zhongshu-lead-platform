@@ -67,13 +67,20 @@ def _task_to_dict(
         else db.get(Lead, task.lead_id)
     )
     is_overdue = is_pre_dispatch_task_overdue(task)
-    can_view_phone = bool(
-        include_phone
-        and principal.has_any_role("TELESALES")
+    operation_can_view_phone = principal.has_any_role("OPERATION", "SUPER_ADMIN") and (
+        principal.can("lead.phone.read") or principal.can("*")
+    )
+    assignee_can_view_phone = (
+        principal.has_any_role("TELESALES")
         and task.assignee_user_id == principal.user_id
-        and task.status == VerificationTaskStatus.IN_PROGRESS.value
         and principal.can("lead.phone.read")
-        and not is_overdue
+        and (
+            (task.status == VerificationTaskStatus.IN_PROGRESS.value and not is_overdue)
+            or task.submitted_at is not None
+        )
+    )
+    can_view_phone = bool(
+        include_phone and (operation_can_view_phone or assignee_can_view_phone)
     )
     phone = decrypt_text(lead.phone_encrypted) if lead and can_view_phone else None
     next_owner = None
@@ -119,6 +126,8 @@ def _task_list_to_dict(
     db: Session,
     tasks: list[VerificationTask],
     principal: CurrentPrincipal,
+    *,
+    include_phone: bool = False,
 ) -> list[dict]:
     lead_ids = list(dict.fromkeys(task.lead_id for task in tasks))
     leads = (
@@ -128,7 +137,13 @@ def _task_list_to_dict(
     )
     leads_by_id = {lead.id: lead for lead in leads}
     return [
-        _task_to_dict(db, task, principal, leads_by_id=leads_by_id)
+        _task_to_dict(
+            db,
+            task,
+            principal,
+            include_phone=include_phone,
+            leads_by_id=leads_by_id,
+        )
         for task in tasks
     ]
 
@@ -176,6 +191,7 @@ def list_pre_dispatch_tasks(
     principal: CurrentPrincipal,
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
+    lead_id: str | None = Query(default=None),
     submitted_history: bool = False,
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
@@ -183,6 +199,8 @@ def list_pre_dispatch_tasks(
     if not (principal.can("verification.read") or principal.can("verification.task.read") or principal.can("*")):
         raise AppError("FORBIDDEN", "无权查看前置核验任务", 403)
     filters = [VerificationTask.task_type == VerificationTaskType.PRE_DISPATCH_VERIFY.value]
+    if lead_id:
+        filters.append(VerificationTask.lead_id == lead_id)
     if principal.has_any_role("TELESALES"):
         filters.append(VerificationTask.assignee_user_id == principal.user_id)
     if submitted_history:
@@ -214,7 +232,25 @@ def list_pre_dispatch_tasks(
         .offset((page_no - 1) * page_size)
         .limit(page_size)
     ).all())
-    return ok(request, page(_task_list_to_dict(db, tasks, principal), total, page_no, page_size))
+    return ok(
+        request,
+        page(
+            _task_list_to_dict(
+                db,
+                tasks,
+                principal,
+                include_phone=(
+                    submitted_history and principal.has_any_role("TELESALES")
+                ) or (
+                    principal.has_any_role("OPERATION", "SUPER_ADMIN")
+                    and (principal.can("*") or principal.can("lead.phone.read"))
+                ),
+            ),
+            total,
+            page_no,
+            page_size,
+        ),
+    )
 
 
 @router.get("/pre-dispatch-verifications/tasks/{task_id}")

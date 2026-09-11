@@ -25,6 +25,7 @@ ROLE_PERMISSION_MATRIX: dict[str, tuple[str, list[str]]] = {
             "lead.dedup.override",
             "lead.dispatch",
             "lead.dispatch.phone.read",
+            "lead.phone.read",
             "lead.own.delete",
             "lead.phone.export",
             "assignment.read",

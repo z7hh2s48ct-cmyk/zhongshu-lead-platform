@@ -174,7 +174,7 @@ def test_item_8_report_filters_submitter_phone_region_and_current_receiver(
         assert response.status_code == 200, response.text
         items = response.json()["data"]["items"]
         assert [item["id"] for item in items] == [matched_id]
-        assert items[0]["phone"] is None
+        assert items[0]["phone"] == "13900139831"
         assert items[0]["phone_masked"] == "139****9831"
         assert items[0]["submitter_user_id"] == operation_id
 

@@ -87,6 +87,7 @@ def normalized_lead_report_filters(filters: dict[str, Any]) -> dict[str, Any]:
         "created_from": _datetime_value(filters.get("created_from")),
         "created_to": _datetime_value(filters.get("created_to")),
         "source_kind": _upper(filters.get("source_kind")),
+        "supplier_company_id": _text(filters.get("supplier_company_id")),
         "submitter_user_id": _text(filters.get("submitter_user_id")),
         "phone_hash": phone_hash
         or (hash_phone(normalize_phone(phone)) if phone else None),
@@ -95,6 +96,7 @@ def normalized_lead_report_filters(filters: dict[str, Any]) -> dict[str, Any]:
         "lead_status": _upper(filters.get("lead_status")),
         "assignment_status": _upper(filters.get("assignment_status")),
         "assigned_by_user_id": _text(filters.get("assigned_by_user_id")),
+        "pending_reason": _upper(filters.get("pending_reason")),
     }
 
 
@@ -117,6 +119,8 @@ def _conditions(filters: dict[str, Any], current_assignment) -> list[Any]:
         conditions.append(Lead.created_at < values["created_to"])
     if values["source_kind"]:
         conditions.append(Lead.source_kind == values["source_kind"])
+    if values["supplier_company_id"]:
+        conditions.append(Lead.supplier_company_id == values["supplier_company_id"])
     if values["submitter_user_id"]:
         conditions.append(Lead.submitter_user_id == values["submitter_user_id"])
     if values["phone_hash"]:
@@ -144,6 +148,8 @@ def _conditions(filters: dict[str, Any], current_assignment) -> list[Any]:
         conditions.append(current_assignment.status == values["assignment_status"])
     if values["assigned_by_user_id"]:
         conditions.append(current_assignment.assigned_by == values["assigned_by_user_id"])
+    if values["pending_reason"]:
+        conditions.append(Lead.pending_reason == values["pending_reason"])
     return conditions
 
 

@@ -12,6 +12,7 @@ from ..core.database import get_db
 from ..core.errors import AppError
 from ..core.models import Assignment, Company, Lead, ReturnRequest
 from ..core.responses import ok, page
+from ..core.v12_enums import LeadSourceKind
 from ..schemas.company import (
     CompanyCreateBody,
     CompanyDeleteBody,
@@ -81,7 +82,11 @@ def list_companies(
             summary["by_status"][str(assignment_status)] = int(count)
         provided_counts = db.execute(
             select(Lead.supplier_company_id, Lead.status, func.count(Lead.id))
-            .where(Lead.supplier_company_id.in_(company_ids))
+            .where(
+                Lead.supplier_company_id.in_(company_ids),
+                Lead.source_kind == LeadSourceKind.SUPPLIER_H5.value,
+                Lead.deleted_at.is_(None),
+            )
             .group_by(Lead.supplier_company_id, Lead.status)
         ).all()
         for company_id, lead_status, count in provided_counts:

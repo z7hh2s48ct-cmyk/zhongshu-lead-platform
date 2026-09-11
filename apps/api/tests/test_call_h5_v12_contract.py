@@ -27,6 +27,7 @@ from apps.api.src.core.v12_enums import (
     VerificationTaskType,
 )
 from apps.api.src.services import return_v12 as return_v12_service
+from apps.api.src.services.auth_service import create_internal_user
 
 
 CALL_APP = Path("apps/call-h5/public/app.js")
@@ -146,6 +147,11 @@ def test_call_h5_uses_only_v12_assigned_verification_contracts() -> None:
 
     assert TASKS_ENDPOINT in source
     assert PRE_DISPATCH_TASKS_ENDPOINT in source
+    assert "verification_evidence" in source
+    assert "evidence_ids" in source
+    assert "verification-evidence-files" in source
+    assert "new FormData()" in source
+    assert "taskPath(kind, id, 'evidence')" in source
     assert "/verification/tasks" not in source
     assert "taskPath(kind, taskId, action = '')" in source
     for action in ("start", "dial", "submit"):
@@ -162,7 +168,7 @@ def test_call_h5_uses_only_v12_assigned_verification_contracts() -> None:
     assert "自主领取" in source
     assert "go('home');route()" not in source
     assert "/admin/index.html" not in source
-    assert "app.js?v=20260904-verification-info" in index
+    assert "app.js?v=20260911-history-evidence" in index
 
 
 def test_call_h5_home_first_screen_has_personal_task_summary_without_team_finance() -> None:
@@ -199,6 +205,15 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     client, factory = api_client
     monkeypatch.setattr(legacy_guard.settings, "legacy_write_enabled", False)
     task_id, return_id, phone, telesales_id = _seed_return_verification(factory)
+    with factory() as db:
+        create_internal_user(
+            db,
+            username="return-history-other",
+            password="simple88",
+            display_name="其他历史电销",
+            role_code="TELESALES",
+        )
+        db.commit()
     decrypt_calls: list[str] = []
     real_decrypt = return_v12_service.decrypt_text
 
@@ -258,6 +273,7 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     assert legacy_claim.json()["code"] == "LEGACY_WRITE_DISABLED"
 
     telesales = _login(client, "telesales", "Telesales123!")
+    other_telesales = _login(client, "return-history-other", "simple88")
 
     listed = _data(
         client.get(
@@ -271,6 +287,15 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     assert item["return_request"]["id"] == return_id
     assert decrypt_calls == []
 
+    evidence_file = ("verification.jpg", b"\xff\xd8\xff\xe0verification", "image/jpeg")
+    assigned_upload = client.post(
+        f"/api/v1{TASKS_ENDPOINT}/{task_id}/evidence",
+        headers=telesales,
+        data={"evidence_type": "CHAT_SCREENSHOT"},
+        files={"file": evidence_file},
+    )
+    assert assigned_upload.status_code == 409
+
     detail = _data(client.get(f"/api/v1{TASKS_ENDPOINT}/{task_id}", headers=telesales))
     assert detail["lead"]["phone"] is None
     assert decrypt_calls == []
@@ -281,6 +306,23 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     assert claimed["status"] == VerificationTaskStatus.IN_PROGRESS.value
     assert claimed["lead"]["phone"] == phone
     assert len(decrypt_calls) == 1
+
+    other_upload = client.post(
+        f"/api/v1{TASKS_ENDPOINT}/{task_id}/evidence",
+        headers=other_telesales,
+        data={"evidence_type": "CHAT_SCREENSHOT"},
+        files={"file": evidence_file},
+    )
+    assert other_upload.status_code == 409
+    uploaded_evidence = _data(
+        client.post(
+            f"/api/v1{TASKS_ENDPOINT}/{task_id}/evidence",
+            headers=telesales,
+            data={"evidence_type": "CHAT_SCREENSHOT"},
+            files={"file": evidence_file},
+        )
+    )
+    assert uploaded_evidence["access_token"]
 
     dial = _data(
         client.post(f"/api/v1{TASKS_ENDPOINT}/{task_id}/dial", headers=telesales)
@@ -311,6 +353,7 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
                 "contact_result": "EMPTY_NUMBER",
                 "conclusion": "SUPPORT_RETURN",
                 "note": "连续拨打后确认号码为空号，支持本次退回。",
+                "evidence_ids": [uploaded_evidence["id"]],
             },
         )
     )
@@ -320,10 +363,26 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     completed_detail = _data(
         client.get(f"/api/v1{TASKS_ENDPOINT}/{task_id}", headers=telesales)
     )
-    assert completed_detail["lead"]["phone"] is None
+    assert completed_detail["lead"]["phone"] == phone
     assert completed_detail["verification_info"]["note"] == (
         "连续拨打后确认号码为空号，支持本次退回。"
     )
+    verification_evidence = completed_detail["verification_info"]["evidences"][0]
+    assert verification_evidence["id"] == uploaded_evidence["id"]
+    assert verification_evidence["access_token"]
+    downloaded = client.get(
+        f"/api/v1/v1.2/return-evidences/{verification_evidence['id']}/download",
+        headers=telesales,
+        params={"token": verification_evidence["access_token"]},
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.content == evidence_file[1]
+    operation_return_detail = _data(
+        client.get(f"/api/v1/v1.2/returns/{return_id}", headers=operation)
+    )
+    operation_verification_evidence = operation_return_detail["verification"]["evidences"][0]
+    assert operation_verification_evidence["id"] == uploaded_evidence["id"]
+    assert operation_verification_evidence["access_token"]
 
     repeated = _data(
         client.post(
@@ -378,10 +437,24 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     history_item = next(item for item in submitted_history["items"] if item["id"] == task_id)
     assert history_item["status"] == VerificationTaskStatus.RELEASED.value
     assert history_item["submitted_at"]
+    assert history_item["lead"]["phone"] == phone
+    other_history = _data(
+        client.get(
+            f"/api/v1{TASKS_ENDPOINT}?mine=true&submitted_history=true&page=1&page_size=20",
+            headers=other_telesales,
+        )
+    )
+    assert all(item["id"] != task_id for item in other_history["items"])
+    forbidden_detail = client.get(
+        f"/api/v1{TASKS_ENDPOINT}/{task_id}",
+        headers=other_telesales,
+    )
+    assert forbidden_detail.status_code == 403
     released_detail = _data(
         client.get(f"/api/v1{TASKS_ENDPOINT}/{task_id}", headers=telesales)
     )
     assert released_detail["verification_info"]["note"] == (
         "连续拨打后确认号码为空号，支持本次退回。"
     )
-    assert len(decrypt_calls) == 2
+    assert released_detail["lead"]["phone"] == phone
+    assert len(decrypt_calls) == 6
