@@ -102,7 +102,7 @@ def test_updated_admin_bundle_version_and_owner_fallback_copy() -> None:
     source = ADMIN_JS.read_text(encoding="utf-8")
     html = ADMIN_HTML.read_text(encoding="utf-8")
 
-    assert "v12-operations.js?v=20260912-return-submit" in html
+    assert "v12-operations.js?v=20260912-fixed-points-feedback" in html
     assert "有在职员工时选择具体员工；无在职员工时自动派发给负责人" in source
 
 

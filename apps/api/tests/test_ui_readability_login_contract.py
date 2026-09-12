@@ -63,7 +63,7 @@ def test_formal_workbenches_use_business_labels_without_old_page_links() -> None
     assert "加盟商客资队列" in operations
     assert "供客奖励" in operations
     assert "加盟商工作台" in franchise
-    assert "奖励说明" in franchise
+    assert "结算说明" in franchise
 
 
 def test_return_evidence_and_audit_details_remain_user_readable() -> None:

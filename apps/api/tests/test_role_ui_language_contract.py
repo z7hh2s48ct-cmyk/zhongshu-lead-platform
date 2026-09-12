@@ -31,15 +31,17 @@ def test_operations_pages_use_business_language_and_existing_safe_endpoints() ->
     assert "/return-evidences/${encodeURIComponent(item.id)}/download" in source
     assert "派发前置电销核验" in source
     assert "派发退回电话核验" in source
-    assert "奖励比例（%）" in source
+    assert "运营客资领取积分（积分/条）" in source
+    assert "加盟商供客积分（积分/条）" in source
+    assert "奖励比例（%）" not in source
     assert "esc(label(x.source_kind))" in source
     assert "公司编号" not in source
     for field in (
-        "currentRule.min_points",
-        "currentRule.max_points",
-        "currentRule.hard_duplicate_days",
-        "currentRule.reward_duplicate_days",
-        "currentRule.historical_suspect_days",
+        "rule?.min_points",
+        "rule.max_points",
+        "rule?.hard_duplicate_days",
+        "rule?.reward_duplicate_days",
+        "rule?.historical_suspect_days",
     ):
         assert field in source
 
