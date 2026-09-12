@@ -232,6 +232,6 @@ def test_franchise_has_standalone_return_record_and_business_report_entries() ->
 def test_supplier_workbench_uses_user_facing_reward_copy() -> None:
     js = Path("apps/h5/public/v12-workbench.js").read_text(encoding="utf-8")
 
-    assert "奖励说明" in js
+    assert "结算说明" in js
     assert "领取时规则快照" not in js
     assert "JSON.stringify(x.rule_snapshot" not in js

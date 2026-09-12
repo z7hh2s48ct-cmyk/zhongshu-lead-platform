@@ -24,7 +24,7 @@ class CompanySimpleCreateBody(BaseModel):
     level_code: str = Field(default="V1", max_length=32)
     primary_city_code: str = Field(min_length=1, max_length=32)
     district_codes: list[str] = Field(default_factory=list)
-    region_codes: list[str] = Field(default_factory=list, max_length=100)
+    region_codes: list[str] = Field(default_factory=list, max_length=1000)
     serve_all_districts: bool = True
     is_test: bool = False
     notes: str | None = Field(default=None, max_length=500)

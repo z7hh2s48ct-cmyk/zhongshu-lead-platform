@@ -560,6 +560,7 @@ def import_feishu_customer_view(
 def public_pool_lead_conditions(
     *,
     keyword: str | None = None,
+    phone_hash: str | None = None,
     customer_source: str | None = None,
     source_kind: str | None = None,
     completeness: str | None = None,
@@ -619,6 +620,9 @@ def public_pool_lead_conditions(
                 Lead.source_detail.contains(normalized_keyword),
             )
         )
+    normalized_phone_hash = (phone_hash or "").strip()
+    if normalized_phone_hash:
+        filters.append(Lead.phone_hash == normalized_phone_hash)
     normalized_source = (source_kind or "").strip().upper()
     if normalized_source:
         filters.append(Lead.source_kind == normalized_source)
@@ -649,6 +653,7 @@ def list_public_pool_leads(
     db: Session,
     *,
     keyword: str | None = None,
+    phone_hash: str | None = None,
     customer_source: str | None = None,
     source_kind: str | None = None,
     completeness: str | None = None,
@@ -661,6 +666,7 @@ def list_public_pool_leads(
 ) -> tuple[list[Lead], int]:
     filters = public_pool_lead_conditions(
         keyword=keyword,
+        phone_hash=phone_hash,
         customer_source=customer_source,
         source_kind=source_kind,
         completeness=completeness,

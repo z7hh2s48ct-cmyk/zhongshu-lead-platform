@@ -482,6 +482,7 @@ def _public_pool_values(filters: dict[str, Any]) -> dict[str, Any]:
         "created_to": _datetime_value(filters.get("created_to")),
         "submitter_user_id": _text(filters.get("submitter_user_id")),
         "keyword": _text(filters.get("keyword")),
+        "phone_hash": _text(filters.get("phone_hash")),
         "customer_source": _upper(filters.get("customer_source")),
         "source_kind": _upper(filters.get("source_kind")),
         "completeness": _upper(filters.get("completeness")),

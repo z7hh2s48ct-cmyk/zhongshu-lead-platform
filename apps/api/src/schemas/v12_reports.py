@@ -7,6 +7,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ..core.security import hash_phone, normalize_phone
 
 
+def normalize_exact_phone(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    normalized = normalize_phone(value)
+    if not 7 <= len(normalized) <= 20:
+        raise ValueError("请输入有效的完整手机号")
+    return normalized
+
+
 class LeadReportFilterBody(BaseModel):
     created_from: datetime | None = None
     created_to: datetime | None = None
@@ -44,12 +53,7 @@ class LeadReportFilterBody(BaseModel):
     @field_validator("phone")
     @classmethod
     def normalize_exact_phone(cls, value: str | None) -> str | None:
-        if value is None or not value.strip():
-            return None
-        normalized = normalize_phone(value)
-        if not 7 <= len(normalized) <= 20:
-            raise ValueError("请输入有效的完整手机号")
-        return normalized
+        return normalize_exact_phone(value)
 
     @field_validator("created_from", "created_to")
     @classmethod

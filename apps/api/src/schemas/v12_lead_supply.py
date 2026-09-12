@@ -282,7 +282,7 @@ class CompanyProfileBulkApproveBody(BaseModel):
 
 
 class ServiceAreaReplaceBody(BaseModel):
-    region_codes: list[str] = Field(min_length=1, max_length=100)
+    region_codes: list[str] = Field(min_length=1, max_length=1000)
     primary_city_code: str = Field(min_length=1, max_length=32)
 
     @field_validator("region_codes")

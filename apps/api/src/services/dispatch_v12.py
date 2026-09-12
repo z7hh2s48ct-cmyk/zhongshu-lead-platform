@@ -28,11 +28,13 @@ from .company_profile_v12 import REMOVAL_REQUEST_PREFIX, has_lead_capability, re
 from .company_assignment_v12 import resolve_direct_dispatch_recipients
 from .lead_correction_guard import require_correction_review_resolved
 from .lead_deletion_v12 import require_lead_not_deleted
+from .lead_points_v12 import get_lead_points_settings, operation_claim_points_for_lead
 from .points_service import change_points, resolve_price
 from .reward_rule_v12 import (
     SupplierRewardRule,
     calculate_reward_points,
     resolve_supplier_reward_rule,
+    resolve_supplier_reward_rule_and_points_settings,
 )
 
 settings = get_settings()
@@ -419,7 +421,19 @@ def evaluate_candidate(
     )
     if duplicate_assignment is not None:
         reasons.append("DUPLICATE_TO_RECEIVER")
-    points_price, price_rule = resolve_price(db, lead, company)
+    points_settings = get_lead_points_settings(db)
+    points_price, price_rule = resolve_price(
+        db,
+        lead,
+        company,
+        points_settings=points_settings,
+    )
+    fixed_price = operation_claim_points_for_lead(
+        db,
+        source_kind=lead.source_kind,
+        source_type=lead.source_type,
+        settings=points_settings,
+    )
     balance, reserved, available = _points_snapshot(
         db,
         company.id,
@@ -434,7 +448,11 @@ def evaluate_candidate(
         exclusion_reasons=tuple(reasons),
         points_price=points_price,
         price_rule_id=price_rule.id if price_rule else None,
-        price_version=price_rule.version if price_rule else 1,
+        price_version=(
+            fixed_price[1]
+            if fixed_price
+            else price_rule.version if price_rule else 1
+        ),
         points_balance=balance,
         points_reserved=reserved,
         points_available=available,
@@ -531,7 +549,13 @@ def list_candidates(
         .distinct()
         .subquery()
     )
-    reward_rule = resolve_supplier_reward_rule(db)
+    reward_rule, points_settings = resolve_supplier_reward_rule_and_points_settings(db)
+    fixed_operation_price = operation_claim_points_for_lead(
+        db,
+        source_kind=lead.source_kind,
+        source_type=lead.source_type,
+        settings=points_settings,
+    )
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=reward_rule.historical_suspect_days)
     match_clauses = [Lead.phone_hash == lead.phone_hash]
@@ -659,7 +683,11 @@ def list_candidates(
                 func.coalesce(PointsAccount.balance, 0)
                 - func.coalesce(reserved_by_company.c.points_reserved, 0)
             )
-            >= func.coalesce(candidate_price, 100),
+            >= (
+                fixed_operation_price[0]
+                if fixed_operation_price
+                else func.coalesce(candidate_price, 100)
+            ),
         ]
         if lead.supplier_company_id:
             eligible_conditions.append(Company.id != lead.supplier_company_id)
@@ -735,7 +763,11 @@ def list_candidates(
             (rule for rule in price_rules if rule.level_code is None or rule.level_code == company.level_code),
             None,
         )
-        points_price = int(price_rule.points_cost) if price_rule else 100
+        points_price = (
+            fixed_operation_price[0]
+            if fixed_operation_price
+            else int(price_rule.points_cost) if price_rule else 100
+        )
         points_balance = int(balances.get(company.id, 0))
         points_reserved = int(reserved.get(company.id, 0))
         points_available = points_balance - points_reserved
@@ -748,8 +780,16 @@ def list_candidates(
                 eligible=not reasons,
                 exclusion_reasons=tuple(reasons),
                 points_price=points_price,
-                price_rule_id=price_rule.id if price_rule else None,
-                price_version=price_rule.version if price_rule else 1,
+                price_rule_id=(
+                    None
+                    if fixed_operation_price
+                    else price_rule.id if price_rule else None
+                ),
+                price_version=(
+                    fixed_operation_price[1]
+                    if fixed_operation_price
+                    else price_rule.version if price_rule else 1
+                ),
                 points_balance=points_balance,
                 points_reserved=points_reserved,
                 points_available=points_available,

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from math import floor
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
@@ -13,6 +13,13 @@ from ..core.enums import ConfigStatus
 from ..core.errors import AppError
 from ..core.models import SystemConfig
 from ..core.time import as_utc
+from .lead_points_v12 import (
+    LEAD_POINTS_DOMAIN,
+    LEAD_POINTS_KEY,
+    LeadPointsSettings,
+    get_lead_points_settings,
+    lead_points_settings_from_config,
+)
 
 settings = get_settings()
 
@@ -31,11 +38,13 @@ class SupplierRewardRule:
     version: int
     config_id: str | None = None
     effective_at: datetime | None = None
+    calculation_mode: str = "RATIO"
+    fixed_points: int | None = None
 
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "domain": REWARD_RULE_DOMAIN,
-            "key": REWARD_RULE_KEY,
+        snapshot = {
+            "domain": LEAD_POINTS_DOMAIN if self.calculation_mode == "FIXED" else REWARD_RULE_DOMAIN,
+            "key": LEAD_POINTS_KEY if self.calculation_mode == "FIXED" else REWARD_RULE_KEY,
             "config_id": self.config_id,
             "version": self.version,
             "effective_at": self.effective_at.isoformat() if self.effective_at else None,
@@ -46,6 +55,9 @@ class SupplierRewardRule:
             "reward_duplicate_days": self.reward_duplicate_days,
             "historical_suspect_days": self.historical_suspect_days,
         }
+        if self.calculation_mode == "FIXED":
+            snapshot.update(calculation_mode="FIXED", fixed_points=self.fixed_points)
+        return snapshot
 
 
 def normalize_reward_rule_values(values: dict[str, Any]) -> dict[str, int | None]:
@@ -115,6 +127,7 @@ def resolve_supplier_reward_rule(
     db: Session,
     *,
     as_of: datetime | None = None,
+    points_settings: LeadPointsSettings | None = None,
 ) -> SupplierRewardRule:
     now = as_of or datetime.now(timezone.utc)
     item = db.scalar(
@@ -128,10 +141,76 @@ def resolve_supplier_reward_rule(
         .order_by(SystemConfig.version.desc(), SystemConfig.effective_at.desc())
         .limit(1)
     )
-    return rule_from_config(item) if item else default_supplier_reward_rule()
+    legacy_rule = rule_from_config(item) if item else default_supplier_reward_rule()
+    points_settings = points_settings or get_lead_points_settings(db)
+    return _apply_fixed_points(legacy_rule, points_settings)
+
+
+def _apply_fixed_points(
+    legacy_rule: SupplierRewardRule,
+    points_settings: LeadPointsSettings,
+) -> SupplierRewardRule:
+    if not points_settings.configured:
+        return legacy_rule
+    return SupplierRewardRule(
+        ratio_bps=legacy_rule.ratio_bps,
+        min_points=legacy_rule.min_points,
+        max_points=legacy_rule.max_points,
+        hard_duplicate_days=legacy_rule.hard_duplicate_days,
+        reward_duplicate_days=legacy_rule.reward_duplicate_days,
+        historical_suspect_days=legacy_rule.historical_suspect_days,
+        version=points_settings.version,
+        config_id=points_settings.config_id,
+        effective_at=points_settings.effective_at,
+        calculation_mode="FIXED",
+        fixed_points=points_settings.supplier_provision_points,
+    )
+
+
+def resolve_supplier_reward_rule_and_points_settings(
+    db: Session,
+    *,
+    as_of: datetime | None = None,
+) -> tuple[SupplierRewardRule, LeadPointsSettings]:
+    now = as_of or datetime.now(timezone.utc)
+    items = db.scalars(
+        select(SystemConfig)
+        .where(
+            or_(
+                and_(
+                    SystemConfig.domain == REWARD_RULE_DOMAIN,
+                    SystemConfig.key == REWARD_RULE_KEY,
+                ),
+                and_(
+                    SystemConfig.domain == LEAD_POINTS_DOMAIN,
+                    SystemConfig.key == LEAD_POINTS_KEY,
+                ),
+            ),
+            SystemConfig.status == ConfigStatus.PUBLISHED.value,
+            or_(SystemConfig.effective_at.is_(None), SystemConfig.effective_at <= now),
+        )
+        .order_by(SystemConfig.version.desc())
+    ).all()
+    reward_config = next(
+        (item for item in items if item.domain == REWARD_RULE_DOMAIN),
+        None,
+    )
+    points_config = next(
+        (item for item in items if item.domain == LEAD_POINTS_DOMAIN),
+        None,
+    )
+    legacy_rule = rule_from_config(reward_config) if reward_config else default_supplier_reward_rule()
+    points_settings = (
+        lead_points_settings_from_config(points_config)
+        if points_config
+        else LeadPointsSettings(False, None, None, 0)
+    )
+    return _apply_fixed_points(legacy_rule, points_settings), points_settings
 
 
 def calculate_reward_points(claim_points: int, rule: SupplierRewardRule) -> int:
+    if rule.calculation_mode == "FIXED":
+        return max(0, int(rule.fixed_points or 0))
     if claim_points <= 0:
         return 0
     points = floor(int(claim_points) * rule.ratio_bps / 10000)

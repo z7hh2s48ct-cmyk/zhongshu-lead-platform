@@ -37,6 +37,7 @@ from .routers import (
     followups,
     invite_preview,
     leads,
+    lead_points_v12,
     master_data,
     notifications,
     points,
@@ -113,6 +114,7 @@ app.include_router(company_accounts.router, prefix=api_prefix)
 app.include_router(company_accounts.directory_router, prefix=api_prefix)
 app.include_router(company_accounts.request_router, prefix=api_prefix)
 app.include_router(leads.router, prefix=api_prefix)
+app.include_router(lead_points_v12.router, prefix=api_prefix)
 app.include_router(verification.router, prefix=api_prefix)
 app.include_router(points.router, prefix=api_prefix)
 app.include_router(dispatch.router, prefix=api_prefix)

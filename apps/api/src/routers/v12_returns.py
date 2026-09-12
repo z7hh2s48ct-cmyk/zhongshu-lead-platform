@@ -293,7 +293,8 @@ def list_returns_v12(
     page_size: int = Query(default=20, ge=1, le=200),
 ):
     filters = []
-    if principal.can("*") or principal.can("return.read"):
+    can_read_all = principal.can("*") or principal.can("return.read")
+    if can_read_all:
         if company_id:
             filters.append(ReturnRequest.company_id == company_id)
     elif principal.has_any_role("FRANCHISE_OWNER") and principal.can("return.own.manage") and principal.company_id:
@@ -314,8 +315,13 @@ def list_returns_v12(
         )
     else:
         raise AppError("FORBIDDEN", "无权查看退回申请", 403)
-    if status:
-        filters.append(ReturnRequest.status == status.strip().upper())
+    normalized_status = status.strip().upper() if status else None
+    if normalized_status:
+        filters.append(ReturnRequest.status == normalized_status)
+    elif can_read_all:
+        # 运营默认队列只是已正式提交的申请；草稿仍留在
+        # 发起人侧继续补材料，管理员可通过 status=DRAFT 显式查阅。
+        filters.append(ReturnRequest.submitted_at.is_not(None))
     total = db.scalar(select(func.count(ReturnRequest.id)).where(*filters)) or 0
     items = db.scalars(
         select(ReturnRequest)
