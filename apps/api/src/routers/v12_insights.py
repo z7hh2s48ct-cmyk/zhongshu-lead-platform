@@ -85,7 +85,8 @@ class ScopedLeadExportRequestBody(LeadExportRequestBody):
 
     def filters(self) -> dict[str, Any]:
         if self.scope == "PUBLIC_POOL":
-            return {
+            common_filters = super().filters()
+            filters = {
                 "scope": self.scope,
                 "created_from": self.created_from.isoformat() if self.created_from else None,
                 "created_to": self.created_to.isoformat() if self.created_to else None,
@@ -96,6 +97,9 @@ class ScopedLeadExportRequestBody(LeadExportRequestBody):
                 "completeness": self.completeness,
                 "duplicate_status": self.duplicate_status,
             }
+            if common_filters["phone_hash"]:
+                filters["phone_hash"] = common_filters["phone_hash"]
+            return filters
         return {"scope": self.scope, **super().filters()}
 
 

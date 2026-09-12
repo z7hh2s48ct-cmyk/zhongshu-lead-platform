@@ -11,10 +11,12 @@ from ..core.database import get_db
 from ..core.errors import AppError
 from ..core.models import Lead
 from ..core.responses import ok, page
+from ..core.security import hash_phone
 from ..core.v12_enums import CustomerSource
 from ..integrations.feishu import FeishuClient
 from ..schemas.v12_lead_supply import LeadDraftBody, LeadDraftUpdateBody
 from ..schemas.v12_public_pool import PublicPoolFeishuImportBody
+from ..schemas.v12_reports import normalize_exact_phone
 from ..services.audit import write_audit
 from ..services.lead_supply_v12 import lead_supply_list_to_dict, lead_supply_to_dict
 from ..services.public_pool_v12 import (
@@ -55,6 +57,7 @@ def public_pool_list(
     principal=Depends(require_permissions("lead.manual.manage")),
     db: Session = Depends(get_db),
     keyword: str | None = Query(default=None, max_length=128),
+    phone: str | None = Query(default=None, max_length=32),
     customer_source: CustomerSource | None = Query(default=None),
     source_kind: str | None = Query(default=None, max_length=32),
     completeness: str | None = Query(default=None, max_length=32),
@@ -66,9 +69,14 @@ def public_pool_list(
     page_size: int = Query(default=20, ge=1, le=200),
 ):
     created_from, created_to = _validated_created_range(created_from, created_to)
+    try:
+        normalized_phone = normalize_exact_phone(phone)
+    except ValueError as exc:
+        raise AppError("PHONE_INVALID", str(exc), 422) from exc
     items, total = list_public_pool_leads(
         db,
         keyword=keyword,
+        phone_hash=hash_phone(normalized_phone) if normalized_phone else None,
         customer_source=customer_source.value if customer_source else None,
         source_kind=source_kind,
         completeness=completeness,

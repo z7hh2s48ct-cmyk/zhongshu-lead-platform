@@ -149,6 +149,63 @@ def _initial_deadline(assignment: Assignment, request: ReturnRequest) -> datetim
     return deadline
 
 
+def expire_unsubmitted_return_drafts(
+    db: Session,
+    *,
+    batch_size: int = 200,
+) -> dict[str, int]:
+    """Expire abandoned drafts after the continuous 48-hour claim window."""
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    now = _now()
+    candidate_ids = list(
+        db.scalars(
+            select(ReturnRequest.id)
+            .join(Assignment, Assignment.id == ReturnRequest.assignment_id)
+            .where(
+                ReturnRequest.status == ReturnV12Status.DRAFT.value,
+                ReturnRequest.submitted_at.is_(None),
+                Assignment.claimed_at.is_not(None),
+                Assignment.claimed_at <= now - timedelta(hours=48),
+            )
+            .order_by(Assignment.claimed_at.asc(), ReturnRequest.id.asc())
+            .limit(batch_size)
+        ).all()
+    )
+    expired = 0
+    for return_id in candidate_ids:
+        assignment, _, request = _lock_return_context(db, return_id)
+        # A concurrent formal submit takes the same assignment -> lead -> request
+        # locks. Re-check after acquiring them so the scheduler never expires it.
+        if request.status != ReturnV12Status.DRAFT.value or request.submitted_at is not None:
+            continue
+        deadline = _initial_deadline(assignment, request)
+        if now < deadline:
+            continue
+        assert_return_transition(ReturnV12Status.DRAFT, ReturnV12Status.EXPIRED)
+        request.status = ReturnV12Status.EXPIRED.value
+        db.add(
+            AssignmentEvent(
+                assignment_id=assignment.id,
+                event_type="V12_RETURN_DRAFT_EXPIRED",
+                actor_user_id=None,
+                payload={
+                    "return_request_id": request.id,
+                    "reason": "UNSUBMITTED_48H_WINDOW_EXPIRED",
+                    "claimed_at": as_utc(assignment.claimed_at).isoformat(),
+                    "appeal_deadline_at": deadline.isoformat(),
+                    "expired_at": now.isoformat(),
+                },
+            )
+        )
+        db.flush()
+        expired += 1
+    if expired:
+        logger.info("expired unsubmitted return drafts count=%s", expired)
+    return {"scanned": len(candidate_ids), "expired": expired}
+
+
 def _lock_return_context(db: Session, return_id: str) -> tuple[Assignment, Lead, ReturnRequest]:
     reference = _get_return(db, return_id)
     assignment = _get_assignment(db, reference.assignment_id, lock=True)

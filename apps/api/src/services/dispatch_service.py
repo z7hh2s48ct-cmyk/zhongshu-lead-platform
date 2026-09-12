@@ -19,6 +19,7 @@ from ..core.models import (
     Lead,
     ReturnRequest,
 )
+from .lead_points_v12 import get_lead_points_settings, operation_claim_points_for_lead
 from .notification_service import create_station_message, enqueue_outbox
 from .points_service import points_available_for_dispatch, resolve_price
 
@@ -32,6 +33,13 @@ def candidate_companies(db: Session, lead: Lead, *, include_balance: bool = Fals
         .where(Company.status == CompanyStatus.ACTIVE)
         .order_by(Company.name)
     ).all()
+    points_settings = get_lead_points_settings(db)
+    fixed_price = operation_claim_points_for_lead(
+        db,
+        source_kind=lead.source_kind,
+        source_type=lead.source_type,
+        settings=points_settings,
+    )
     candidates: list[dict[str, Any]] = []
     for company in companies:
         reasons: list[str] = []
@@ -57,7 +65,12 @@ def candidate_companies(db: Session, lead: Lead, *, include_balance: bool = Fals
         ) or 0
         if excluded:
             reasons.append("HISTORICAL_RETURN_EXCLUDED")
-        price, rule = resolve_price(db, lead, company)
+        price, rule = resolve_price(
+            db,
+            lead,
+            company,
+            points_settings=points_settings,
+        )
         balance, reserved, available = points_available_for_dispatch(db, company.id)
         if available < price:
             reasons.append("POINTS_INSUFFICIENT")
@@ -69,7 +82,11 @@ def candidate_companies(db: Session, lead: Lead, *, include_balance: bool = Fals
             "wechat_bound": bool(company.primary_user_id),
             "points_price": price,
             "price_rule_id": rule.id if rule else None,
-            "price_version": rule.version if rule else 1,
+            "price_version": (
+                fixed_price[1]
+                if fixed_price
+                else rule.version if rule else 1
+            ),
             "eligible": not reasons,
             "reason_codes": reasons,
             "eligibility_label": "可派" if not reasons else _label(reasons[0]),

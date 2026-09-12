@@ -11,6 +11,7 @@ from ..core.enums import AssignmentStatus, PointsLedgerType
 from ..core.errors import AppError
 from ..core.models import Assignment, Company, Lead, LeadPriceRule, NotificationOutbox, PointsAccount, PointsLedger, PointsPackage
 from ..core.time import as_utc
+from .lead_points_v12 import LeadPointsSettings, operation_claim_points_for_lead
 from .notification_service import create_station_message, enqueue_outbox
 
 settings = get_settings()
@@ -87,7 +88,21 @@ def account_summary(db: Session, company_id: str) -> dict[str, Any]:
     }
 
 
-def resolve_price(db: Session, lead: Lead, company: Company) -> tuple[int, LeadPriceRule | None]:
+def resolve_price(
+    db: Session,
+    lead: Lead,
+    company: Company,
+    *,
+    points_settings: LeadPointsSettings | None = None,
+) -> tuple[int, LeadPriceRule | None]:
+    fixed_price = operation_claim_points_for_lead(
+        db,
+        source_kind=lead.source_kind,
+        source_type=lead.source_type,
+        settings=points_settings,
+    )
+    if fixed_price is not None:
+        return fixed_price[0], None
     now = datetime.now(timezone.utc)
     rules = db.scalars(
         select(LeadPriceRule)
