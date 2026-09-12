@@ -8,8 +8,13 @@ WORKDIR /app
 RUN useradd --create-home --uid 10001 appuser
 COPY requirements.txt requirements-postgres.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-postgres.txt
-# 生产只允许 PostgreSQL；移除未使用的 SQLite 运行库，避免携带其 FTS 漏洞面。
-RUN apt-get purge -y libsqlite3-0 && rm -rf /var/lib/apt/lists/*
+# 刷新 Debian 安全仓库并升级基础镜像已安装的 PCRE2；生产仍只允许 PostgreSQL。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
+    && pcre2_version="$(dpkg-query -W -f='${Version}' libpcre2-8-0)" \
+    && dpkg --compare-versions "$pcre2_version" ge "10.42-1+deb12u1" \
+    && apt-get purge -y libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
 RUN chmod +x docker/*.sh scripts/*.py && mkdir -p /app/storage && chown -R appuser:appuser /app
 USER appuser
