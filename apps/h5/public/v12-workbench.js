@@ -523,59 +523,117 @@ async function uploadEvidenceBatch(files,uploadFile,onUploaded){
   }
   return {uploaded,succeeded,failed,results};
 }
-function syncEvidenceSubmitButton(button,uploadedTypes,uploading){button.disabled=uploading||uploadedTypes.size===0}
+function syncEvidenceSubmitButton(button,uploadedTypes,uploading,hasSelectedFiles=false){button.disabled=uploading||(uploadedTypes.size===0&&!hasSelectedFiles)}
 function renderEvidenceFileResults(root,results){zsSetSafeHtml(root,(results||[]).map(item=>`<div class="wb-notice"><b>${esc(item.file.name)}</b><br>${item.status==='SUCCESS'?'上传成功':`上传失败：${esc(item.error?.message||'请检查文件后重试')}`}</div>`).join(''))}
+function isReturnSubmissionConfirmed(request){return ['VERIFYING','REVIEWING'].includes(request?.status)&&Boolean(request.submitted_at&&request.verification_task_id)}
 function evidence(returnId,summary={},request={}){
   const supplement=request.status==='NEED_MORE_EVIDENCE';
   const uploadedTypes=new Set();
   if(supplement&&Number(request.supplementary_evidence_count||0)>0)uploadedTypes.add('SUPPLEMENT');
   if(!supplement&&Number(summary.CHAT_SCREENSHOT||0)>0)uploadedTypes.add('CHAT_SCREENSHOT');
   if(!supplement&&Number(summary.CALL_RECORDING||0)>0)uploadedTypes.add('CALL_RECORDING');
-  openSheet('上传证据并提交',`${supplement?'<div class="wb-notice">请按平台要求新增证据；历史材料或相同内容重复上传不算本轮补证。</div>':`<p class="wb-muted">${deadlineNotice(request.appeal_deadline_at,'首次提交截止')}</p>`}<div class="wb-notice"><b>截图或录音任一类型满足即可。</b><br>截图用于确认沟通内容，录音用于后续电销和审核人员核实事实。</div><form class="wb-form" id="evidence-form"><div class="wb-field"><label>沟通截图</label><input class="wb-input" type="file" name="chat_screenshots" accept="image/jpeg,image/png,image/webp" multiple><small class="wb-muted">支持 JPG、PNG、WEBP，可选择多张。</small></div><div class="wb-field"><label>电话录音</label><input class="wb-input" type="file" name="call_recording" accept="audio/mpeg,audio/wav,audio/mp4,audio/aac"><small class="wb-muted">支持 MP3、WAV、M4A、AAC，最大 20MB。</small></div><button class="wb-btn" id="upload-evidence" type="submit">上传证据</button></form><p class="wb-muted" id="evidence-progress" role="status">${uploadedTypes.size>0?'已有证据，可以提交退回申请。':'请至少上传一种证据。'}</p><div class="wb-form" id="evidence-file-results" aria-live="polite"></div><button class="wb-btn primary" id="submit-return" style="margin-top:12px" ${uploadedTypes.size>0?'':'disabled'} ${!supplement?deadlineButtonAttributes(request.appeal_deadline_at):''}>提交退回申请</button>`,()=>{
+  openSheet('提交退回申请',`${supplement?'<div class="wb-notice">请按平台要求新增证据；历史材料或相同内容重复上传不算本轮补证。</div>':`<p class="wb-muted">${deadlineNotice(request.appeal_deadline_at,'首次提交截止')}</p>`}<div class="wb-notice"><b>截图或录音任一类型满足即可。</b><br>选择文件后点击“提交退回申请”，系统会先上传材料，再正式提交；看到提交成功提示后才进入核验。</div><form class="wb-form" id="evidence-form"><div class="wb-field"><label>沟通截图</label><input class="wb-input" type="file" name="chat_screenshots" accept="image/jpeg,image/png,image/webp" multiple><small class="wb-muted">支持 JPG、PNG、WEBP，可选择多张。</small></div><div class="wb-field"><label>电话录音</label><input class="wb-input" type="file" name="call_recording" accept="audio/mpeg,audio/wav,audio/mp4,audio/aac"><small class="wb-muted">支持 MP3、WAV、M4A、AAC，最大 20MB。</small></div></form><p class="wb-muted" id="evidence-progress" role="status">${uploadedTypes.size>0?'已有证据，尚未提交；可直接点击“提交退回申请”。':'申请尚未提交，请至少选择一种证据。'}</p><div class="wb-form" id="evidence-file-results" aria-live="polite"></div><button class="wb-btn primary" id="submit-return" type="submit" form="evidence-form" style="margin-top:12px" ${uploadedTypes.size>0?'':'disabled'} ${!supplement?deadlineButtonAttributes(request.appeal_deadline_at):''}>提交退回申请</button><button class="wb-btn" id="submit-saved-evidence" type="button" hidden>仅提交已上传证据</button>`,()=>{
     const form=document.querySelector('#evidence-form');
-    const uploadButton=document.querySelector('#upload-evidence');
     const submitButton=document.querySelector('#submit-return');
+    const savedButton=document.querySelector('#submit-saved-evidence');
+    const closeButton=document.querySelector('#sheet-close');
     const progress=document.querySelector('#evidence-progress');
     const fileResults=document.querySelector('#evidence-file-results');
     const uploadHistory=[];
-    let uploading=false;
-    const uploadFile=async(file,type)=>{const body=new FormData();body.append('file',file);body.append('evidence_type',type);await api(`/v1.2/returns/${returnId}/evidence`,{method:'POST',body})};
-    form.onsubmit=async event=>{
-      event.preventDefault();
-      if(uploading)return;
+    const savedFiles=new Set();
+    let processing=false;
+    let submissionUncertain=false;
+    const selectedFiles=()=>{
       const screenshots=Array.from(form.elements.chat_screenshots.files||[]);
       const recording=form.elements.call_recording.files?.[0];
-      if(uploadedTypes.size===0&&!screenshots.length&&!recording){toast('请至少上传沟通截图或电话录音',true);return}
-      uploading=true;
-      uploadButton.disabled=true;
-      syncEvidenceSubmitButton(submitButton,uploadedTypes,uploading);
-      progress.textContent='正在上传证据，请不要关闭页面…';
-      const files=[...screenshots.map(file=>({file,type:'CHAT_SCREENSHOT'})),...(recording?[{file:recording,type:'CALL_RECORDING'}]:[])];
-      const result=await uploadEvidenceBatch(files,uploadFile,(file,type)=>{
-        if(!supplement)uploadedTypes.add(type);
-        progress.textContent=supplement?`${file.name}上传成功，正在核对本轮新增材料。`:`${file.name}上传成功，已有证据，可以提交退回申请。`;
-      });
-      if(supplement&&result.uploaded>0){try{const latest=await api(`/v1.2/returns/${returnId}`);if(Number(latest.supplementary_evidence_count||0)>0)uploadedTypes.add('SUPPLEMENT')}catch(error){toast(`读取补证状态失败：${error.message}`,true)}}
-      uploadHistory.push(...result.results);
-      renderEvidenceFileResults(fileResults,uploadHistory);
-      uploading=false;
-      syncEvidenceSubmitButton(submitButton,uploadedTypes,uploading);
-      refreshDeadlineControls();
-      if(result.failed.length===0){
-        progress.textContent='已有证据，可以提交退回申请。';
-        uploadButton.textContent='继续上传证据';
-        uploadButton.disabled=false;
-        if(supplement&&uploadedTypes.size===0)progress.textContent='本轮尚无新增有效材料，请上传不同内容的证据。';
-        toast('证据已上传');
-      }else{
-        uploadButton.disabled=false;
-        const failures=result.failed.map(({file,error})=>`${file.name}：${error.message||'上传失败'}`).join('；');
-        progress.textContent=result.uploaded>0?`已成功上传 ${result.uploaded} 个文件；${result.failed.length} 个失败（${failures}）。已有证据，仍可提交退回申请。`:`上传失败：${failures}。请检查文件后重试。`;
-        if(supplement&&uploadedTypes.size===0)progress.textContent=`本次上传 ${result.uploaded} 个成功、${result.failed.length} 个失败（${failures}）。本轮尚无确认有效的新增材料，请补充后再提交。`;
-        toast(uploadedTypes.size>0?'部分证据上传成功，可继续提交':'请检查证据上传结果',uploadedTypes.size===0);
+      return [...screenshots.map(file=>({file,type:'CHAT_SCREENSHOT'})),...(recording?[{file:recording,type:'CALL_RECORDING'}]:[])];
+    };
+    const syncControls=()=>{
+      syncEvidenceSubmitButton(submitButton,uploadedTypes,processing,selectedFiles().length>0);
+      savedButton.disabled=processing||uploadedTypes.size===0;
+      form.elements.chat_screenshots.disabled=processing;
+      form.elements.call_recording.disabled=processing;
+      if(closeButton)closeButton.disabled=processing;
+      if(!supplement)refreshDeadlineControls();
+    };
+    const returnApi=async(path,options={})=>{
+      const controller=new AbortController();
+      const timeout=setTimeout(()=>controller.abort(),120000);
+      try{return await api(path,{...options,signal:controller.signal})}
+      catch(error){if(controller.signal.aborted)throw new Error('请求超时，请重试或查看退回记录');throw error}
+      finally{clearTimeout(timeout)}
+    };
+    const uploadFile=async(file,type)=>{const body=new FormData();body.append('file',file);body.append('evidence_type',type);await returnApi(`/v1.2/returns/${returnId}/evidence`,{method:'POST',body})};
+    const finish=(message='退回申请已提交，等待平台处理')=>{toast(message);closeSheet();go('returns')};
+    const recoverSubmission=async()=>{
+      const latest=await returnApi(`/v1.2/returns/${returnId}`);
+      if(!['VERIFYING','REVIEWING','NEED_MORE_EVIDENCE','APPROVED','REJECTED'].includes(latest.status)||!latest.submitted_at||!latest.verification_task_id)return false;
+      // The previous round's task and timestamp do not prove this supplement was submitted.
+      if(supplement&&latest.status==='NEED_MORE_EVIDENCE'&&(!request.verification_task_id||latest.verification_task_id===request.verification_task_id))return false;
+      finish('申请状态已更新，请查看退回记录');
+      return true;
+    };
+    const submit=async(onlySaved=false)=>{
+      if(processing)return;
+      const files=onlySaved?[]:selectedFiles().filter(entry=>!savedFiles.has(entry.file));
+      if(uploadedTypes.size===0&&files.length===0&&savedFiles.size===0){toast('请至少选择沟通截图或电话录音',true);return}
+      processing=true;
+      savedButton.hidden=true;
+      syncControls();
+      let submitting=false;
+      try{
+        if(submissionUncertain&&await recoverSubmission())return;
+        if(!supplement&&!deadlineState(request.appeal_deadline_at).allowed)throw new Error('已超过领取后 48 小时首次退回期限');
+        submitButton.textContent='正在上传并提交…';
+        progress.textContent='申请尚未提交，正在上传证据，请不要关闭页面…';
+        const result=await uploadEvidenceBatch(files,uploadFile,(file,type)=>{
+          savedFiles.add(file);
+          if(!supplement)uploadedTypes.add(type);
+          progress.textContent=`${file.name}上传成功，正在继续处理，申请尚未提交。`;
+        });
+        uploadHistory.push(...result.results);
+        renderEvidenceFileResults(fileResults,uploadHistory);
+        if(supplement){
+          const latest=await returnApi(`/v1.2/returns/${returnId}`);
+          // A previous submit may have committed even when its response was lost.
+          if(isReturnSubmissionConfirmed(latest)){finish();return}
+          uploadedTypes.clear();
+          if(Number(latest.supplementary_evidence_count||0)>0)uploadedTypes.add('SUPPLEMENT');
+        }
+        if(result.failed.length>0){
+          savedButton.hidden=uploadedTypes.size===0;
+          const failures=result.failed.map(({file,error})=>`${file.name}：${error.message||'上传失败'}`).join('；');
+          throw new Error(`${result.failed.length} 个文件上传失败（${failures}）。可重试失败文件${uploadedTypes.size>0?'，或选择“仅提交已上传证据”':''}`);
+        }
+        if(uploadedTypes.size===0)throw new Error('本轮尚无新增有效材料，请上传不同内容的证据');
+        if(!supplement&&!deadlineState(request.appeal_deadline_at).allowed)throw new Error('已超过领取后 48 小时首次退回期限');
+        submitting=true;
+        submitButton.textContent='正在提交退回申请…';
+        progress.textContent='证据已保存，正在正式提交退回申请…';
+        const submitted=await returnApi(`/v1.2/returns/${returnId}/submit`,{method:'POST'});
+        if(!isReturnSubmissionConfirmed(submitted))throw new Error('服务器尚未确认申请进入核验，请重试或查看退回记录');
+        finish();
+      }catch(error){
+        if(submitting)submissionUncertain=true;
+        progress.textContent=`${submissionUncertain?'未确认提交成功':'申请未提交'}：${error.message}。已上传的材料会保留。`;
+        toast(progress.textContent,true);
+      }finally{
+        processing=false;
+        submitButton.textContent='提交退回申请';
+        syncControls();
       }
     };
-    submitButton.onclick=async()=>{if(!supplement&&!deadlineState(request.appeal_deadline_at).allowed){refreshDeadlineControls();toast('已超过领取后 48 小时首次退回期限',true);return}if(uploading){toast('证据仍在上传，请稍候',true);return}if(uploadedTypes.size===0){toast('请先上传沟通截图或电话录音',true);return}submitButton.disabled=true;try{await api(`/v1.2/returns/${returnId}/submit`,{method:'POST'});toast('退回申请已提交，等待电销核验');closeSheet();go('returns')}catch(err){syncEvidenceSubmitButton(submitButton,uploadedTypes,uploading);toast(err.message,true)}};
+    form.onchange=()=>{
+      syncControls();
+      if(!processing){
+        const count=selectedFiles().length;
+        progress.textContent=count?`已选择 ${count} 个文件，申请尚未提交；请点击“提交退回申请”。`:'申请尚未提交；请选择证据，或直接提交已保存的材料。';
+      }
+    };
+    form.onsubmit=event=>{event.preventDefault();return submit()};
+    savedButton.onclick=()=>submit(true);
+    savedButton.hidden=true;
+    syncControls();
   });
 }
 async function businessReport(){
@@ -593,14 +651,14 @@ async function businessReport(){
   shell(`<section class="wb-page-head"><div><h1>经营报表</h1><span>${esc(scopeText)}</span></div><button class="wb-btn" data-go="profile">返回我的</button></section><section class="wb-filter"><label class="wb-filter-field">统计周期<select class="wb-select" id="business-report-period">${periodOptions.map(([value,text])=>`<option value="${value}" ${period===value?'selected':''}>${text}</option>`).join('')}</select></label></section><section class="wb-card"><div class="wb-card-head"><h2>业务数据</h2></div><div class="wb-detail-grid">${metrics.map(([name,value])=>`<div class="wb-detail"><small>${esc(name)}</small><b>${num(value)}</b></div>`).join('')}</div></section><div class="wb-notice">“拒绝领取”“发起退回”“确认无效”分别统计；积分口径显示领取客资实际消耗的积分。</div>`);
   document.querySelector('#business-report-period')?.addEventListener('change',event=>go('reports',event.target.value));
 }
-function returnStatusLabel(status){return status==='REJECTED'?'退回未通过':readableLabel(status)}
-async function returns(){const d=await api(`/v1.2/returns?page=${S.page}&page_size=20`);const list=(d.items||[]).map(x=>item(`${esc(x.customer_name||'待确认客户')} · ${readableLabel(x.reason_code,'其他原因')}`,x.status,`<p>${esc(x.phone_masked||'手机号待补充')} · ${esc([x.city,x.district].filter(Boolean).join(' / ')||'地区待补充')}</p><p>提交时间 ${fmt(x.submitted_at||x.created_at)}</p><p>派发编号 ${esc(x.assignment_code||recordCode(x.assignment_id,'PF'))}</p>`,`<button class="wb-btn" data-return="${x.id}">查看进度</button>`,returnStatusLabel(x.status))).join('');shell(`<section class="wb-page-head"><h1>退回记录</h1><button class="wb-btn" data-go="profile">返回我的</button></section><div class="wb-list">${list||'<div class="wb-empty">暂无退回记录</div>'}</div>${workbenchPager([d])}`);bindWorkbenchPager(returns);document.querySelectorAll('[data-return]').forEach(b=>b.onclick=()=>returnDetail(b.dataset.return));if(S.id){const id=S.id;S.id='';returnDetail(id)}}
+function returnStatusLabel(status){return status==='DRAFT'?'待提交':status==='REJECTED'?'退回未通过':readableLabel(status)}
+async function returns(){const d=await api(`/v1.2/returns?page=${S.page}&page_size=20`);const list=(d.items||[]).map(x=>item(`${esc(x.customer_name||'待确认客户')} · ${readableLabel(x.reason_code,'其他原因')}`,x.status,`<p>${esc(x.phone_masked||'手机号待补充')} · ${esc([x.city,x.district].filter(Boolean).join(' / ')||'地区待补充')}</p><p>提交时间 ${x.submitted_at?fmt(x.submitted_at):'尚未提交'}</p><p>派发编号 ${esc(x.assignment_code||recordCode(x.assignment_id,'PF'))}</p>`,`<button class="wb-btn" data-return="${x.id}">查看进度</button>`,returnStatusLabel(x.status))).join('');shell(`<section class="wb-page-head"><h1>退回记录</h1><button class="wb-btn" data-go="profile">返回我的</button></section><div class="wb-list">${list||'<div class="wb-empty">暂无退回记录</div>'}</div>${workbenchPager([d])}`);bindWorkbenchPager(returns);document.querySelectorAll('[data-return]').forEach(b=>b.onclick=()=>returnDetail(b.dataset.return));if(S.id){const id=S.id;S.id='';returnDetail(id)}}
 async function returnDetail(id){
   const x=await api(`/v1.2/returns/${id}`),verification=x.verification||{};
   const canSupplement=['DRAFT','NEED_MORE_EVIDENCE'].includes(x.status);
-  const continueAction=canSupplement?`<button class="wb-btn primary" data-return-evidence="${esc(x.id)}" ${x.status==='DRAFT'?deadlineButtonAttributes(x.appeal_deadline_at):''}>${x.status==='DRAFT'?'继续上传并提交':'补充证据并重新提交'}</button>`:'';
+  const continueAction=canSupplement?`<button class="wb-btn primary" data-return-evidence="${esc(x.id)}" ${x.status==='DRAFT'?deadlineButtonAttributes(x.appeal_deadline_at):''}>${x.status==='DRAFT'?'继续提交退回申请':'补充证据并重新提交'}</button>`:'';
   const deadlineHelp=x.status==='DRAFT'?`<p class="wb-muted">${deadlineNotice(x.appeal_deadline_at,'首次提交截止')}</p>`:x.status==='NEED_MORE_EVIDENCE'?'<p class="wb-muted">申请已在期限内提交，当前可按审核要求补证。</p>':'';
-  openSheet('退回记录详情',`<div class="wb-detail-grid">${[['客户',x.customer_name],['所在地',[x.city,x.district].filter(Boolean).join(' ')],['退回编号',recordCode(x.id,'TH')],['派发编号',x.assignment_code||recordCode(x.assignment_id,'PF')],['处理状态',returnStatusLabel(x.status)],['退回原因',readableLabel(x.reason_code,'其他原因')],['电话核验',verification.status?readableLabel(verification.status):'待安排'],['核验结论',verification.conclusion?readableLabel(verification.conclusion):'尚未提交'],['申诉截止',fmt(x.appeal_deadline_at)],['最终结果',returnDecisionSummary(x)]].map(([a,b])=>`<div class="wb-detail"><small>${a}</small><b>${esc(b||'--')}</b></div>`).join('')}</div><div class="wb-card"><h3>申诉说明</h3><p class="wb-muted">${esc(x.description||'暂无说明')}</p></div>${deadlineHelp}${continueAction}`,()=>{
+  openSheet('退回记录详情',`<div class="wb-detail-grid">${[['客户',x.customer_name],['所在地',[x.city,x.district].filter(Boolean).join(' ')],['退回编号',recordCode(x.id,'TH')],['派发编号',x.assignment_code||recordCode(x.assignment_id,'PF')],['处理状态',returnStatusLabel(x.status)],['提交时间',x.submitted_at?fmt(x.submitted_at):'尚未提交'],['退回原因',readableLabel(x.reason_code,'其他原因')],['电话核验',verification.status?readableLabel(verification.status):'待安排'],['核验结论',verification.conclusion?readableLabel(verification.conclusion):'尚未提交'],['申诉截止',fmt(x.appeal_deadline_at)],['最终结果',returnDecisionSummary(x)]].map(([a,b])=>`<div class="wb-detail"><small>${a}</small><b>${esc(b||'--')}</b></div>`).join('')}</div><div class="wb-card"><h3>申诉说明</h3><p class="wb-muted">${esc(x.description||'暂无说明')}</p></div>${deadlineHelp}${continueAction}`,()=>{
     document.querySelector('[data-return-evidence]')?.addEventListener('click',()=>evidence(x.id,x.evidence_summary||{},x));
   });
 }
