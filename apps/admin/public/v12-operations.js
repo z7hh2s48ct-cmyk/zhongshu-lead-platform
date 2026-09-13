@@ -1122,6 +1122,7 @@ function resetCompanyAccountPassword(companyId,userId,companyName){
   actionForm({title:'重置加盟商账号密码',message:'系统会生成新的初始密码并仅展示一次；旧会话将立即失效。',labelText:'重置理由',required:isSuperAdmin(),minLength:2,submitLabel:'确认重置',danger:true},async reason=>{
     const account=await api(`/companies/${encodeURIComponent(companyId)}/accounts/${encodeURIComponent(userId)}/reset-password`,{method:'POST',body:JSON.stringify({reason:reason||null})});
     showInitialPassword(account.initial_password,()=>companyAccounts(companyId,companyName));
+    return false;
   });
 }
 function showInitialPassword(password,onClose){
