@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -31,7 +31,6 @@ from apps.api.src.core.models import (
 from apps.api.src.core.models_v12 import SupplierLeadReward
 from apps.api.src.services.bootstrap import seed_reference_data
 from apps.api.src.services.superadmin_bootstrap import bootstrap_superadmin
-
 
 ROOT = Path(__file__).resolve().parents[3]
 ROOT_PASSWORD = "E2E-Root-Only9!"
@@ -74,11 +73,11 @@ def _database_url(tmp_path: Path) -> str:
 def production_lifecycle_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from fastapi.testclient import TestClient
 
+    import apps.api.src.integrations.wechat as wechat_module
+    import apps.api.src.services.storage as storage_module
     from apps.api.src.core import legacy_guard
     from apps.api.src.main import app, settings
     from apps.api.src.routers import auth as auth_router
-    import apps.api.src.integrations.wechat as wechat_module
-    import apps.api.src.services.storage as storage_module
 
     database_url = _database_url(tmp_path)
     _upgrade_to_head(database_url)
@@ -432,7 +431,7 @@ def _dispatch_and_claim(
     assert len(unlocked_phone) == 11
     assert "*" not in unlocked_phone
     assert claimed["idempotent"] is False
-    assert claimed["reward"]["status"] == "WAITING_CLAIM"
+    assert claimed["reward"]["status"] == "OBSERVING"
     replay_claim = _data(
         client.post(
             f"/api/v1/v1.2/assignments/{assignment['id']}/claim",
@@ -531,20 +530,6 @@ def _run_return_flow(
     assert reviewed["review_note"] == f"E2E 终审{decision}"
     assert reviewed["final_decision_reason"] == f"E2E 终审{decision}"
     return return_id
-
-
-def _make_reward_due(factory, reward_id: str) -> None:
-    with factory() as db:
-        reward = db.get(SupplierLeadReward, reward_id)
-        assert reward is not None
-        due = datetime.now(timezone.utc) - timedelta(minutes=1)
-        reward.reward_due_at = due
-        reward.appeal_deadline_at = due
-        assignment = db.get(Assignment, reward.assignment_id)
-        assert assignment is not None
-        assignment.reward_due_at = due
-        assignment.appeal_deadline_at = due
-        db.commit()
 
 
 def _assert_account_reconciles(db: Session, company_id: str) -> None:
@@ -715,7 +700,6 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
         )
     )
     assert effective_confirmation["status"] == "DEAL"
-    _make_reward_due(factory, reward_one)
     missing_settlement_note = client.post(
         f"/api/v1/v1.2/admin/supplier-rewards/{reward_one}/settle",
         headers=admin,
@@ -803,7 +787,6 @@ def test_v12_empty_database_to_reward_settlement_lifecycle(
         )
     )
     assert resumed_confirmation["status"] == "DEAL"
-    _make_reward_due(factory, reward_three)
     rejected_reward_settlement = _data(
         client.post(
             f"/api/v1/v1.2/admin/supplier-rewards/{reward_three}/settle",

@@ -114,11 +114,14 @@ def _reward_setup(
         lead_snapshot={},
         assigned_by=user.id,
         assigned_at=now - timedelta(days=5),
-        claimed_at=now - timedelta(days=4),
+        claimed_at=(due_at - timedelta(hours=48))
+        if due_at
+        else now - timedelta(days=4),
         idempotency_key=f"reward-assignment-{supplier.id}",
     )
     db.add(assignment)
     db.flush()
+    lead.current_assignment_id = assignment.id
     reward = SupplierLeadReward(
         lead_id=lead.id,
         assignment_id=assignment.id,
@@ -306,17 +309,17 @@ def test_due_reward_settles_once_and_credits_supplier(db) -> None:
     assert db.get(PointsAccount, account.id).balance == 30
 
 
-def test_waiting_claim_reward_cannot_be_settled_directly_or_by_due_batch(db) -> None:
+def test_waiting_reward_cannot_be_settled_before_claim_48h(db) -> None:
     supplier, _, user, _, _, reward = _reward_setup(
         db,
         status=RewardStatus.WAITING_CLAIM.value,
-        due_at=datetime.now(timezone.utc) - timedelta(days=1),
+        due_at=datetime.now(timezone.utc) + timedelta(hours=1),
     )
 
     with pytest.raises(AppError) as exc_info:
         settle_supplier_reward(db, reward_id=reward.id, settled_by=user.id)
 
-    assert exc_info.value.code == "REWARD_NOT_SETTLEABLE"
+    assert exc_info.value.code == "REWARD_NOT_DUE"
     batch = run_due_supplier_reward_settlement(db, limit=100, settled_by=user.id)
     db.commit()
     assert batch["scanned"] == 0

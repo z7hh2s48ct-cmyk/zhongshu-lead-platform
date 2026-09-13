@@ -77,9 +77,21 @@ RETURN_TRANSITIONS: Mapping[ReturnV12Status, Set[ReturnV12Status]] = {
 
 REWARD_TRANSITIONS: Mapping[RewardStatus, Set[RewardStatus]] = {
     RewardStatus.NOT_ELIGIBLE: set(),
-    RewardStatus.WAITING_CLAIM: {RewardStatus.OBSERVING, RewardStatus.CANCELLED},
-    RewardStatus.OBSERVING: {RewardStatus.FROZEN, RewardStatus.SETTLED, RewardStatus.CANCELLED},
-    RewardStatus.FROZEN: {RewardStatus.OBSERVING, RewardStatus.SETTLED, RewardStatus.CANCELLED},
+    RewardStatus.WAITING_CLAIM: {
+        RewardStatus.OBSERVING,
+        RewardStatus.FROZEN,
+        RewardStatus.CANCELLED,
+    },
+    RewardStatus.OBSERVING: {
+        RewardStatus.FROZEN,
+        RewardStatus.SETTLED,
+        RewardStatus.CANCELLED,
+    },
+    RewardStatus.FROZEN: {
+        RewardStatus.OBSERVING,
+        RewardStatus.SETTLED,
+        RewardStatus.CANCELLED,
+    },
     RewardStatus.SETTLED: {RewardStatus.REVERSED},
     # Only correction-dedup cancellations may be restored, and the service
     # verifies its own exception marker before using these transitions.

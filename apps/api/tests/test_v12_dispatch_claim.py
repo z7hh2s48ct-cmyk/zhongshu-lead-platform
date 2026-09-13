@@ -5,13 +5,26 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import event, inspect, select
 
-from apps.api.src.core.enums import AssignmentStatus
-from apps.api.src.core.errors import AppError
-from apps.api.src.core.models import Assignment, Company, Lead, PointsAccount, PointsLedger, Region, Role, User
-from apps.api.src.core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12, SupplierLeadReward
 # N14：reward mapper 由该模块打补丁——不显式导入则单文件运行必 TypeError
 # （全套件靠字母序在前的 test_pre_go_live_security.py 先导入才侥幸通过）。
 from apps.api.src.core import reward_models_v12 as _reward_models_v12  # noqa: F401
+from apps.api.src.core.enums import AssignmentStatus
+from apps.api.src.core.errors import AppError
+from apps.api.src.core.models import (
+    Assignment,
+    Company,
+    Lead,
+    PointsAccount,
+    PointsLedger,
+    Region,
+    Role,
+    User,
+)
+from apps.api.src.core.models_v12 import (
+    CompanyLeadCapability,
+    CompanyServiceAreaV12,
+    SupplierLeadReward,
+)
 from apps.api.src.core.security import encrypt_text, fingerprint_phone, hash_phone
 from apps.api.src.core.v12_enums import LeadSourceKind, LeadV12Status, RewardStatus
 from apps.api.src.services.dispatch_v12 import (
@@ -285,15 +298,15 @@ def test_manual_dispatch_does_not_deduct_points_and_claim_is_atomic_and_idempote
     assert result.assignment.status == AssignmentStatus.CLAIMED.value
     assert result.assignment.claim_points == 100
     assert result.assignment.appeal_deadline_at == result.assignment.claimed_at + timedelta(hours=48)
-    assert result.assignment.reward_due_at is None
+    assert result.assignment.reward_due_at == result.assignment.appeal_deadline_at
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == receiver.id))
     assert account is not None and account.balance == 900
     reward = db.scalar(select(SupplierLeadReward).where(SupplierLeadReward.assignment_id == assignment.id))
     assert reward is not None
     assert reward.supplier_company_id == supplier.id
-    assert reward.status == RewardStatus.WAITING_CLAIM.value
-    assert reward.observed_at is None
-    assert reward.reward_due_at is None
+    assert reward.status == RewardStatus.OBSERVING.value
+    assert reward.observed_at == result.assignment.claimed_at
+    assert reward.reward_due_at == result.assignment.appeal_deadline_at
     assert reward.reward_ratio_bps == 3000
     assert reward.reward_points == 30
     assert reward.rule_version == 1
