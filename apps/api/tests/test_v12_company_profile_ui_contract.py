@@ -73,7 +73,7 @@ def test_v12_operations_exposes_company_detail_and_platform_configuration() -> N
     assert "data-company-mark-test" in js
     assert "data-company-enable" in js
     assert "/wechat-binding/unbind" in js
-    assert "v12-operations.js?v=20260912-fixed-points-feedback" in html
+    assert "v12-operations.js?v=20260913-password-modal" in html
     assert "加盟商能力与服务区域审核申请" not in js
 
 
@@ -102,7 +102,7 @@ def test_v12_operations_exposes_test_company_cleanup_actions() -> None:
     assert "确认永久删除" in js
     delete_flow = js[js.index("function deleteTestCompany") : js.index("function configureCompanyCapability")]
     assert delete_flow.count("method:'DELETE'") == 1
-    assert "v12-operations.js?v=20260912-fixed-points-feedback" in html
+    assert "v12-operations.js?v=20260913-password-modal" in html
 
 
 def test_company_detail_modal_is_responsive_without_visible_scrollbars() -> None:
