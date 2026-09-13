@@ -51,7 +51,7 @@ def test_role_entrypoints_use_only_v12_role_workbenches(api_client) -> None:
     operation_admin = client.get("/h5/admin/", follow_redirects=False)
     assert operation_admin.status_code == 200
     assert "平台工作台" in operation_admin.text
-    assert "./app.js?v=20260827-route-isolation" in operation_admin.text
+    assert "./app.js?v=20260913-modal-lifecycle" in operation_admin.text
     operation_call = client.get("/h5/call/", follow_redirects=False)
     assert operation_call.headers["location"] == "/h5/admin/"
 

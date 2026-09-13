@@ -66,7 +66,7 @@ def test_internal_user_actions_provide_busy_state_and_length_only_reset_policy()
 
     assert ".disabled=true" in action
     assert ".disabled=false" in action
-    assert "await internalUsers()" in action
+    assert "await refreshAfterSuccess(internalUsers,success)" in action
     assert "toast(error.message,true)" in action
     assert "请输入8-128位密码，不限制字符组合" not in source
     assert "密码需为 8-128 位" in reset

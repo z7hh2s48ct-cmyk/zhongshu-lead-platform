@@ -27,7 +27,7 @@ def test_v12_workbench_shows_platform_managed_company_profile() -> None:
     assert "data-capability-request" not in js
     assert "service-area-edit" not in js
     assert "申请/更新服务区域" not in js
-    assert "v12-workbench.js?v=20260912-fixed-points-feedback" in html
+    assert "v12-workbench.js?v=20260913-modal-lifecycle" in html
 
 
 def test_v12_operations_exposes_company_detail_and_platform_configuration() -> None:
@@ -73,7 +73,7 @@ def test_v12_operations_exposes_company_detail_and_platform_configuration() -> N
     assert "data-company-mark-test" in js
     assert "data-company-enable" in js
     assert "/wechat-binding/unbind" in js
-    assert "v12-operations.js?v=20260913-password-modal" in html
+    assert "v12-operations.js?v=20260913-modal-lifecycle" in html
     assert "加盟商能力与服务区域审核申请" not in js
 
 
@@ -102,7 +102,7 @@ def test_v12_operations_exposes_test_company_cleanup_actions() -> None:
     assert "确认永久删除" in js
     delete_flow = js[js.index("function deleteTestCompany") : js.index("function configureCompanyCapability")]
     assert delete_flow.count("method:'DELETE'") == 1
-    assert "v12-operations.js?v=20260913-password-modal" in html
+    assert "v12-operations.js?v=20260913-modal-lifecycle" in html
 
 
 def test_company_detail_modal_is_responsive_without_visible_scrollbars() -> None:
@@ -138,7 +138,8 @@ def test_company_invitation_has_a_dedicated_h5_confirmation_page() -> None:
 def test_company_invitation_link_modal_is_not_closed_after_rendering() -> None:
     js = Path("apps/admin/public/v12-operations.js").read_text(encoding="utf-8")
 
-    assert "if(await onSubmit(raw)!==false)closeModal()" in js
+    assert "closeModalFor(form)" in js
+    assert "function closeModalFor(owner){return Boolean(owner?.isConnected)&&closeModal()}" in js
     invitation_start = js.index("function createCompanyInvite")
     invitation_end = js.index("function showCompanyInvite", invitation_start)
     assert "return false;" in js[invitation_start:invitation_end]
