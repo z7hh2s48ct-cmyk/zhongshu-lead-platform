@@ -13,10 +13,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from apps.api.src.core.database import SessionLocal, init_database
-from apps.api.src.services.assignment_timeout_v12 import drain_assignment_timeouts_active
+from apps.api.src.services.assignment_timeout_v12 import (
+    drain_assignment_timeouts_active,
+)
 from apps.api.src.services.binding_integrity import audit_primary_binding_integrity
 from apps.api.src.services.followup_service import run_followup_overdue
-from apps.api.src.services.notification_v12 import drain_due_supplier_reward_settlement_notified
+from apps.api.src.services.notification_v12 import (
+    drain_due_supplier_reward_settlement_notified,
+)
 from apps.api.src.services.outbox_worker import process_outbox
 from apps.api.src.services.points_service import run_low_points_warnings
 from apps.api.src.services.return_v12 import expire_unsubmitted_return_drafts
@@ -76,7 +80,7 @@ def run_cycle(run_slow_jobs: bool, run_hourly_jobs: bool, run_daily_jobs: bool =
                         "return_drafts": expire_unsubmitted_return_drafts(db, batch_size=200),
                     }
                 )
-            if run_hourly_jobs:
+            if run_slow_jobs or run_hourly_jobs:
                 metrics["supplier_rewards"] = drain_due_supplier_reward_settlement_notified(
                     db,
                     batch_size=500,

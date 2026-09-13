@@ -187,7 +187,10 @@ jobs:
         env:
           V12_E2E_DATABASE_URL: ${{ env.DATABASE_URL }}
           RETURN_POSTGRES_TEST_URL: ${{ env.DATABASE_URL }}
-        run: python -m pytest apps/api/tests/test_notification_postgres_concurrency_e2e.py apps/api/tests/test_return_concurrency_postgres.py -q
+        run: >-
+          python -m pytest apps/api/tests/test_notification_postgres_concurrency_e2e.py
+          apps/api/tests/test_return_concurrency_postgres.py
+          apps/api/tests/test_reward_auto_confirm_postgres.py -q
 
       - name: Verify invite-used-by migration symmetry on PostgreSQL
         env:

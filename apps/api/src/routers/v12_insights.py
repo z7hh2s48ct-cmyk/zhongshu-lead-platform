@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 import csv
 import hashlib
-from io import StringIO
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from threading import Lock
 from typing import Any, Literal
 from urllib.parse import quote
@@ -26,6 +26,7 @@ from ..core.database import get_db
 from ..core.errors import AppError
 from ..core.models import (
     Assignment,
+    AssignmentEvent,
     AuditLog,
     Company,
     FollowUp,
@@ -40,7 +41,11 @@ from ..core.models import (
     User,
     VerificationTask,
 )
-from ..core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12, SupplierLeadReward
+from ..core.models_v12 import (
+    CompanyLeadCapability,
+    CompanyServiceAreaV12,
+    SupplierLeadReward,
+)
 from ..core.responses import ok, page
 from ..core.security import decrypt_text, mask_phone
 from ..core.time import as_utc
@@ -1859,6 +1864,20 @@ def _trace(
     assignment_ids = {item.id for item in assignments}
     if assignment_id:
         assignment_ids.add(assignment_id)
+    assignment_events = (
+        db.scalars(
+            select(AssignmentEvent)
+            .where(AssignmentEvent.assignment_id.in_(assignment_ids))
+            .order_by(AssignmentEvent.occurred_at, AssignmentEvent.id)
+        ).all()
+        if assignment_ids
+        else []
+    )
+    auto_confirmed_at_by_assignment = {
+        item.assignment_id: item.occurred_at
+        for item in assignment_events
+        if item.event_type == "V12_ASSIGNMENT_AUTO_CONFIRMED"
+    }
     relation_filter = lambda model: or_(model.lead_id == lead_id, model.assignment_id.in_(assignment_ids))
     returns = db.scalars(select(ReturnRequest).where(relation_filter(ReturnRequest)).order_by(ReturnRequest.created_at)).all() if lead_id or assignment_ids else []
     rewards = db.scalars(select(SupplierLeadReward).where(relation_filter(SupplierLeadReward)).order_by(SupplierLeadReward.created_at)).all() if lead_id or assignment_ids else []
@@ -1871,6 +1890,9 @@ def _trace(
     followups = db.scalars(
         select(FollowUp).where(FollowUp.assignment_id.in_(assignment_ids)).order_by(FollowUp.created_at)
     ).all() if assignment_ids else []
+    follow_status_by_assignment = {
+        item.assignment_id: item.status for item in followups
+    }
     ledgers = db.scalars(
         select(PointsLedger)
         .where(or_(PointsLedger.business_id.in_(ids), PointsLedger.id.in_(ids)))
@@ -1893,6 +1915,7 @@ def _trace(
             *(item.created_by for item in followups),
             *(item.created_by for item in ledgers),
             *(item.actor_user_id for item in audits),
+            *(item.actor_user_id for item in assignment_events),
         )
         if value
     }
@@ -1934,6 +1957,27 @@ def _trace(
     ]
     timeline += [
         {
+            "at": item.occurred_at.isoformat(),
+            "kind": "ASSIGNMENT_EVENT",
+            "id": item.id,
+            "action": item.event_type,
+            "resource_type": "assignment",
+            "resource_id": item.assignment_id,
+            "actor_name": _display_name(users.get(item.actor_user_id)),
+            "summary": (
+                (
+                    "退回申请已驳回，系统认定有效并结算"
+                    if (item.payload or {}).get("reason") == "RETURN_REJECTED"
+                    else "领取满48小时未申请退回，系统自动认定有效"
+                )
+                if item.event_type == "V12_ASSIGNMENT_AUTO_CONFIRMED"
+                else "派发单状态已更新"
+            ),
+        }
+        for item in assignment_events
+    ]
+    timeline += [
+        {
             "at": item.created_at.isoformat(),
             "kind": "NOTIFICATION",
             "id": item.id,
@@ -1962,11 +2006,14 @@ def _trace(
                 evidence["access_token"] = create_file_access_token(evidence["id"], evidence_user_id)
         trace_returns.append(data)
     return {
-        "business_id": business_id, "linked_ids": sorted(ids),
+        "business_id": business_id,
+        "linked_ids": sorted(ids),
         "lead": {
             "id": resolved_lead.id,
             "customer_name": resolved_lead.customer_name,
-            "phone": decrypt_text(resolved_lead.phone_encrypted) if include_phone else None,
+            "phone": decrypt_text(resolved_lead.phone_encrypted)
+            if include_phone
+            else None,
             "phone_masked": mask_phone(decrypt_text(resolved_lead.phone_encrypted)),
             "status": resolved_lead.status,
             "source_kind": resolved_lead.source_kind,
@@ -1980,57 +2027,136 @@ def _trace(
             "submitted_at": _iso(resolved_lead.submitted_at),
             "created_at": _iso(resolved_lead.created_at),
             "supplier_company_id": resolved_lead.supplier_company_id,
-            "supplier_company_name": companies.get(resolved_lead.supplier_company_id).name if resolved_lead.supplier_company_id in companies else None,
+            "supplier_company_name": companies.get(
+                resolved_lead.supplier_company_id
+            ).name
+            if resolved_lead.supplier_company_id in companies
+            else None,
             "submitter_name": _display_name(users.get(resolved_lead.submitter_user_id)),
-        } if resolved_lead else None,
-        "assignments": [{
-            "id": item.id, "lead_id": item.lead_id, "company_id": item.company_id,
-            "company_name": companies.get(item.company_id).name if item.company_id in companies else None,
-            "supplier_company_id": item.supplier_company_id,
-            "supplier_company_name": companies.get(item.supplier_company_id).name if item.supplier_company_id in companies else None,
-            "receiver_company_id": item.receiver_company_id,
-            "receiver_company_name": companies.get(item.receiver_company_id).name if item.receiver_company_id in companies else None,
-            "status": item.status, "current_follow_status": resolved_lead.current_follow_status if resolved_lead else None,
-            "points_price": item.points_price, "claim_points": item.claim_points,
-            "assigned_at": _iso(item.assigned_at), "claimed_at": _iso(item.claimed_at),
-            "assigned_by_name": _display_name(users.get(item.assigned_by)),
-            "internal_assignee_name": _display_name(users.get(item.internal_assignee_user_id)),
-        } for item in assignments],
+        }
+        if resolved_lead
+        else None,
+        "assignments": [
+            {
+                "id": item.id,
+                "lead_id": item.lead_id,
+                "company_id": item.company_id,
+                "company_name": companies.get(item.company_id).name
+                if item.company_id in companies
+                else None,
+                "supplier_company_id": item.supplier_company_id,
+                "supplier_company_name": companies.get(item.supplier_company_id).name
+                if item.supplier_company_id in companies
+                else None,
+                "receiver_company_id": item.receiver_company_id,
+                "receiver_company_name": companies.get(item.receiver_company_id).name
+                if item.receiver_company_id in companies
+                else None,
+                "status": item.status,
+                "current_follow_status": (
+                    resolved_lead.current_follow_status
+                    if resolved_lead and resolved_lead.current_assignment_id == item.id
+                    else follow_status_by_assignment.get(item.id)
+                ),
+                "points_price": item.points_price,
+                "claim_points": item.claim_points,
+                "assigned_at": _iso(item.assigned_at),
+                "claimed_at": _iso(item.claimed_at),
+                "auto_confirmed_at": _iso(auto_confirmed_at_by_assignment.get(item.id)),
+                "assigned_by_name": _display_name(users.get(item.assigned_by)),
+                "internal_assignee_name": _display_name(
+                    users.get(item.internal_assignee_user_id)
+                ),
+            }
+            for item in assignments
+        ],
         "returns": trace_returns,
-        "supplier_rewards": [{
-            "id": item.id, "assignment_id": item.assignment_id, "lead_id": item.lead_id,
-            "supplier_company_id": item.supplier_company_id,
-            "supplier_company_name": companies.get(item.supplier_company_id).name if item.supplier_company_id in companies else None,
-            "receiver_company_id": item.receiver_company_id,
-            "receiver_company_name": companies.get(item.receiver_company_id).name if item.receiver_company_id in companies else None,
-            "status": item.status, "claim_points": int(item.claim_points), "reward_points": int(item.reward_points),
-            "reward_due_at": _iso(item.reward_due_at), "settled_at": _iso(item.settled_at),
-            "ledger_id": item.ledger_id, "reversal_ledger_id": item.reversal_ledger_id,
-            "exception_reason": item.exception_reason,
-        } for item in rewards],
-        "verification_tasks": [{
-            "id": item.id, "lead_id": item.lead_id, "assignment_id": item.assignment_id,
-            "return_request_id": item.return_request_id, "task_type": item.task_type,
-            "status": item.status, "assignee_user_id": item.assignee_user_id,
-            "assignee_name": _display_name(users.get(item.assignee_user_id)),
-            "contact_result": item.contact_result, "conclusion": item.verification_conclusion,
-            "created_at": _iso(item.created_at), "assigned_at": _iso(item.assigned_at),
-            "started_at": _iso(item.started_at), "submitted_at": _iso(item.submitted_at),
-        } for item in tasks],
-        "followups": [{
-            "id": item.id, "assignment_id": item.assignment_id, "status": item.status,
-            "note": item.note, "next_followup_at": _iso(item.next_followup_at),
-            "created_at": _iso(item.created_at), "created_by_name": _display_name(users.get(item.created_by)),
-        } for item in followups],
-        "points_ledgers": [{
-            "id": item.id, "company_id": item.company_id,
-            "company_name": companies.get(item.company_id).name if item.company_id in companies else None,
-            "ledger_type": item.ledger_type, "delta": int(item.delta), "balance_after": int(item.balance_after),
-            "business_type": item.business_type, "business_id": item.business_id,
-            "created_at": _iso(item.created_at), "created_by_name": _display_name(users.get(item.created_by)),
-        } for item in ledgers],
-        "notifications": [{"id": item.id, "scene": item.scene, "title": item.title, "deep_link": item.deep_link, "status": item.status, "read_at": _iso(item.read_at), "created_at": _iso(item.created_at)} for item in notifications],
-        "audit_events": audit_events, "timeline": timeline,
+        "supplier_rewards": [
+            {
+                "id": item.id,
+                "assignment_id": item.assignment_id,
+                "lead_id": item.lead_id,
+                "supplier_company_id": item.supplier_company_id,
+                "supplier_company_name": companies.get(item.supplier_company_id).name
+                if item.supplier_company_id in companies
+                else None,
+                "receiver_company_id": item.receiver_company_id,
+                "receiver_company_name": companies.get(item.receiver_company_id).name
+                if item.receiver_company_id in companies
+                else None,
+                "status": item.status,
+                "claim_points": int(item.claim_points),
+                "reward_points": int(item.reward_points),
+                "reward_due_at": _iso(item.reward_due_at),
+                "settled_at": _iso(item.settled_at),
+                "ledger_id": item.ledger_id,
+                "reversal_ledger_id": item.reversal_ledger_id,
+                "exception_reason": item.exception_reason,
+            }
+            for item in rewards
+        ],
+        "verification_tasks": [
+            {
+                "id": item.id,
+                "lead_id": item.lead_id,
+                "assignment_id": item.assignment_id,
+                "return_request_id": item.return_request_id,
+                "task_type": item.task_type,
+                "status": item.status,
+                "assignee_user_id": item.assignee_user_id,
+                "assignee_name": _display_name(users.get(item.assignee_user_id)),
+                "contact_result": item.contact_result,
+                "conclusion": item.verification_conclusion,
+                "created_at": _iso(item.created_at),
+                "assigned_at": _iso(item.assigned_at),
+                "started_at": _iso(item.started_at),
+                "submitted_at": _iso(item.submitted_at),
+            }
+            for item in tasks
+        ],
+        "followups": [
+            {
+                "id": item.id,
+                "assignment_id": item.assignment_id,
+                "status": item.status,
+                "note": item.note,
+                "next_followup_at": _iso(item.next_followup_at),
+                "created_at": _iso(item.created_at),
+                "created_by_name": _display_name(users.get(item.created_by)),
+            }
+            for item in followups
+        ],
+        "points_ledgers": [
+            {
+                "id": item.id,
+                "company_id": item.company_id,
+                "company_name": companies.get(item.company_id).name
+                if item.company_id in companies
+                else None,
+                "ledger_type": item.ledger_type,
+                "delta": int(item.delta),
+                "balance_after": int(item.balance_after),
+                "business_type": item.business_type,
+                "business_id": item.business_id,
+                "created_at": _iso(item.created_at),
+                "created_by_name": _display_name(users.get(item.created_by)),
+            }
+            for item in ledgers
+        ],
+        "notifications": [
+            {
+                "id": item.id,
+                "scene": item.scene,
+                "title": item.title,
+                "deep_link": item.deep_link,
+                "status": item.status,
+                "read_at": _iso(item.read_at),
+                "created_at": _iso(item.created_at),
+            }
+            for item in notifications
+        ],
+        "audit_events": audit_events,
+        "timeline": timeline,
     }
 
 

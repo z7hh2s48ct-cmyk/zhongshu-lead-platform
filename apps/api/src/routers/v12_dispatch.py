@@ -10,11 +10,15 @@ from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.enums import AssignmentStatus
 from ..core.errors import AppError
-from ..core.models import Assignment, Company, FollowUp, Lead, User
+from ..core.models import Assignment, AssignmentEvent, Company, FollowUp, Lead, User
 from ..core.responses import ok, page
 from ..core.security import decrypt_text, mask_phone
 from ..core.v12_enums import LeadV12Status
-from ..schemas.v12_dispatch import InternalAssignmentBody, ManualDispatchBody, RefuseAssignmentBody
+from ..schemas.v12_dispatch import (
+    InternalAssignmentBody,
+    ManualDispatchBody,
+    RefuseAssignmentBody,
+)
 from ..services.audit import write_audit
 from ..services.claim_singleflight import run_claim_singleflight
 from ..services.company_account_management import require_superadmin_reason
@@ -70,12 +74,26 @@ def _assignment_follow_status_expression():
     ).label("assignment_follow_status")
 
 
+def _assignment_auto_confirmed_at_expression():
+    return (
+        select(func.max(AssignmentEvent.occurred_at))
+        .where(
+            AssignmentEvent.assignment_id == Assignment.id,
+            AssignmentEvent.event_type == "V12_ASSIGNMENT_AUTO_CONFIRMED",
+        )
+        .correlate(Assignment)
+        .scalar_subquery()
+        .label("auto_confirmed_at")
+    )
+
+
 def _assignment_dict(
     assignment: Assignment,
     lead: Lead,
     *,
     reveal_phone: bool = False,
     follow_status: str | None = None,
+    auto_confirmed_at=None,
 ) -> dict:
     reveal_phone = reveal_phone and lead.pending_reason != "CORRECTION_REVIEW_REQUIRED"
     phone = decrypt_text(lead.phone_encrypted) if reveal_phone else None
@@ -96,7 +114,9 @@ def _assignment_dict(
         "status": assignment.status,
         "lead_status": lead.status,
         "lead_pending_reason": lead.pending_reason,
-        "correction_issues": list((lead.raw_payload or {}).get("correction_issues") or []),
+        "correction_issues": list(
+            (lead.raw_payload or {}).get("correction_issues") or []
+        ),
         "current_follow_status": (
             follow_status
             if follow_status is not None
@@ -106,6 +126,9 @@ def _assignment_dict(
         ),
         "receive_confirmation_status": receive_confirmation_status,
         "receive_confirmed_at": receive_confirmed_at,
+        "auto_confirmed_at": auto_confirmed_at.isoformat()
+        if auto_confirmed_at
+        else None,
         "points_price": assignment.points_price,
         "claim_points": assignment.claim_points,
         "price_rule_id": assignment.price_rule_id,
@@ -118,15 +141,29 @@ def _assignment_dict(
         "region_code": lead.region_code,
         "need_summary": lead.need_summary,
         "assigned_at": assignment.assigned_at.isoformat(),
-        "expires_at": assignment.expires_at.isoformat() if assignment.expires_at else None,
-        "claimed_at": assignment.claimed_at.isoformat() if assignment.claimed_at else None,
-        "released_at": assignment.released_at.isoformat() if assignment.released_at else None,
+        "expires_at": assignment.expires_at.isoformat()
+        if assignment.expires_at
+        else None,
+        "claimed_at": assignment.claimed_at.isoformat()
+        if assignment.claimed_at
+        else None,
+        "released_at": assignment.released_at.isoformat()
+        if assignment.released_at
+        else None,
         "release_reason": assignment.release_reason,
-        "appeal_deadline_at": assignment.appeal_deadline_at.isoformat() if assignment.appeal_deadline_at else None,
-        "reward_due_at": assignment.reward_due_at.isoformat() if assignment.reward_due_at else None,
-        "first_followup_due_at": assignment.first_followup_due_at.isoformat() if assignment.first_followup_due_at else None,
+        "appeal_deadline_at": assignment.appeal_deadline_at.isoformat()
+        if assignment.appeal_deadline_at
+        else None,
+        "reward_due_at": assignment.reward_due_at.isoformat()
+        if assignment.reward_due_at
+        else None,
+        "first_followup_due_at": assignment.first_followup_due_at.isoformat()
+        if assignment.first_followup_due_at
+        else None,
         "internal_assignee_user_id": assignment.internal_assignee_user_id,
-        "internal_assigned_at": assignment.internal_assigned_at.isoformat() if assignment.internal_assigned_at else None,
+        "internal_assigned_at": assignment.internal_assigned_at.isoformat()
+        if assignment.internal_assigned_at
+        else None,
     }
 
 
@@ -162,6 +199,7 @@ def _assignment_detail_projection(assignment_id: str, company_id: str):
             Lead.status.label("lead_status"),
             Lead.pending_reason.label("lead_pending_reason"),
             _assignment_follow_status_expression(),
+            _assignment_auto_confirmed_at_expression(),
         )
         .join(Lead, Lead.id == Assignment.lead_id)
         .where(Assignment.id == assignment_id, Assignment.company_id == company_id)
@@ -191,6 +229,9 @@ def _projected_assignment_dict(row, *, reveal_phone: bool = False) -> dict:
         "current_follow_status": row.assignment_follow_status,
         "receive_confirmation_status": receive_confirmation_status,
         "receive_confirmed_at": receive_confirmed_at,
+        "auto_confirmed_at": row.auto_confirmed_at.isoformat()
+        if row.auto_confirmed_at
+        else None,
         "points_price": row.points_price,
         "claim_points": row.claim_points,
         "price_rule_id": row.price_rule_id,
@@ -397,7 +438,12 @@ def own_assignments(
         filters.append(Assignment.status == status.strip().upper())
     total = db.scalar(select(func.count(Assignment.id)).where(*filters)) or 0
     rows = db.execute(
-        select(Assignment, Lead, _assignment_follow_status_expression())
+        select(
+            Assignment,
+            Lead,
+            _assignment_follow_status_expression(),
+            _assignment_auto_confirmed_at_expression(),
+        )
         .join(Lead, Lead.id == Assignment.lead_id)
         .where(*filters)
         .order_by(Assignment.assigned_at.desc())
@@ -410,8 +456,9 @@ def own_assignments(
             lead,
             reveal_phone=assignment.status in CLAIMED_CONTACT_STATUSES,
             follow_status=follow_status,
+            auto_confirmed_at=auto_confirmed_at,
         )
-        for assignment, lead, follow_status in rows
+        for assignment, lead, follow_status, auto_confirmed_at in rows
     ]
     return ok(request, page(items, int(total), page_no, page_size))
 

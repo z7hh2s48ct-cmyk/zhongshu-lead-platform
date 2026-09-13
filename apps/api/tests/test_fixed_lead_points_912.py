@@ -20,6 +20,9 @@ from apps.api.src.core.models import (
 from apps.api.src.core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12
 from apps.api.src.core.security import encrypt_text, fingerprint_phone, hash_phone
 from apps.api.src.core.v12_enums import LeadSourceKind, LeadV12Status, RewardStatus
+from apps.api.src.schemas.company import CompanyCreateBody
+from apps.api.src.services.company_service import create_company
+from apps.api.src.services.dispatch_service import candidate_companies, dispatch_lead
 from apps.api.src.services.dispatch_v12 import (
     _reward_for_claim,
     claim_assignment,
@@ -27,16 +30,12 @@ from apps.api.src.services.dispatch_v12 import (
     evaluate_candidate,
     list_candidates,
 )
-from apps.api.src.schemas.company import CompanyCreateBody
-from apps.api.src.services.company_service import create_company
-from apps.api.src.services.dispatch_service import candidate_companies, dispatch_lead
 from apps.api.src.services.lead_points_v12 import (
     get_lead_points_settings,
     update_lead_points_settings,
 )
 from apps.api.src.services.points_service import change_points, resolve_price
 from apps.api.src.services.supplier_reward_v12 import (
-    activate_supplier_reward_after_effective_confirmation,
     settle_supplier_reward,
 )
 
@@ -236,7 +235,7 @@ def test_operation_fixed_price_covers_single_batch_and_dispatch_snapshot(api_cli
         db.commit()
 
 
-def test_supplier_fixed_points_keep_confirmation_window_and_snapshot(db) -> None:
+def test_supplier_fixed_points_keep_48h_window_and_snapshot(db) -> None:
     actor = User(display_name="固定积分规则管理员", status="ACTIVE")
     supplier = Company(code="FIXED-SUP", name="固定积分供客方", status="ACTIVE")
     receiver = Company(code="FIXED-REC", name="固定积分领取方", status="ACTIVE")
@@ -284,13 +283,15 @@ def test_supplier_fixed_points_keep_confirmation_window_and_snapshot(db) -> None
     )
     db.add(assignment)
     db.flush()
+    lead.current_assignment_id = assignment.id
     reward = _reward_for_claim(db, lead=lead, assignment=assignment, now=now)
     assert reward is not None
-    assert reward.status == RewardStatus.WAITING_CLAIM.value
+    assert reward.status == RewardStatus.OBSERVING.value
     assert reward.reward_points == 36
     assert reward.rule_snapshot_json["calculation_mode"] == "FIXED"
     assert reward.rule_snapshot_json["fixed_points"] == 36
-    assert reward.observed_at is None and reward.reward_due_at is None
+    assert reward.observed_at == now
+    assert reward.reward_due_at == now + timedelta(hours=48)
 
     update_lead_points_settings(
         db,
@@ -301,12 +302,10 @@ def test_supplier_fixed_points_keep_confirmation_window_and_snapshot(db) -> None
     )
     assert reward.reward_points == 36
     assert reward.rule_snapshot_json["fixed_points"] == 36
-    confirmed_at = datetime(2026, 9, 11, 8, 0, tzinfo=timezone.utc)
-    activate_supplier_reward_after_effective_confirmation(db, assignment_id=assignment.id, confirmed_at=confirmed_at)
-    assert reward.status == RewardStatus.OBSERVING.value
-    assert reward.reward_due_at is not None and reward.reward_due_at > confirmed_at
     with pytest.raises(AppError) as not_due:
-        settle_supplier_reward(db, reward_id=reward.id, as_of=confirmed_at + timedelta(days=1), settled_by=actor.id)
+        settle_supplier_reward(
+            db, reward_id=reward.id, as_of=now + timedelta(days=1), settled_by=actor.id
+        )
     assert not_due.value.code == "REWARD_NOT_DUE"
     first = settle_supplier_reward(db, reward_id=reward.id, as_of=reward.reward_due_at + timedelta(seconds=1), settled_by=actor.id)
     repeated = settle_supplier_reward(db, reward_id=reward.id, as_of=reward.reward_due_at + timedelta(seconds=1), settled_by=actor.id)

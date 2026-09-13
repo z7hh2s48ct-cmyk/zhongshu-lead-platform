@@ -3,11 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, JSON, event
+from sqlalchemy import JSON, Column, event
 from sqlalchemy.orm import Session, object_session
 
 from .models_v12 import SupplierLeadReward
-from .time import as_utc
 from .v12_enums import RewardStatus
 
 QUEUE_KEY = "v12_rewards_due_after_rejection"
@@ -48,8 +47,7 @@ def queue_overdue_reward_after_rejection(
 
     if old_value != RewardStatus.FROZEN.value or value != RewardStatus.OBSERVING.value:
         return
-    due_at = as_utc(reward.reward_due_at)
-    if due_at is None or due_at > datetime.now(timezone.utc) or not reward.id:
+    if not reward.id:
         return
     session = object_session(reward)
     if session is not None:
@@ -63,16 +61,22 @@ def settle_queued_overdue_rewards(session: Session) -> None:
         return
     session.info[SETTLING_KEY] = True
     try:
-        from ..services.supplier_reward_v12 import settle_supplier_reward
+        from ..services.supplier_reward_v12 import (
+            REWARD_SETTLEMENT_BLOCKED_CODES,
+            settle_supplier_reward,
+        )
+        from .errors import AppError
 
+        session.flush()
         now = datetime.now(timezone.utc)
         for reward_id in sorted(reward_ids):
-            settle_supplier_reward(
-                session,
-                reward_id=reward_id,
-                as_of=now,
-                settled_by=None,
-            )
+            try:
+                settle_supplier_reward(
+                    session, reward_id=reward_id, as_of=now, settled_by=None
+                )
+            except AppError as exc:
+                if exc.code not in REWARD_SETTLEMENT_BLOCKED_CODES:
+                    raise
     finally:
         session.info.pop(SETTLING_KEY, None)
 

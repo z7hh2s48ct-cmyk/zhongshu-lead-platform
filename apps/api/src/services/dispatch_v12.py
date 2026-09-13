@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import hashlib
 from threading import Lock
 from typing import Any
 
@@ -14,8 +14,21 @@ from sqlalchemy.orm import Session, aliased
 from ..core.config import get_settings
 from ..core.enums import ACTIVE_ASSIGNMENT_STATUSES, AssignmentStatus, PointsLedgerType
 from ..core.errors import AppError
-from ..core.models import Assignment, AssignmentEvent, Company, Lead, LeadPriceRule, PointsAccount, PointsLedger, Region
-from ..core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12, SupplierLeadReward
+from ..core.models import (
+    Assignment,
+    AssignmentEvent,
+    Company,
+    Lead,
+    LeadPriceRule,
+    PointsAccount,
+    PointsLedger,
+    Region,
+)
+from ..core.models_v12 import (
+    CompanyLeadCapability,
+    CompanyServiceAreaV12,
+    SupplierLeadReward,
+)
 from ..core.security import decrypt_text, mask_phone
 from ..core.time import as_utc
 from ..core.v12_enums import (
@@ -24,8 +37,12 @@ from ..core.v12_enums import (
     LeadV12Status,
     RewardStatus,
 )
-from .company_profile_v12 import REMOVAL_REQUEST_PREFIX, has_lead_capability, require_lead_capability
 from .company_assignment_v12 import resolve_direct_dispatch_recipients
+from .company_profile_v12 import (
+    REMOVAL_REQUEST_PREFIX,
+    has_lead_capability,
+    require_lead_capability,
+)
 from .lead_correction_guard import require_correction_review_resolved
 from .lead_deletion_v12 import require_lead_not_deleted
 from .lead_points_v12 import get_lead_points_settings, operation_claim_points_for_lead
@@ -1044,7 +1061,7 @@ def _reward_for_claim(
     rule = resolve_supplier_reward_rule(db, as_of=now)
     reward_points = calculate_reward_points(int(assignment.points_price), rule) if eligible else 0
     reward_status = (
-        RewardStatus.WAITING_CLAIM.value
+        RewardStatus.OBSERVING.value
         if eligible and reward_points > 0
         else RewardStatus.NOT_ELIGIBLE.value
     )
@@ -1059,14 +1076,16 @@ def _reward_for_claim(
         reward_points=reward_points,
         rule_version=rule.version,
         rule_snapshot_json=rule.snapshot(),
-        # 领取只代表接收方取得了客资；供资奖励要等有效确认后才开始结算。
-        observed_at=None,
-        appeal_deadline_at=None,
-        reward_due_at=None,
+        # 接收方完整保有连续48小时退回权，期满无正式退回即可结算。
+        observed_at=now,
+        appeal_deadline_at=now + timedelta(hours=48),
+        reward_due_at=now + timedelta(hours=48),
         exception_reason=(
             None
-            if reward_status == RewardStatus.WAITING_CLAIM.value
-            else "REWARD_DUPLICATE" if not eligible else "ZERO_REWARD_POINTS"
+            if reward_status == RewardStatus.OBSERVING.value
+            else "REWARD_DUPLICATE"
+            if not eligible
+            else "ZERO_REWARD_POINTS"
         ),
     )
     db.add(reward)
@@ -1182,8 +1201,8 @@ def claim_assignment(
     assignment.internal_assigned_at = now
     assignment.claim_points = int(assignment.points_price)
     assignment.appeal_deadline_at = deadline
-    # Actual supplier settlement is scheduled only after effective confirmation.
-    assignment.reward_due_at = None
+    # Manual confirmation can settle earlier; otherwise the 48-hour clock applies.
+    assignment.reward_due_at = now + timedelta(hours=48)
     assignment.receiver_company_id = company_id
     assignment.supplier_company_id = lead.supplier_company_id
     assignment.first_followup_due_at = now + timedelta(hours=settings.first_followup_hours)

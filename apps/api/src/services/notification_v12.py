@@ -22,8 +22,8 @@ from ..core.models import (
 from ..core.models_v12 import SupplierLeadReward
 from ..core.time import as_utc
 from ..core.v12_enums import RewardStatus
-from .notification_service import create_station_message, enqueue_outbox
 from .company_assignment_v12 import resolve_company_owner
+from .notification_service import create_station_message, enqueue_outbox
 
 
 def build_v12_deep_link(target: str, business_id: str, *, admin: bool = False) -> str:
@@ -229,8 +229,8 @@ def _notify_reward_state(db: Session, reward: SupplierLeadReward) -> None:
     copies: dict[str, tuple[str, str, str]] = {
         RewardStatus.OBSERVING.value: (
             "V12_SUPPLIER_REWARD_OBSERVING",
-            "客资奖励进入观察期",
-            "客资已被领取，奖励进入 3 个工作日观察期。",
+            "客资奖励待结算",
+            "客资已被领取；人工确认有效后及时到账，或领取满连续 48 小时且无待处理退回时自动到账。",
         ),
         RewardStatus.FROZEN.value: (
             "V12_SUPPLIER_REWARD_FROZEN",
@@ -250,7 +250,9 @@ def _notify_reward_state(db: Session, reward: SupplierLeadReward) -> None:
         RewardStatus.REVERSED.value: (
             "V12_SUPPLIER_REWARD_REVERSED",
             "客资奖励已冲正",
-            "该笔奖励因异常处理已冲正，请进入奖励详情查看原因。",
+            "退回审核通过，已按原奖励流水冲回积分。"
+            if (reward.exception_reason or "").startswith("RETURN_APPROVED:")
+            else "该笔奖励因异常处理已冲正，请进入奖励详情查看原因。",
         ),
     }
     copy = copies.get(status)
@@ -837,29 +839,11 @@ def drain_due_supplier_reward_settlement_notified(
     max_batches: int = 20,
     settled_by: str | None = None,
 ) -> dict[str, Any]:
-    """Run the bounded reward drain and project final reward states."""
+    """The shared settlement entrypoint emits transactional, idempotent notifications."""
 
     from .supplier_reward_v12 import drain_due_supplier_reward_settlement
 
     now = as_utc(as_of) or datetime.now(timezone.utc)
-    safe_limit = max(1, min(int(batch_size), 1000)) * max(
-        1, min(int(max_batches), 100)
-    )
-    candidate_ids = list(
-        db.scalars(
-            select(SupplierLeadReward.id)
-            .where(
-                SupplierLeadReward.status == RewardStatus.OBSERVING.value,
-                SupplierLeadReward.reward_due_at.is_not(None),
-                SupplierLeadReward.reward_due_at <= now,
-            )
-            .order_by(
-                SupplierLeadReward.reward_due_at.asc(),
-                SupplierLeadReward.id.asc(),
-            )
-            .limit(safe_limit)
-        ).all()
-    )
     result = drain_due_supplier_reward_settlement(
         db,
         as_of=now,
@@ -867,17 +851,5 @@ def drain_due_supplier_reward_settlement_notified(
         max_batches=max_batches,
         settled_by=settled_by,
     )
-    if candidate_ids:
-        rewards = db.scalars(
-            select(SupplierLeadReward).where(
-                SupplierLeadReward.id.in_(candidate_ids)
-            )
-        ).all()
-        for reward in rewards:
-            if reward.status in {
-                RewardStatus.FROZEN.value,
-                RewardStatus.SETTLED.value,
-            }:
-                _notify_reward_state(db, reward)
-    result["notification_candidates"] = len(candidate_ids)
+    result["notification_candidates"] = result["scanned"]
     return result

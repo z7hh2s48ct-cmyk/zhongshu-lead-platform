@@ -30,11 +30,22 @@ from apps.api.src.core.security import (
     fingerprint_phone,
     hash_phone,
 )
-from apps.api.src.core.v12_enums import LeadSourceKind, LeadV12Status, ReturnV12Status, RewardStatus
+from apps.api.src.core.v12_enums import (
+    LeadSourceKind,
+    LeadV12Status,
+    ReturnV12Status,
+    RewardStatus,
+)
 from apps.api.src.services.audit import write_audit
-from apps.api.src.services.auth_service import create_company_invite, create_internal_user
-from apps.api.src.services.storage import LocalObjectStorage, create_file_access_token, get_storage
-
+from apps.api.src.services.auth_service import (
+    create_company_invite,
+    create_internal_user,
+)
+from apps.api.src.services.storage import (
+    LocalObjectStorage,
+    create_file_access_token,
+    get_storage,
+)
 
 settings = get_settings()
 
@@ -694,6 +705,23 @@ def test_return_reward_review_permissions_and_reward_settlement_are_idempotent(a
     assert reverse.status_code == 403
 
     client.post("/api/v1/auth/logout", headers=attacker)
+    # The authorization fixture intentionally contains a self-supplied lead.
+    # Settlement requires a genuine other-company supply and an elapsed window.
+    with factory() as db:
+        supplier = Company(
+            code="SEC-REWARD-SUP", name="结算安全测试供资方", status="ACTIVE"
+        )
+        db.add(supplier)
+        db.flush()
+        reward = db.get(SupplierLeadReward, graph["reward_id"])
+        assignment = db.get(Assignment, reward.assignment_id)
+        lead = db.get(Lead, assignment.lead_id)
+        reward.supplier_company_id = supplier.id
+        assignment.supplier_company_id = supplier.id
+        lead.supplier_company_id = supplier.id
+        assignment.claimed_at = datetime.now(timezone.utc) - timedelta(hours=49)
+        assignment.assigned_at = assignment.claimed_at - timedelta(hours=1)
+        db.commit()
     admin = _login_headers(client, "admin", "Admin123!")
     first = client.post(
         f"/api/v1/v1.2/admin/supplier-rewards/{graph['reward_id']}/settle",

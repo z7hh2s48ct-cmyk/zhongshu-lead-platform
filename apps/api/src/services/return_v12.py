@@ -10,12 +10,18 @@ from sqlalchemy.orm import Session
 
 from ..core.auth import Principal
 from ..core.config import get_settings
-from ..core.enums import AssignmentStatus, EvidenceType, PointsLedgerType, VerificationTaskStatus
+from ..core.enums import (
+    AssignmentStatus,
+    EvidenceType,
+    PointsLedgerType,
+    VerificationTaskStatus,
+)
 from ..core.errors import AppError
 from ..core.models import (
     Assignment,
     AssignmentEvent,
     Lead,
+    PointsAccount,
     PointsLedger,
     ReturnEvidence,
     ReturnRequest,
@@ -35,10 +41,9 @@ from ..core.v12_enums import (
     RewardStatus,
     VerificationTaskType,
 )
-from .points_service import change_points
 from .company_assignment_v12 import require_return_request_access
 from .lead_correction_guard import require_correction_review_resolved
-
+from .points_service import change_points
 
 logger = logging.getLogger("zhongshu.return_v12")
 
@@ -537,7 +542,10 @@ def _freeze_reward(db: Session, assignment_id: str, now: datetime) -> SupplierLe
         .where(SupplierLeadReward.assignment_id == assignment_id)
         .with_for_update()
     )
-    if reward and reward.status == RewardStatus.OBSERVING.value:
+    if reward and reward.status in {
+        RewardStatus.WAITING_CLAIM.value,
+        RewardStatus.OBSERVING.value,
+    }:
         reward.status = RewardStatus.FROZEN.value
         reward.frozen_at = now
     return reward
@@ -940,7 +948,10 @@ def _final_review_return(
             LeadV12Status.COMPLETED.value, LeadV12Status.CLOSED.value,
         }:
             lead.status = LeadV12Status.CLAIMED.value
-        if reward and reward.status == RewardStatus.FROZEN.value:
+        if reward and reward.status in {
+            RewardStatus.FROZEN.value,
+            RewardStatus.WAITING_CLAIM.value,
+        }:
             reward.status = RewardStatus.OBSERVING.value
         db.add(
             AssignmentEvent(
@@ -959,7 +970,20 @@ def _final_review_return(
         return ReturnFinalReviewResult(request=request, refund_ledger=None)
 
     if reward and reward.status == RewardStatus.SETTLED.value:
-        raise AppError("REWARD_ALREADY_SETTLED", "供应商奖励已结算，需走异常冲正流程", 409)
+        # A successful return refunds the receiver and recovers the supplier's
+        # early reward atomically. Lock both accounts in one consistent order.
+        company_ids = {request.company_id, reward.supplier_company_id}
+        accounts = db.scalars(
+            select(PointsAccount)
+            .where(PointsAccount.company_id.in_(company_ids))
+            .order_by(PointsAccount.company_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).all()
+        if len(accounts) != len(company_ids):
+            raise AppError(
+                "REWARD_ACCOUNT_MISSING", "原领取或奖励积分账户缺失，无法完成退回", 409
+            )
     claim_ledger = _claim_ledger(db, request, assignment)
     refund_points = abs(int(claim_ledger.delta))
     refund_ledger = change_points(
@@ -1002,6 +1026,21 @@ def _final_review_return(
     }:
         reward.status = RewardStatus.CANCELLED.value
         reward.cancelled_at = now
+    if reward and reward.status == RewardStatus.SETTLED.value:
+        from .notification_v12 import _notify_reward_state
+        from .supplier_reward_v12 import reverse_supplier_reward
+
+        db.flush()
+        reverse_supplier_reward(
+            db,
+            reward_id=reward.id,
+            reason_code="RETURN_APPROVED",
+            return_request_id=request.id,
+            note=note.strip(),
+            reversed_by=principal.user_id,
+            as_of=now,
+        )
+        _notify_reward_state(db, reward)
     db.add(
         AssignmentEvent(
             assignment_id=assignment.id,
@@ -1010,10 +1049,15 @@ def _final_review_return(
             payload={
                 "return_request_id": request.id,
                 "verification_task_id": task.id if task else None,
-                "verification_conclusion": task.verification_conclusion if task else None,
+                "verification_conclusion": task.verification_conclusion
+                if task
+                else None,
                 "refund_points": refund_points,
                 "refund_ledger_id": refund_ledger.id,
                 "reward_id": reward.id if reward else None,
+                "reward_reversal_ledger_id": reward.reversal_ledger_id
+                if reward
+                else None,
                 "note": note.strip(),
             },
         )

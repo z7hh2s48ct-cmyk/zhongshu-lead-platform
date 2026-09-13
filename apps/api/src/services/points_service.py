@@ -9,7 +9,16 @@ from sqlalchemy.orm import Session
 from ..core.config import get_settings
 from ..core.enums import AssignmentStatus, PointsLedgerType
 from ..core.errors import AppError
-from ..core.models import Assignment, Company, Lead, LeadPriceRule, NotificationOutbox, PointsAccount, PointsLedger, PointsPackage
+from ..core.models import (
+    Assignment,
+    Company,
+    Lead,
+    LeadPriceRule,
+    NotificationOutbox,
+    PointsAccount,
+    PointsLedger,
+    PointsPackage,
+)
 from ..core.time import as_utc
 from .lead_points_v12 import LeadPointsSettings, operation_claim_points_for_lead
 from .notification_service import create_station_message, enqueue_outbox
@@ -200,7 +209,7 @@ def change_points(
         return existing
 
     new_balance = int(account.balance) + int(delta)
-    if new_balance < 0:
+    if delta < 0 and new_balance < 0:
         raise AppError("POINTS_INSUFFICIENT", "积分不足", 409, {"balance": account.balance, "required": abs(delta)})
     account.balance = new_balance
     account.version += 1

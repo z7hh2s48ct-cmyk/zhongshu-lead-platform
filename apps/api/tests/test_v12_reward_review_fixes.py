@@ -16,7 +16,9 @@ from apps.api.src.core.security import encrypt_text, fingerprint_phone, hash_pho
 from apps.api.src.core.v12_enums import LeadSourceKind, LeadV12Status, RewardStatus
 from apps.api.src.services.dispatch_v12 import evaluate_candidate
 from apps.api.src.services.reward_rule_v12 import create_supplier_reward_rule
-from apps.api.src.services.supplier_reward_v12 import drain_due_supplier_reward_settlement
+from apps.api.src.services.supplier_reward_v12 import (
+    drain_due_supplier_reward_settlement,
+)
 
 
 def _company(db, code: str) -> Company:
@@ -102,6 +104,7 @@ def _due_reward(
     )
     db.add(assignment)
     db.flush()
+    lead.current_assignment_id = assignment.id
     reward = SupplierLeadReward(
         lead_id=lead.id,
         assignment_id=assignment.id,
