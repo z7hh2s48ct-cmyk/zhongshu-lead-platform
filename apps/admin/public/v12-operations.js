@@ -45,10 +45,19 @@ const verificationTaskBadge=task=>`<span class="ops-status warn">${esc(verificat
 const qs=o=>{const p=new URLSearchParams;Object.entries(o).forEach(([k,v])=>v!==''&&v!=null&&p.set(k,v));return p.toString()?`?${p}`:''};
 async function api(path,opt={}){const h={...(opt.headers||{})};if(opt.body&&!(opt.body instanceof FormData))h['Content-Type']='application/json';const r=await fetch(API+path,{...opt,headers:h,credentials:'include'});let j={};try{j=await r.json()}catch{}if(!r.ok||j.code!=='OK'){const error=new Error(j.message||'请求失败');error.code=j.code;error.status=r.status;throw error}return j.data}
 function toast(m,e=false){toastEl.textContent=m;toastEl.className=`ops-toast show ${e?'error':''}`;clearTimeout(toast.t);toast.t=setTimeout(()=>toastEl.className='ops-toast',2400)}
-function closeModal(){modalRoot.innerHTML='';document.body.classList.remove('ops-modal-open')}
-function modal(title,body,bind){document.body.classList.add('ops-modal-open');zsSetSafeHtml(modalRoot, `<div class="ops-overlay"><section class="ops-modal"><div class="ops-modal-head"><h2>${esc(title)}</h2><button class="ops-btn" id="modal-close">关闭</button></div>${body}</section></div>`);document.querySelector('#modal-close').onclick=closeModal;bind?.()}
+let modalIntent=0;
+let lockedModal=null;
+function invalidateModalIntent(){return ++modalIntent}
+function beginModalRequest(){const intent=invalidateModalIntent();return ()=>intent===modalIntent}
+function modalOwnerIsCurrent(owner){return Boolean(owner?.isConnected)}
+function lockModal(owner,cancel){const close=document.querySelector('#modal-close');lockedModal={owner,cancel,close};if(close)close.disabled=true;if(cancel)cancel.disabled=true}
+function unlockModal(owner){if(lockedModal?.owner!==owner)return;for(const button of [lockedModal.close,lockedModal.cancel])if(button?.isConnected)button.disabled=false;lockedModal=null}
+function closeModal(){if(modalOwnerIsCurrent(lockedModal?.owner))return false;invalidateModalIntent();modalRoot.innerHTML='';document.body.classList.remove('ops-modal-open');return true}
+function closeModalFor(owner){return Boolean(owner?.isConnected)&&closeModal()}
+function modal(title,body,bind){if(modalOwnerIsCurrent(lockedModal?.owner))return false;invalidateModalIntent();document.body.classList.add('ops-modal-open');zsSetSafeHtml(modalRoot, `<div class="ops-overlay"><section class="ops-modal"><div class="ops-modal-head"><h2>${esc(title)}</h2><button class="ops-btn" id="modal-close">关闭</button></div>${body}</section></div>`);document.querySelector('#modal-close').onclick=closeModal;bind?.();return true}
+async function refreshAfterSuccess(refresh,message){try{await refresh()}catch(error){toast(`${message}，但页面刷新失败：${error.message}`,true)}}
 function actionForm(options,onSubmit){
-  const {title,message='',labelText='处理说明',value='',required=false,minLength=0,inputType='textarea',submitLabel='确认提交',danger=false,validate}=options;
+  const {title,message='',labelText='处理说明',value='',required=false,minLength=0,inputType='textarea',submitLabel='确认提交',danger=false,validate,lockOnSubmit=false}=options;
   const control=inputType==='number'
     ?`<input class="ops-input" id="action-value" type="number" value="${esc(value)}" inputmode="decimal">`
     :inputType==='text'
@@ -63,7 +72,8 @@ function actionForm(options,onSubmit){
       const validationMessage=(required&&raw.length<Math.max(1,minLength))?`请至少填写 ${Math.max(1,minLength)} 个字符`:validate?.(raw);
       if(validationMessage){toast(validationMessage,true);input.focus();return}
       submit.disabled=true;
-      try{if(await onSubmit(raw)!==false)closeModal()}catch(error){submit.disabled=false;toast(error.message,true)}
+      if(lockOnSubmit)lockModal(form,document.querySelector('#action-cancel'));
+      try{if(await onSubmit(raw,()=>form.isConnected,()=>unlockModal(form))!==false){unlockModal(form);closeModalFor(form)}}catch(error){unlockModal(form);if(form.isConnected)submit.disabled=false;toast(error.message,true)}
     };
     input.focus();
   });
@@ -120,6 +130,8 @@ function syncRouteFromUrl({canonicalize=false}={}){
 }
 function go(view,id=''){
   if(!canOpenView(view)||(S.view===view&&S.id===id&&!S.status))return;
+  if(modalOwnerIsCurrent(lockedModal?.owner)){toast('操作处理中，请等待结果',true);return}
+  invalidateModalIntent();
   const url=new URL(location.href);
   url.searchParams.set('view',view);
   id?url.searchParams.set('id',id):url.searchParams.delete('id');
@@ -146,6 +158,7 @@ async function loadTelesalesUsers(){if(!S.telesalesUsers)S.telesalesUsers=await 
 function normalizedMobile(value){const digits=String(value||'').replace(/\D/g,'');return digits.startsWith('86')&&digits.length===13?digits.slice(2):digits}
 function isValidMobile(value){return /^1\d{10}$/.test(normalizedMobile(value))}
 async function render(){
+  invalidateModalIntent();
   shell('<div class="ops-loading">加载中…</div>');
   const views={overview,leads:review,supplements,publicPool,telesales,dispatch,companies,returns,finance,audit,trace:fullTrace,settings,users:internalUsers,calendar,account};
   try{await (views[S.view]||overview)()}catch(error){shell(`<div class="ops-error">${esc(error.message)}</div>`);toast(error.message,true)}
@@ -243,16 +256,18 @@ function publicPoolTelesalesBlockReason(item){
 function openPublicPoolImport(){
   modal('从飞书客户视图导入',`<form class="ops-form" id="public-pool-import-form"><div class="ops-notice">系统只读取已配置的“客户视图”。同一飞书记录不会重复建档，手机号会先标准化并检查系统内重复客资。</div><div class="ops-field"><label for="public-pool-import-target">整批目标</label><select class="ops-input" id="public-pool-import-target"><option value="PUBLIC_POOL">全部先保存到公海池</option><option value="DISPATCH_POOL">资料完整的进入派发池，其余留在公海池</option></select></div><div class="ops-actions"><button class="ops-btn" id="public-pool-import-cancel" type="button">取消</button><button class="ops-btn primary" id="public-pool-import-submit" type="submit">开始导入</button></div></form>`,()=>{
     document.querySelector('#public-pool-import-cancel').onclick=closeModal;
-    document.querySelector('#public-pool-import-form').onsubmit=async event=>{event.preventDefault();const button=document.querySelector('#public-pool-import-submit');button.disabled=true;try{const result=await api('/v1.2/public-pool/feishu/import',{method:'POST',body:JSON.stringify({target_pool:document.querySelector('#public-pool-import-target').value})});closeModal();toast(`导入完成：新增 ${result.created_count} 条，派发池 ${result.dispatch_pool_count} 条，公海池 ${result.public_pool_count} 条，跳过重复行 ${result.skipped_count} 条`);await publicPool()}catch(error){button.disabled=false;toast(error.message,true)}};
+    const form=document.querySelector('#public-pool-import-form');
+    form.onsubmit=async event=>{event.preventDefault();const button=document.querySelector('#public-pool-import-submit');button.disabled=true;try{const result=await api('/v1.2/public-pool/feishu/import',{method:'POST',body:JSON.stringify({target_pool:document.querySelector('#public-pool-import-target').value})});closeModalFor(form);toast(`导入完成：新增 ${result.created_count} 条，派发池 ${result.dispatch_pool_count} 条，公海池 ${result.public_pool_count} 条，跳过重复行 ${result.skipped_count} 条`);await refreshAfterSuccess(publicPool,'导入已完成')}catch(error){if(form.isConnected)button.disabled=false;toast(error.message,true)}};
   });
 }
 async function transferPublicPoolLead(item){
+  const isCurrent=beginModalRequest();
   try{
     const result=await api(`/v1.2/public-pool/leads/${encodeURIComponent(item.id)}/transfer-to-dispatch`,{method:'POST'});
-    if(result.transferred){toast('客户已进入派发池');await publicPool();return}
+    if(result.transferred){toast('客户已进入派发池');await refreshAfterSuccess(publicPool,'客户已进入派发池');return}
     const errors=Object.values(result.validation_errors||{});
     const supplier=item.customer_source==='FRANCHISE_SUPPLIED';
-    modal('暂不能进入派发池',`<div class="ops-notice">${errors.map(esc).join('；')||'请先处理手机号查重结论'}</div><div class="ops-actions"><button class="ops-btn primary" id="public-pool-edit-now">${supplier?'知道了':'立即补充资料'}</button></div>`,()=>document.querySelector('#public-pool-edit-now').onclick=()=>{closeModal();if(!supplier)openPlatformLeadForm(item)});
+    if(isCurrent())modal('暂不能进入派发池',`<div class="ops-notice">${errors.map(esc).join('；')||'请先处理手机号查重结论'}</div><div class="ops-actions"><button class="ops-btn primary" id="public-pool-edit-now">${supplier?'知道了':'立即补充资料'}</button></div>`,()=>document.querySelector('#public-pool-edit-now').onclick=()=>{closeModal();if(!supplier)openPlatformLeadForm(item)});
   }catch(error){toast(error.message,true)}
 }
 function overridePublicPoolDuplicate(item){
@@ -264,10 +279,12 @@ function overridePublicPoolDuplicate(item){
 }
 const canDeleteOwnOperationLead=lead=>can('lead.own.delete')&&lead.submitter_user_id===S.me?.id&&['PLATFORM_MANUAL','FEISHU_IMPORT'].includes(lead.source_kind)&&['DRAFT','DUPLICATE','READY_DISPATCH','PUBLIC_POOL','PENDING_REVIEW','PENDING_OPERATION_DISPOSITION'].includes(lead.status||lead.lead_status);
 async function deleteOwnOperationLead(lead,refresh){
+  const isCurrent=beginModalRequest();
   try{
     const preview=await api(`/v1.2/operation/leads/${encodeURIComponent(lead.id)}/deletion-preview`);
+    if(!isCurrent())return;
     if(!preview.deletable){modal('当前不能删除',`<div class="ops-notice">${(preview.blocker_messages||[]).map(esc).join('；')||'该客资当前不能删除'}</div>`,()=>{});return}
-    actionForm({title:'删除本人上传的客资',message:`将从业务列表隐藏“${lead.customer_name||'未填写客户'}”，原始记录和审计仍保留。`,labelText:'删除原因',required:true,minLength:2,submitLabel:'确认删除',danger:true},async reason=>{await api(`/v1.2/operation/leads/${encodeURIComponent(lead.id)}`,{method:'DELETE',body:JSON.stringify({reason})});toast('客资已删除');await refresh()});
+    actionForm({title:'删除本人上传的客资',message:`将从业务列表隐藏“${lead.customer_name||'未填写客户'}”，原始记录和审计仍保留。`,labelText:'删除原因',required:true,minLength:2,submitLabel:'确认删除',danger:true},async reason=>{await api(`/v1.2/operation/leads/${encodeURIComponent(lead.id)}`,{method:'DELETE',body:JSON.stringify({reason})});toast('客资已删除');await refreshAfterSuccess(refresh,'客资已删除')});
   }catch(error){toast(error.message,true)}
 }
 async function publicPool(){
@@ -296,13 +313,13 @@ async function publicPool(){
   document.querySelector('#public-pool-inline').onclick=()=>{document.querySelector('#public-pool-inline-card').hidden=false;document.querySelector('#public-pool-inline-name').focus()};
   document.querySelector('#public-pool-inline-cancel').onclick=()=>{document.querySelector('#public-pool-inline-card').hidden=true};
   document.querySelector('#public-pool-feishu').onclick=openPublicPoolImport;
-  const requestPublicPoolExport=async(button,filters)=>{button.disabled=true;const idempotency_key=button.dataset.idempotencyKey||`public-pool-export-${crypto.randomUUID()}`;button.dataset.idempotencyKey=idempotency_key;try{await api('/v1.2/reports/leads/exports',{method:'POST',body:JSON.stringify({scope:'PUBLIC_POOL',...filters,idempotency_key})});delete button.dataset.idempotencyKey;toast('公海池导出任务已提交，完成后可在本页下载');await publicPool()}catch(error){button.disabled=false;toast(error.message,true)}};
+  const requestPublicPoolExport=async(button,filters)=>{button.disabled=true;const idempotency_key=button.dataset.idempotencyKey||`public-pool-export-${crypto.randomUUID()}`;button.dataset.idempotencyKey=idempotency_key;try{await api('/v1.2/reports/leads/exports',{method:'POST',body:JSON.stringify({scope:'PUBLIC_POOL',...filters,idempotency_key})});delete button.dataset.idempotencyKey;toast('公海池导出任务已提交，完成后可在本页下载');await refreshAfterSuccess(publicPool,'公海池导出任务已提交，完成后可在本页下载')}catch(error){button.disabled=false;toast(error.message,true)}};
   document.querySelector('#public-pool-export-filtered')?.addEventListener('click',event=>requestPublicPoolExport(event.currentTarget,publicPoolFilters()));
   document.querySelector('#public-pool-export-all')?.addEventListener('click',event=>requestPublicPoolExport(event.currentTarget,{}));
   document.querySelector('#public-pool-export-refresh')?.addEventListener('click',publicPool);
   document.querySelector('#public-pool-filter').onsubmit=async event=>{event.preventDefault();const createdFrom=document.querySelector('#public-pool-created-from').value,createdTo=document.querySelector('#public-pool-created-to').value;if(createdFrom&&createdTo&&createdFrom>createdTo){toast('创建开始日期不能晚于结束日期',true);return}S.publicPoolCreatedFrom=createdFrom;S.publicPoolCreatedTo=createdTo;S.publicPoolSubmitterId=document.querySelector('#public-pool-submitter').value;S.publicPoolKeyword=document.querySelector('#public-pool-keyword').value.trim();S.publicPoolPhone=document.querySelector('#public-pool-phone').value.trim();S.publicPoolCustomerSource=document.querySelector('#public-pool-customer-source').value;S.publicPoolSource=document.querySelector('#public-pool-source').value;S.publicPoolCompleteness=document.querySelector('#public-pool-completeness').value;S.publicPoolDuplicate=document.querySelector('#public-pool-duplicate').value;S.page=1;try{await publicPool()}catch(error){toast(error.message,true)}};
   document.querySelector('#public-pool-filter-reset').onclick=()=>{S.publicPoolCreatedFrom='';S.publicPoolCreatedTo='';S.publicPoolSubmitterId='';S.publicPoolKeyword='';S.publicPoolPhone='';S.publicPoolCustomerSource='';S.publicPoolSource='';S.publicPoolCompleteness='';S.publicPoolDuplicate='';S.page=1;publicPool()};
-  document.querySelector('#public-pool-inline-form').onsubmit=async event=>{event.preventDefault();const source=document.querySelector('#public-pool-inline-source').value.trim();try{await api('/v1.2/public-pool/leads',{method:'POST',body:JSON.stringify({customer_name:document.querySelector('#public-pool-inline-name').value.trim()||null,phone:document.querySelector('#public-pool-inline-phone').value.trim()||null,source_channel:source?'OTHER':null,source_detail:source||null,consent_confirmed:false})});toast('客户已保存到公海池');await publicPool()}catch(error){toast(error.message,true)}};
+  document.querySelector('#public-pool-inline-form').onsubmit=async event=>{event.preventDefault();const source=document.querySelector('#public-pool-inline-source').value.trim();try{await api('/v1.2/public-pool/leads',{method:'POST',body:JSON.stringify({customer_name:document.querySelector('#public-pool-inline-name').value.trim()||null,phone:document.querySelector('#public-pool-inline-phone').value.trim()||null,source_channel:source?'OTHER':null,source_detail:source||null,consent_confirmed:false})});toast('客户已保存到公海池');await refreshAfterSuccess(publicPool,'客户已保存到公海池')}catch(error){toast(error.message,true)}};
   document.querySelectorAll('[data-public-pool-detail]').forEach(button=>button.onclick=()=>adminLeadDetail(button.dataset.publicPoolDetail));
   document.querySelectorAll('[data-public-pool-edit]').forEach(button=>button.onclick=()=>openPlatformLeadForm(byId[button.dataset.publicPoolEdit]));
   document.querySelectorAll('[data-public-pool-transfer]').forEach(button=>button.onclick=()=>transferPublicPoolLead(byId[button.dataset.publicPoolTransfer]));
@@ -380,13 +397,13 @@ async function review(){
   supplierFilter.onchange=()=>{submitterSearch.value='';syncSubmitterFilter()};
   submitterSearch.oninput=syncSubmitterFilter;
   let exportIdempotencyKey=null;
-  document.querySelector('#lead-export-request')?.addEventListener('click',async()=>{const button=document.querySelector('#lead-export-request');button.disabled=true;exportIdempotencyKey=exportIdempotencyKey||`lead-export-${crypto.randomUUID()}`;try{await api('/v1.2/reports/leads/exports',{method:'POST',body:JSON.stringify({...leadReportFilters(),idempotency_key:exportIdempotencyKey})});exportIdempotencyKey=null;toast('后台导出任务已提交，完成后可在下方下载');await review()}catch(error){button.disabled=false;toast(error.message,true)}});
+  document.querySelector('#lead-export-request')?.addEventListener('click',async()=>{const button=document.querySelector('#lead-export-request');button.disabled=true;exportIdempotencyKey=exportIdempotencyKey||`lead-export-${crypto.randomUUID()}`;try{await api('/v1.2/reports/leads/exports',{method:'POST',body:JSON.stringify({...leadReportFilters(),idempotency_key:exportIdempotencyKey})});exportIdempotencyKey=null;toast('后台导出任务已提交，完成后可在下方下载');await refreshAfterSuccess(review,'后台导出任务已提交，完成后可在下方下载')}catch(error){button.disabled=false;toast(error.message,true)}});
   document.querySelector('#lead-export-refresh')?.addEventListener('click',review);
   document.querySelector('#new-platform-lead')?.addEventListener('click',()=>openPlatformLeadForm(null));
   document.querySelectorAll('[data-lead-detail]').forEach(button=>button.onclick=()=>openLeadDetailForSource(button.dataset.leadDetail,button.dataset.leadSource));
-  document.querySelectorAll('[data-platform-edit]').forEach(button=>button.onclick=async()=>openPlatformLeadForm(await api(`/v1.2/platform/leads/${encodeURIComponent(button.dataset.platformEdit)}`)));
+  document.querySelectorAll('[data-platform-edit]').forEach(button=>button.onclick=async()=>{const isCurrent=beginModalRequest();try{const lead=await api(`/v1.2/platform/leads/${encodeURIComponent(button.dataset.platformEdit)}`);if(isCurrent())await openPlatformLeadForm(lead)}catch(error){toast(error.message,true)}});
   document.querySelectorAll('[data-operation-supplement]').forEach(button=>button.onclick=()=>supplementOperationLead(leads.find(lead=>lead.id===button.dataset.operationSupplement)));
-  document.querySelectorAll('[data-lead-correction]').forEach(button=>button.onclick=async()=>openPlatformLeadForm(await api(`/v1.2/admin/leads/${encodeURIComponent(button.dataset.leadCorrection)}`),true));
+  document.querySelectorAll('[data-lead-correction]').forEach(button=>button.onclick=async()=>{const isCurrent=beginModalRequest();try{const lead=await api(`/v1.2/admin/leads/${encodeURIComponent(button.dataset.leadCorrection)}`);if(isCurrent())await openPlatformLeadForm(lead,true)}catch(error){toast(error.message,true)}});
   document.querySelectorAll('[data-lead-correction-recheck]').forEach(button=>button.onclick=()=>recheckPlatformLeadCorrection(button.dataset.leadCorrectionRecheck,Number(button.dataset.snapshotVersion)));
   document.querySelectorAll('[data-lead-correction-release]').forEach(button=>button.onclick=()=>releasePlatformLeadCorrection(button.dataset.leadCorrectionRelease,Number(button.dataset.snapshotVersion)));
   document.querySelectorAll('[data-lead-misdispatch-release]').forEach(button=>button.onclick=()=>releaseMisdispatchedLead(button.dataset.leadMisdispatchRelease,Number(button.dataset.snapshotVersion)));
@@ -399,12 +416,13 @@ async function review(){
 }
 async function supplementOperationLead(lead){
   if(!lead)return;
+  const isCurrent=beginModalRequest();
   try{
     const history=await api(`/v1.2/pre-dispatch-verifications/tasks${qs({lead_id:lead.id,submitted_history:true,page:1,page_size:1})}`);
     const task=history.items?.[0];
     const detail=task?await api(`/v1.2/pre-dispatch-verifications/tasks/${encodeURIComponent(task.id)}`):null;
     const refresh=S.view==='supplements'?supplements:review;
-    await openPlatformLeadForm(lead,true,{verificationInfo:detail?.verification_info||null,refresh,forcePublicPool:['PLATFORM_MANUAL','FEISHU_IMPORT'].includes(lead.source_kind)});
+    if(isCurrent())await openPlatformLeadForm(lead,true,{verificationInfo:detail?.verification_info||null,refresh,forcePublicPool:['PLATFORM_MANUAL','FEISHU_IMPORT'].includes(lead.source_kind)});
   }catch(error){toast(error.message,true)}
 }
 function leadDetailBody(x){
@@ -415,9 +433,9 @@ function leadDetailBody(x){
   return `<div class="ops-detail-grid">${[['客资编号',recordCode(x.id,'KZ')],['客户来源',label(x.customer_source)],['录入方式',label(x.source_kind)],['渠道来源',x.source_display?label(x.source_display):null],['提供加盟商',x.supplier_company_name],['提交人',x.submitter_name],['客户',x.customer_name],['手机号',x.phone||x.phone_masked],['当前接收方',x.current_receiver_company_name],['派发运营人员',x.assigned_by_name],['处理状态',label(x.status)],['核验结果',label(x.review_status)],['重复检查',label(x.duplicate_status)],['所在地',`${x.city||''} ${x.district||''}`]].map(([a,b])=>`<div class="ops-detail"><small>${a}</small><b>${esc(b||'--')}</b></div>`).join('')}</div><section class="ops-card"><h3>客户需求</h3><p class="ops-muted">${esc(x.need_summary||'暂无说明')}</p></section>${historySection}${followupSection}<button class="ops-btn" id="trace">查看处理详情</button>`
 }
 function showLeadDetail(title,x){modal(title,leadDetailBody(x),()=>document.querySelector('#trace').onclick=()=>{closeModal();go('trace',x.id)})}
-async function reviewDetail(id){const x=await api(`/v1.2/admin/supplier-leads/${encodeURIComponent(id)}`);showLeadDetail('加盟商客资详情',x)}
-async function platformDetail(id){const x=await api(`/v1.2/platform/leads/${encodeURIComponent(id)}`);showLeadDetail('平台客资详情',x)}
-async function adminLeadDetail(id){const x=await api(`/v1.2/admin/leads/${encodeURIComponent(id)}`);showLeadDetail('客资详情',x)}
+async function reviewDetail(id){const isCurrent=beginModalRequest(),x=await api(`/v1.2/admin/supplier-leads/${encodeURIComponent(id)}`);if(isCurrent())showLeadDetail('加盟商客资详情',x)}
+async function platformDetail(id){const isCurrent=beginModalRequest(),x=await api(`/v1.2/platform/leads/${encodeURIComponent(id)}`);if(isCurrent())showLeadDetail('平台客资详情',x)}
+async function adminLeadDetail(id){const isCurrent=beginModalRequest(),x=await api(`/v1.2/admin/leads/${encodeURIComponent(id)}`);if(isCurrent())showLeadDetail('客资详情',x)}
 async function openLeadDetailForSource(id,sourceKind){
   if(sourceKind==='PLATFORM_MANUAL'){await platformDetail(id);return}
   if(sourceKind==='SUPPLIER_H5'){await reviewDetail(id);return}
@@ -451,6 +469,7 @@ function preDispatchVerificationInfo(info){
   return `<section class="ops-card"><h3>电销核验信息</h3><div class="ops-detail-grid">${facts.map(([name,value])=>`<div class="ops-detail"><small>${name}</small><b>${esc(value||'--')}</b></div>`).join('')}</div><h3>核验备注</h3><p class="ops-muted">${esc(info.note||'暂无核验备注')}</p></section>`;
 }
 async function openPlatformLeadForm(item,correction=false,options={}){
+  const isCurrent=beginModalRequest();
   const newLead=!item&&!correction;
   const directTelesalesIdempotencyKey=newLead?`pre-dispatch-${crypto.randomUUID()}`:null;
   const cities=await platformCities();
@@ -460,6 +479,7 @@ async function openPlatformLeadForm(item,correction=false,options={}){
   const districts=await platformDistricts(currentCity?.code||'');
   const currentDistrict=districts.find(district=>district.name===item?.district)||null;
   const townships=await platformTownships(currentDistrict?.code||'');
+  if(!isCurrent())return;
   const currentTownship=townships.find(township=>township.code===item?.region_code)||null;
   const sourceOptions=[['MANUAL','人工录入'],['DOUYIN','抖音/信息流'],['WECHAT_VIDEO','视频号'],['XIAOHONGSHU','小红书'],['OTHER','其他']];
   const selectedSource=item?.source_channel||'OTHER';
@@ -512,6 +532,7 @@ async function readPlatformLeadPayload(item=null){
   return payload;
 }
 async function savePlatformLead(item,correction=false,refresh=null,forcePublicPool=false){
+  const form=document.querySelector('#platform-lead-form');
   const id=item?.id||null;
   const payload=await readPlatformLeadPayload(item);
   if(!payload)return;
@@ -528,11 +549,12 @@ async function savePlatformLead(item,correction=false,refresh=null,forcePublicPo
       if(forcePublicPool&&id)transferResult=await api(`/v1.2/public-pool/leads/${encodeURIComponent(id)}/transfer-to-dispatch`,{method:'POST'});
     }
     if(transferResult&&!transferResult.transferred){toast(`资料仍需补充：${Object.values(transferResult.validation_errors||{}).join('；')||'请处理手机号查重结论'}`,true);return}
-    if(transferResult?.transferred){closeModal();toast('补充完成，客资已进入派发池');await (refresh||review)();return}
-    closeModal();toast(correction?'客资更正已保存，异常会标记待运营处理':S.view==='publicPool'?'客户已保存到公海池':'平台客资草稿已保存');const refreshView=refresh||(S.view==='publicPool'?publicPool:review);await refreshView()
+    if(transferResult?.transferred){closeModalFor(form);toast('补充完成，客资已进入派发池');await refreshAfterSuccess(refresh||review,'客资已进入派发池');return}
+    const message=correction?'客资更正已保存，异常会标记待运营处理':S.view==='publicPool'?'客户已保存到公海池':'平台客资草稿已保存';closeModalFor(form);toast(message);const refreshView=refresh||(S.view==='publicPool'?publicPool:review);await refreshAfterSuccess(refreshView,message)
   }catch(error){toast(error.message,true)}
 }
 async function saveAndAssignNewLeadToTelesales(idempotency_key){
+  const form=document.querySelector('#platform-lead-form');
   const payload=await readPlatformLeadPayload();
   if(!payload)return;
   const assignee_user_id=document.querySelector('#platform-lead-telesales-assignee').value;
@@ -540,9 +562,9 @@ async function saveAndAssignNewLeadToTelesales(idempotency_key){
   const refresh=S.view==='publicPool'?publicPool:review;
   try{
     await api('/v1.2/platform/leads/pre-dispatch-verification',{method:'POST',body:JSON.stringify({...payload,assignee_user_id,reason,idempotency_key})});
-    closeModal();
+    closeModalFor(form);
     toast('客资已保存并派发电销核验');
-    await refresh();
+    await refreshAfterSuccess(refresh,'客资已保存并派发电销核验');
   }catch(error){
     toast(error.message,true);
   }
@@ -560,14 +582,16 @@ async function openQuickDispatchCandidates(payload){
     load();
   });
 }
-async function submitPlatformLead(id){try{await api(`/v1.2/platform/leads/${encodeURIComponent(id)}/submit`,{method:'POST'});toast('资料完整，已进入待派发池');await review()}catch(error){toast(error.message,true)}}
+async function submitPlatformLead(id){try{await api(`/v1.2/platform/leads/${encodeURIComponent(id)}/submit`,{method:'POST'});toast('资料完整，已进入待派发池');await refreshAfterSuccess(review,'资料完整，已进入待派发池')}catch(error){toast(error.message,true)}}
 async function recheckPlatformLeadCorrection(id,snapshotVersion){const reason=window.prompt('请填写重新检查原因（至少5个字符）','接收方资格已调整，申请重新检查');if(!reason)return;if(reason.trim().length<5){toast('重新检查原因至少5个字符',true);return}try{const result=await api(`/v1.2/platform/leads/${encodeURIComponent(id)}/correction/recheck`,{method:'POST',body:JSON.stringify({reason:reason.trim(),expected_snapshot_version:snapshotVersion})});toast(result.pending_reason?'重新检查完成，仍有异常需处理':'接收资格重新检查通过');await review()}catch(error){toast(error.message,true)}}
-async function releasePlatformLeadCorrection(id,snapshotVersion){const reason=window.prompt('请填写解除原派发的原因（至少5个字符）','事实更正后原接收方不再符合资格，解除后重新派发');if(!reason)return;if(reason.trim().length<5){toast('解除原派发原因至少5个字符',true);return}try{await api(`/v1.2/platform/leads/${encodeURIComponent(id)}/correction/release-for-redispatch`,{method:'POST',body:JSON.stringify({reason:reason.trim(),expected_snapshot_version:snapshotVersion})});toast('原派发已解除，客资已重新进入待派发池');await review()}catch(error){toast(error.message,true)}}
-async function releaseMisdispatchedLead(id,snapshotVersion){const reason=window.prompt('请填写错派撤回原因（至少5个字符）','运营误派加盟商，撤回后重新派发');if(!reason)return;if(reason.trim().length<5){toast('错派撤回原因至少5个字符',true);return}try{await api(`/v1.2/platform/leads/${encodeURIComponent(id)}/misdispatch/release-for-redispatch`,{method:'POST',body:JSON.stringify({reason:reason.trim(),expected_snapshot_version:snapshotVersion})});toast('错派已撤回，客资已重新进入待派发池');await review()}catch(error){toast(error.message,true)}}
+async function releasePlatformLeadCorrection(id,snapshotVersion){const reason=window.prompt('请填写解除原派发的原因（至少5个字符）','事实更正后原接收方不再符合资格，解除后重新派发');if(!reason)return;if(reason.trim().length<5){toast('解除原派发原因至少5个字符',true);return}try{await api(`/v1.2/platform/leads/${encodeURIComponent(id)}/correction/release-for-redispatch`,{method:'POST',body:JSON.stringify({reason:reason.trim(),expected_snapshot_version:snapshotVersion})});toast('原派发已解除，客资已重新进入待派发池');await refreshAfterSuccess(review,'原派发已解除，客资已重新进入待派发池')}catch(error){toast(error.message,true)}}
+async function releaseMisdispatchedLead(id,snapshotVersion){const reason=window.prompt('请填写错派撤回原因（至少5个字符）','运营误派加盟商，撤回后重新派发');if(!reason)return;if(reason.trim().length<5){toast('错派撤回原因至少5个字符',true);return}try{await api(`/v1.2/platform/leads/${encodeURIComponent(id)}/misdispatch/release-for-redispatch`,{method:'POST',body:JSON.stringify({reason:reason.trim(),expected_snapshot_version:snapshotVersion})});toast('错派已撤回，客资已重新进入待派发池');await refreshAfterSuccess(review,'错派已撤回，客资已重新进入待派发池')}catch(error){toast(error.message,true)}}
 async function deleteTestLead(lead){
   if(!lead)return;
+  const isCurrent=beginModalRequest();
   try{
     const preview=await api(`/v1.2/platform/leads/${encodeURIComponent(lead.id)}/test-record/impact`);
+    if(!isCurrent())return;
     const impact=preview.impact||{};
     const impactRows=[['派发历史',impact.assignment_history],['导入问题',impact.import_issues],['重复关系',impact.duplicate_relations],['核验任务',impact.verification_tasks],['核验提交',impact.verification_submissions],['查重记录',Number(impact.dedup_events||0)+Number(impact.dedup_overrides||0)]];
     modal('永久删除测试客资',`<form class="ops-form" id="test-lead-delete-form"><div class="ops-notice">此操作不可恢复。系统将删除这条测试客资及下列关联记录；只允许从未进入派发流程的数据执行。</div><div class="ops-detail-grid">${impactRows.map(([name,count])=>`<div class="ops-detail"><small>${name}</small><b>${Number(count||0)} 条</b></div>`).join('')}</div><div class="ops-field"><label>客资编号</label><div class="ops-notice"><b>${esc(recordCode(lead.id,'KZ'))}</b><br>${esc(lead.id)}</div></div><div class="ops-field"><label for="test-lead-confirm-id">输入完整客资 ID *</label><input class="ops-input" id="test-lead-confirm-id" autocomplete="off" placeholder="${esc(lead.id)}"></div><div class="ops-field"><label for="test-lead-confirm-name">输入客户完整名称 *</label><input class="ops-input" id="test-lead-confirm-name" autocomplete="off" placeholder="${esc(lead.customer_name)}"></div><div class="ops-field"><label for="test-lead-delete-reason">删除原因 *</label><textarea class="ops-textarea" id="test-lead-delete-reason" minlength="5" maxlength="1000" placeholder="例如：清理本轮功能验收测试数据"></textarea></div>${preview.deletable?'':`<div class="ops-notice">当前记录不可永久删除：${esc((preview.blockers||[]).join('、')||'不符合删除条件')}</div>`}<div class="ops-actions"><button class="ops-btn" id="test-lead-delete-cancel" type="button">取消</button><button class="ops-btn danger" type="submit" ${preview.deletable?'':'disabled'}>确认永久删除</button></div></form>`,()=>{
@@ -580,7 +604,7 @@ async function deleteTestLead(lead){
         if(confirmed_customer_name!==lead.customer_name){toast('客户完整名称不匹配',true);return}
         if(reason.length<5){toast('删除原因至少填写 5 个字符',true);return}
         submit.disabled=true;
-        try{await api(`/v1.2/platform/leads/${encodeURIComponent(lead.id)}/test-record`,{method:'DELETE',body:JSON.stringify({confirmed_lead_id,confirmed_customer_name,reason})});closeModal();toast('测试客资已永久删除');await review()}catch(error){submit.disabled=false;toast(error.message,true)}
+        try{await api(`/v1.2/platform/leads/${encodeURIComponent(lead.id)}/test-record`,{method:'DELETE',body:JSON.stringify({confirmed_lead_id,confirmed_customer_name,reason})});closeModalFor(form);toast('测试客资已永久删除');await refreshAfterSuccess(review,'测试客资已永久删除')}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}
       };
     });
   }catch(error){toast(error.message,true)}
@@ -596,8 +620,10 @@ async function assignPublicPoolPreDispatch(lead){
 }
 async function assignLeadPreDispatch(lead,refresh){
   if(!lead?.phone_masked){toast('手机号必填且必须为 11 位有效号码',true);openPlatformLeadForm(lead);return}
+  const isCurrent=beginModalRequest();
   try{
     const users=await loadTelesalesUsers();
+    if(!isCurrent())return;
     const options=users.map(user=>`<option value="${esc(user.id)}">${esc(user.display_name||user.username)}</option>`).join('');
     modal('分配电销核验',users.length?`<form class="ops-form" id="platform-pre-dispatch-form"><div class="ops-notice">只要手机号有效即可分配；其他资料由电销核验后交回运营继续处理，不会直接进入加盟商派发。</div><div class="ops-field"><label>电销人员 *</label><select class="ops-input" id="platform-pre-assignee">${options}</select></div><div class="ops-field"><label>核验重点 *</label><textarea class="ops-textarea" id="platform-pre-reason" placeholder="例如：补充联系方式、客户授权和具体需求"></textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="platform-pre-cancel">取消</button><button class="ops-btn primary" id="platform-pre-submit" type="submit">确认派发</button></div></form>`:'<div class="ops-empty">暂无可分配的电销人员</div>',()=>{
       const form=document.querySelector('#platform-pre-dispatch-form');
@@ -610,17 +636,19 @@ async function assignLeadPreDispatch(lead,refresh){
         submit.disabled=true;
         try{
           await api(`/v1.2/admin/leads/${encodeURIComponent(lead.id)}/pre-dispatch-verification`,{method:'POST',body:JSON.stringify({assignee_user_id:document.querySelector('#platform-pre-assignee').value,reason})});
-          closeModal();
+          closeModalFor(form);
           toast('已分配电销核验');
-          await refresh();
+          await refreshAfterSuccess(refresh,'电销核验已分配');
         }catch(error){submit.disabled=false;toast(error.message,true)}
       };
     });
   }catch(error){toast(error.message,true)}
 }
 async function assignPreDispatch(leadId){
+  const isCurrent=beginModalRequest();
   try{
     const users=await loadTelesalesUsers();
+    if(!isCurrent())return;
     const options=users.map(user=>`<option value="${esc(user.id)}">${esc(user.display_name||user.username)}${user.username?` · ${esc(user.username)}`:''}</option>`).join('');
     modal('派发前置电销核验',users.length?`<form class="ops-form" id="pre-dispatch-form"><div class="ops-notice">电销只能处理运营派发的任务；提交结论后由运营决定后续处置。</div><div class="ops-field"><label for="pre-dispatch-assignee">电销人员 *</label><select class="ops-input" id="pre-dispatch-assignee">${options}</select></div><div class="ops-field"><label for="pre-dispatch-reason">派发原因 *</label><textarea class="ops-textarea" id="pre-dispatch-reason" placeholder="例如：客户意向、区域或联系方式需要电话核实"></textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="pre-dispatch-cancel">取消</button><button class="ops-btn primary" id="pre-dispatch-submit">确认派发</button></div></form>`:'<div class="ops-empty">暂无可分配的电销人员</div>',()=>{
       const form=document.querySelector('#pre-dispatch-form');
@@ -635,8 +663,8 @@ async function assignPreDispatch(leadId){
         try{
           await api(`/v1.2/admin/leads/${encodeURIComponent(leadId)}/pre-dispatch-verification`,{method:'POST',body:JSON.stringify({assignee_user_id:document.querySelector('#pre-dispatch-assignee').value,reason})});
           toast('前置电销核验已派发');
-          closeModal();
-          await review();
+          closeModalFor(form);
+          await refreshAfterSuccess(review,'前置电销核验已派发');
         }catch(error){submit.disabled=false;toast(error.message,true)}
       };
     });
@@ -660,8 +688,10 @@ async function telesales(){
   if(S.id){const taskId=S.id;S.id='';await openPreDispatchTask(taskId)}
 }
 async function openPreDispatchTask(taskId){
+  const isCurrent=beginModalRequest();
   try{
     const task=await api(`/v1.2/pre-dispatch-verifications/tasks/${encodeURIComponent(taskId)}`);
+    if(!isCurrent())return;
     if(task.status!=='SUBMITTED'){toast('该电销核验任务当前无需运营处置',true);return}
     disposePreDispatch(task);
   }catch(error){toast(error.message,true)}
@@ -681,8 +711,8 @@ function disposePreDispatch(task){
       try{
         await api(`/v1.2/admin/leads/${encodeURIComponent(leadId)}/pre-dispatch-disposition`,{method:'POST',body:JSON.stringify({decision:document.querySelector('#pre-disposition-decision').value,note})});
         toast('运营处置已提交');
-        closeModal();
-        await telesales();
+        closeModalFor(form);
+        await refreshAfterSuccess(telesales,'电销核验结论已处置');
       }catch(error){submit.disabled=false;toast(error.message,true)}
     };
   });
@@ -709,7 +739,7 @@ function calendarDayModal(dayValue,item={},lockedDate=false){
   modal(lockedDate?'编辑工作日历日期':'单日设定',`<form class="ops-form" id="calendar-form"><div class="ops-field"><label for="calendar-day">日期 *</label><input class="ops-input" id="calendar-day" type="date" value="${esc(day)}" ${lockedDate?'readonly':''}></div><div class="ops-field"><label for="calendar-is-workday">当天安排 *</label><select class="ops-input" id="calendar-is-workday"><option value="true" ${isWorkday?'selected':''}>工作日</option><option value="false" ${isWorkday?'':'selected'}>休息日</option></select></div><div class="ops-field"><label for="calendar-holiday-name">节日或说明</label><input class="ops-input" id="calendar-holiday-name" maxlength="128" value="${esc(item.holiday_name||'')}" placeholder="例如：国庆节或调休工作日"></div><div class="ops-notice">只影响保存后新领取或历史缺失字段补算；已固化的历史截止时间不回算。</div><div class="ops-actions"><button type="button" class="ops-btn" id="calendar-cancel">取消</button><button class="ops-btn primary" id="calendar-submit">保存</button></div></form>`,()=>{
     const form=document.querySelector('#calendar-form'),submit=document.querySelector('#calendar-submit');
     document.querySelector('#calendar-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const selectedDay=document.querySelector('#calendar-day').value.trim();if(!selectedDay){toast('请选择日期',true);return}submit.disabled=true;try{const result=await api(`/admin/v1.2/calendar-days/${encodeURIComponent(selectedDay)}`,{method:'PUT',body:JSON.stringify({is_workday:document.querySelector('#calendar-is-workday').value==='true',holiday_name:document.querySelector('#calendar-holiday-name').value.trim()||null})});toast(result.changed?'工作日历已保存':'配置无变化，未重复写入审计');closeModal();await calendar()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const selectedDay=document.querySelector('#calendar-day').value.trim();if(!selectedDay){toast('请选择日期',true);return}submit.disabled=true;try{const result=await api(`/admin/v1.2/calendar-days/${encodeURIComponent(selectedDay)}`,{method:'PUT',body:JSON.stringify({is_workday:document.querySelector('#calendar-is-workday').value==='true',holiday_name:document.querySelector('#calendar-holiday-name').value.trim()||null})});const message=result.changed?'工作日历已保存':'配置无变化，未重复写入审计';toast(message);closeModalFor(form);await refreshAfterSuccess(calendar,message)}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
   });
 }
 function calendarDayDetail(item){
@@ -736,7 +766,7 @@ const internalRoleOptions=(name,current='OPERATION')=>INTERNAL_ROLE_OPTIONS.map(
 const selectedInternalRole=name=>document.querySelector(`input[name="${name}"]:checked`)?.value||'';
 async function runInternalUserAction(button,action,success){
   const original=button.textContent;button.disabled=true;button.textContent='处理中';
-  try{await action();toast(success);closeModal();await internalUsers()}catch(error){toast(error.message,true)}finally{if(button.isConnected){button.disabled=false;button.textContent=original}}
+  try{await action();toast(success);closeModalFor(button);await refreshAfterSuccess(internalUsers,success)}catch(error){toast(error.message,true)}finally{if(button.isConnected){button.disabled=false;button.textContent=original}}
 }
 function showInternalUserCredentials(user,onClose){
   const password=user.initial_password||'',username=user.username||'';
@@ -754,7 +784,7 @@ function internalUserModal(){
   modal('新建内部账号',`<form class="ops-form" id="internal-user-form"><div class="ops-field"><label for="internal-user-name">姓名 *</label><input class="ops-input" id="internal-user-name" maxlength="64" autocomplete="name"></div><div class="ops-field"><label for="internal-user-username">登录账号 *</label><input class="ops-input" id="internal-user-username" maxlength="64" autocomplete="username"></div><div class="ops-notice">无需填写密码，系统会自动生成可复制的 8 位以上初始密码。</div><label class="ops-check"><input type="checkbox" id="internal-user-is-test"> 测试账号</label><small class="ops-muted">仅用于联测；停用且无业务数据时才允许删除。</small><div class="ops-field"><label>角色 *</label><div class="ops-choice-list">${internalRoleOptions('internal-role')}</div><small class="ops-muted">单选，仅限平台内部角色。</small></div><div class="ops-actions"><button type="button" class="ops-btn" id="internal-user-cancel">取消</button><button class="ops-btn primary" id="internal-user-submit">创建</button></div></form>`,()=>{
     const form=document.querySelector('#internal-user-form'),submit=document.querySelector('#internal-user-submit');
     document.querySelector('#internal-user-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const display_name=document.querySelector('#internal-user-name').value.trim(),username=document.querySelector('#internal-user-username').value.trim(),role=selectedInternalRole('internal-role'),is_test=document.querySelector('#internal-user-is-test').checked;if(!display_name){toast('请输入姓名',true);return}if(username.length<2){toast('登录账号至少输入 2 个字符',true);return}if(!role){toast('请选择一个角色',true);return}submit.disabled=true;try{const created=await api('/users',{method:'POST',body:JSON.stringify({display_name,username,role_codes:[role],is_test})});const passwordReady=showInternalUserCredentials(created);toast(passwordReady?'账号已创建，请复制初始密码':'账号已创建，但需要立即重置密码',!passwordReady);try{await internalUsers()}catch(refreshError){toast(`账号已创建，但账号列表刷新失败：${refreshError.message}`,true)}}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const display_name=document.querySelector('#internal-user-name').value.trim(),username=document.querySelector('#internal-user-username').value.trim(),role=selectedInternalRole('internal-role'),is_test=document.querySelector('#internal-user-is-test').checked;if(!display_name){toast('请输入姓名',true);return}if(username.length<2){toast('登录账号至少输入 2 个字符',true);return}if(!role){toast('请选择一个角色',true);return}submit.disabled=true;lockModal(form,document.querySelector('#internal-user-cancel'));try{const created=await api('/users',{method:'POST',body:JSON.stringify({display_name,username,role_codes:[role],is_test})});unlockModal(form);const passwordReady=showInternalUserCredentials(created);toast(passwordReady?'账号已创建，请复制初始密码':'账号已创建，但需要立即重置密码',!passwordReady);try{await internalUsers()}catch(refreshError){toast(`账号已创建，但账号列表刷新失败：${refreshError.message}`,true)}}catch(error){unlockModal(form);submit.disabled=false;document.querySelector('#internal-user-cancel').disabled=false;document.querySelector('#modal-close').disabled=false;toast(error.message,true)}};
   });
 }
 function internalRoleModal(user){
@@ -773,13 +803,13 @@ function internalDisplayNameModal(user){
   });
 }
 function resetInternalUserPassword(user){
-  actionForm({title:'重置内部账号密码',message:'保存后该账号现有会话立即失效。',labelText:'新密码',required:true,minLength:8,submitLabel:'重置密码',danger:true,validate:value=>value.length>128?'密码需为 8-128 位':null},async new_password=>{if(new_password.length<8)throw new Error('密码需为 8-128 位');await api(`/users/${encodeURIComponent(user.id)}/reset-password`,{method:'POST',body:JSON.stringify({new_password})});toast('密码已重置');await internalUsers()});
+  actionForm({title:'重置内部账号密码',message:'保存后该账号现有会话立即失效。',labelText:'新密码',required:true,minLength:8,submitLabel:'重置密码',danger:true,validate:value=>value.length>128?'密码需为 8-128 位':null},async new_password=>{if(new_password.length<8)throw new Error('密码需为 8-128 位');await api(`/users/${encodeURIComponent(user.id)}/reset-password`,{method:'POST',body:JSON.stringify({new_password})});toast('密码已重置');await refreshAfterSuccess(internalUsers,'密码已重置')});
 }
 function internalUserLifecycleConfirmation(user,{title,message,submitLabel},onSubmit){
   modal(title,`<form class="ops-form" id="internal-user-lifecycle-form"><div class="ops-notice">${esc(message)}。只允许删除已停用、无业务数据的测试账号。</div><div class="ops-field"><label for="internal-user-confirm-username">输入完整登录账号 *</label><input class="ops-input" id="internal-user-confirm-username" autocomplete="off" placeholder="${esc(user.username||'')}"></div><div class="ops-field"><label for="internal-user-lifecycle-reason">操作原因 *</label><textarea class="ops-textarea" id="internal-user-lifecycle-reason" maxlength="500"></textarea></div><label class="ops-check"><input type="checkbox" id="internal-user-second-confirm"> 我已二次确认操作对象和数据范围</label><div class="ops-actions"><button type="button" class="ops-btn" id="internal-user-lifecycle-cancel">取消</button><button class="ops-btn danger" id="internal-user-lifecycle-submit">${esc(submitLabel)}</button></div></form>`,()=>{
     const form=document.querySelector('#internal-user-lifecycle-form'),submit=document.querySelector('#internal-user-lifecycle-submit'),usernameInput=document.querySelector('#internal-user-confirm-username'),reasonInput=document.querySelector('#internal-user-lifecycle-reason');
     document.querySelector('#internal-user-lifecycle-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const confirm_username=usernameInput.value.trim(),reason=reasonInput.value.trim();if(confirm_username!==user.username){toast('登录账号不一致，不能执行',true);usernameInput.focus();return}if(reason.length<2){toast('请填写至少 2 个字的操作原因',true);reasonInput.focus();return}if(!document.querySelector('#internal-user-second-confirm').checked){toast('请完成二次确认',true);return}submit.disabled=true;try{await onSubmit({confirm_username,reason});closeModal();await internalUsers()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const confirm_username=usernameInput.value.trim(),reason=reasonInput.value.trim();if(confirm_username!==user.username){toast('登录账号不一致，不能执行',true);usernameInput.focus();return}if(reason.length<2){toast('请填写至少 2 个字的操作原因',true);reasonInput.focus();return}if(!document.querySelector('#internal-user-second-confirm').checked){toast('请完成二次确认',true);return}submit.disabled=true;try{await onSubmit({confirm_username,reason});closeModalFor(form);await refreshAfterSuccess(internalUsers,'账号操作已完成')}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
   });
 }
 function markInternalUserAsTest(user){
@@ -826,7 +856,7 @@ function changeOwnUsername(){
   modal('修改登录账号',`<form class="ops-form" id="own-username-form"><div class="ops-notice">修改后立即使用新登录账号；当前设备保持登录，原登录账号将不能再用于登录。</div><div class="ops-field"><label for="username-current-password">当前密码 *</label><input class="ops-input" id="username-current-password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required></div><div class="ops-field"><label for="new-username">新登录账号 *</label><input class="ops-input" id="new-username" value="${esc(current)}" autocomplete="username" minlength="2" maxlength="64" required></div><div class="ops-actions"><button class="ops-btn" type="button" id="own-username-cancel">取消</button><button class="ops-btn primary" id="own-username-submit">保存登录账号</button></div></form>`,()=>{
     const form=document.querySelector('#own-username-form'),submit=document.querySelector('#own-username-submit');
     document.querySelector('#own-username-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const current_password=document.querySelector('#username-current-password').value,username=document.querySelector('#new-username').value.trim();if(username.length<2){toast('登录账号至少 2 个字符',true);return}submit.disabled=true;try{await api('/auth/change-username',{method:'POST',body:JSON.stringify({current_password,username})});S.me=await api('/auth/me');toast('登录账号已更新');closeModal();await account()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const current_password=document.querySelector('#username-current-password').value,username=document.querySelector('#new-username').value.trim();if(username.length<2){toast('登录账号至少 2 个字符',true);return}submit.disabled=true;try{await api('/auth/change-username',{method:'POST',body:JSON.stringify({current_password,username})})}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true);return}const message='登录账号已更新';toast(message);if(closeModalFor(form))await refreshAfterSuccess(async()=>{S.me=await api('/auth/me');await account()},message)};
   });
 }
 function changeOwnPassword(){
@@ -834,7 +864,7 @@ function changeOwnPassword(){
   modal(hasPassword?'修改登录密码':'设置备用登录密码',`<form class="ops-form" id="own-password-form"><div class="ops-notice">${hasPassword?'新密码只要求 8 至 128 位，不要求字符组合。保存后，本设备会保持登录，其他设备会自动退出。':'此密码作为公众号登录之外的备用方式，首次设置不需要当前密码。'}</div>${hasPassword?'<div class="ops-field"><label for="current-password">当前密码 *</label><input class="ops-input" id="current-password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required></div>':''}<div class="ops-field"><label for="new-password">新密码 *</label><input class="ops-input" id="new-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></div><div class="ops-field"><label for="confirm-password">确认新密码 *</label><input class="ops-input" id="confirm-password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></div><div class="ops-actions"><button class="ops-btn" type="button" id="own-password-cancel">取消</button><button class="ops-btn primary" id="own-password-submit">保存新密码</button></div></form>`,()=>{
     const form=document.querySelector('#own-password-form'),submit=document.querySelector('#own-password-submit');
     document.querySelector('#own-password-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const current_password=document.querySelector('#current-password')?.value||null,new_password=document.querySelector('#new-password').value,confirm_password=document.querySelector('#confirm-password').value;if(new_password.length<8){toast('新密码至少 8 位',true);return}if(new_password!==confirm_password){toast('两次输入的新密码不一致',true);return}submit.disabled=true;try{await api('/auth/change-password',{method:'POST',body:JSON.stringify({current_password,new_password})});S.me=await api('/auth/me');toast(hasPassword?'密码已更新，其他设备已退出':'备用密码已设置');closeModal();await account()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const current_password=document.querySelector('#current-password')?.value||null,new_password=document.querySelector('#new-password').value,confirm_password=document.querySelector('#confirm-password').value;if(new_password.length<8){toast('新密码至少 8 位',true);return}if(new_password!==confirm_password){toast('两次输入的新密码不一致',true);return}submit.disabled=true;try{await api('/auth/change-password',{method:'POST',body:JSON.stringify({current_password,new_password})})}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true);return}const message=hasPassword?'密码已更新，其他设备已退出':'备用密码已设置';toast(message);if(closeModalFor(form))await refreshAfterSuccess(async()=>{S.me=await api('/auth/me');await account()},message)};
   });
 }
 async function companies(){
@@ -856,8 +886,10 @@ async function companies(){
 }
 function openCompanyProvidedLeads(companyId){S.leadSource='SUPPLIER_H5';S.leadSupplierCompanyId=companyId;S.leadSubmitterId='';S.leadPendingReason='';S.page=1;go('leads')}
 async function companyAssignmentHistory(companyId,companyName,assignmentStatus=null,pageNo=1){
+  const isCurrent=beginModalRequest();
   try{
     const result=await api(`/v1.2/companies/${encodeURIComponent(companyId)}/assignments${qs({assignment_status:assignmentStatus,page:pageNo,page_size:20})}`);
+    if(!isCurrent())return;
     const rows=(result.items||[]).map(item=>`<tr><td>${esc(item.customer_name||'--')}<br><small>${esc(item.phone||item.phone_masked||'--')}</small></td><td>${badge(item.status)}</td><td>${esc(label(item.lead_status))}</td><td>${esc(item.current_follow_status?label(item.current_follow_status):'暂无')}</td><td>${fmt(item.assigned_at)}</td><td><button class="ops-btn" data-company-assignment-detail="${esc(item.lead_id)}" type="button">查看详情</button></td></tr>`);
     const totalPages=Math.max(1,Math.ceil(Number(result.total||0)/Number(result.page_size||20)));
     modal(`${companyName||result.company_name||'加盟商'} · ${assignmentStatus?label(assignmentStatus):'全部接收客资'}`,`${assignmentStatus?`<div class="ops-notice">已自动筛选：${esc(label(assignmentStatus))}</div>`:''}${table(['客户','派发状态','客资状态','当前跟进','派发时间','操作'],rows)}<div class="ops-pager"><button class="ops-btn" id="company-assignment-prev" ${pageNo<=1?'disabled':''}>上一页</button><span>第 ${pageNo} / ${totalPages} 页，共 ${Number(result.total||0)} 条</span><button class="ops-btn" id="company-assignment-next" ${pageNo>=totalPages?'disabled':''}>下一页</button></div>`,()=>{
@@ -885,10 +917,12 @@ function companyCapabilitySetting(capabilities,code,compact=false){
 }
 async function companyDetail(company){
   if(!company)return;
+  const isCurrent=beginModalRequest();
   const [profile,inviteResult]=await Promise.all([
     api(`/v1.2/admin/companies/${encodeURIComponent(company.id)}/profile`),
     api(`/auth/companies/${encodeURIComponent(company.id)}/invites`),
   ]);
+  if(!isCurrent())return;
   const detail=profile.company;
   const companyRecord={...company,...detail};
   const areas=(profile.service_areas||[]).filter(item=>item.active&&item.review_status==='APPROVED');
@@ -952,8 +986,10 @@ function unbindCompanyOwnerWechat(company){
   });
 }
 async function markCompanyAsTest(company){
+  const isCurrent=beginModalRequest();
   try{
     const preview=await api(`/companies/${encodeURIComponent(company.id)}/purge-preview`);
+    if(!isCurrent())return;
     companyLifecycleConfirmation({title:'标记历史测试数据',message:'标记后可删除该主体及其相关测试业务，不因已产生客资或已完成派发而阻止。',company,submitLabel:'确认标记为测试',preview,confirmPhrase:'永久删除测试数据'},async body=>{
       await api(`/companies/${encodeURIComponent(company.id)}/mark-test`,{method:'POST',body:JSON.stringify(body)});
       toast('已标记为测试主体，可继续执行删除');
@@ -970,10 +1006,10 @@ function deleteTestCompany(company){
 }
 function configureCompanyCapability(companyId,capabilityCode,active,company){
   const name=COMPANY_CAPABILITY_LABEL[capabilityCode]||'客资功能';
-  actionForm({title:active?`开通${name}`:`停用${name}`,message:active?'开通后加盟商可以立即使用该功能。':'停用后加盟商无法继续使用该功能，不影响已留存业务记录。',labelText:'配置说明',value:active?'平台开通':'平台停用',submitLabel:active?'确认开通':'确认停用',danger:!active},async note=>{
+  actionForm({title:active?`开通${name}`:`停用${name}`,message:active?'开通后加盟商可以立即使用该功能。':'停用后加盟商无法继续使用该功能，不影响已留存业务记录。',labelText:'配置说明',value:active?'平台开通':'平台停用',submitLabel:active?'确认开通':'确认停用',danger:!active},async(note,isCurrent)=>{
     await api(`/v1.2/admin/companies/${encodeURIComponent(companyId)}/capabilities/${encodeURIComponent(capabilityCode)}`,{method:'PUT',body:JSON.stringify({active,note:note||null})});
     toast(`${name}已${active?'开通':'停用'}`);
-    await companyDetail(company);
+    if(isCurrent())await refreshAfterSuccess(()=>companyDetail(company),`${name}已${active?'开通':'停用'}`);
   });
 }
 function copyText(text,success){
@@ -981,8 +1017,9 @@ function copyText(text,success){
   navigator.clipboard.writeText(text).then(()=>toast(success)).catch(()=>toast('浏览器不支持自动复制，请手动复制',true));
 }
 function createCompanyInvite(company){
-  actionForm({title:'发起负责人绑定',message:'系统会生成一次性邀请链接。请通过微信或其他已确认渠道发送给负责人；平台不会在未绑定前自动发送消息。',labelText:'邀请有效期（小时）',value:'72',inputType:'number',submitLabel:'生成邀请链接',validate:value=>{const hours=Number(value);return Number.isInteger(hours)&&hours>=1&&hours<=720?'':'请输入 1 到 720 小时'}} ,async raw=>{
+  actionForm({title:'发起负责人绑定',message:'系统会生成一次性邀请链接。请通过微信或其他已确认渠道发送给负责人；平台不会在未绑定前自动发送消息。',labelText:'邀请有效期（小时）',value:'72',inputType:'number',submitLabel:'生成邀请链接',lockOnSubmit:true,validate:value=>{const hours=Number(value);return Number.isInteger(hours)&&hours>=1&&hours<=720?'':'请输入 1 到 720 小时'}} ,async(raw,_isCurrent,unlock)=>{
     const invitation=await api(`/auth/companies/${encodeURIComponent(company.id)}/invites`,{method:'POST',body:JSON.stringify({expires_hours:Number(raw)})});
+    unlock();
     showCompanyInvite(invitation,company);
     return false;
   });
@@ -995,10 +1032,10 @@ function showCompanyInvite(invitation,company){
   });
 }
 function revokeCompanyInvite(inviteId,company){
-  actionForm({title:'撤销负责人邀请',message:'撤销后该邀请链接将立即失效，需重新发起绑定时可生成新链接。',labelText:'撤销说明',value:'负责人信息变更',submitLabel:'确认撤销',danger:true},async()=>{
+  actionForm({title:'撤销负责人邀请',message:'撤销后该邀请链接将立即失效，需重新发起绑定时可生成新链接。',labelText:'撤销说明',value:'负责人信息变更',submitLabel:'确认撤销',danger:true},async(_note,isCurrent)=>{
     await api(`/auth/invites/${encodeURIComponent(inviteId)}/revoke`,{method:'POST'});
     toast('负责人邀请已撤销');
-    await companyDetail(company);
+    if(isCurrent())await refreshAfterSuccess(()=>companyDetail(company),'负责人邀请已撤销');
   });
 }
 function serviceRegionBuilderMarkup(prefix,provinces){return `<div class="ops-region-builder" id="${prefix}-region-builder"><div class="ops-field"><label for="${prefix}-region-search">搜索服务区域</label><input class="ops-input" id="${prefix}-region-search" maxlength="64" placeholder="输入城市、区县或乡镇/街道"><div class="ops-actions ops-region-actions" id="${prefix}-region-search-results"></div><small class="ops-muted">点击搜索结果即可直接加入已选区域。</small></div><div class="ops-row"><div class="ops-field"><label for="${prefix}-province">省份</label><select class="ops-input" id="${prefix}-province"><option value="">请选择省份</option>${provinces.map(item=>`<option value="${esc(item.code)}">${esc(item.name)}</option>`).join('')}</select></div><div class="ops-field"><label for="${prefix}-city">城市</label><select class="ops-input" id="${prefix}-city" disabled><option value="">请先选省份</option></select></div></div><div class="ops-row"><div class="ops-field"><label for="${prefix}-district">区/县</label><select class="ops-input" id="${prefix}-district" disabled><option value="">可选</option></select></div><div class="ops-field"><label for="${prefix}-township">乡镇/街道</label><select class="ops-input" id="${prefix}-township" disabled><option value="">可选</option></select></div></div><div class="ops-actions ops-region-actions"><button class="ops-btn primary" id="${prefix}-select-national-cities" type="button">全选全国城市</button><button class="ops-btn" id="${prefix}-clear-regions" type="button">清空已选区域</button><button class="ops-btn" id="${prefix}-select-province-cities" type="button">全选当前省城市</button><button class="ops-btn" id="${prefix}-select-city-districts" type="button">全选当前市区县</button><button class="ops-btn" id="${prefix}-add-city" type="button">添加整市</button><button class="ops-btn" id="${prefix}-add-district" type="button">添加区县</button><button class="ops-btn" id="${prefix}-add-township" type="button">添加乡镇</button></div><div class="ops-field"><label>已选服务区域</label><div class="ops-area-chips" id="${prefix}-selected-regions"></div></div><div class="ops-field"><label for="${prefix}-primary-city">主要城市 *</label><select class="ops-input" id="${prefix}-primary-city"></select><small class="ops-muted">全国全选覆盖系统内全部城市及其下级区域；主要城市仍用于主体归属。已选区域可逐个移除或清空。</small></div></div>`}
@@ -1041,23 +1078,27 @@ function bindServiceRegionBuilder(prefix,cities,initialAreas=[]){
   return {regionCodes:()=>Array.from(selected.keys()),primaryCityCode:()=>primaryCityCode};
 }
 async function openNewFranchiseCompany(){
+  const isCurrent=beginModalRequest();
   const cities=await platformCities();
+  if(!isCurrent())return;
   const provinces=[...new Map(cities.map(city=>[city.province_code,{code:city.province_code,name:city.province_name}])).values()];
   modal('新建加盟商主体',`<form class="ops-form" id="new-franchise-form"><div class="ops-notice">可跨省市重复添加整市、区县和乡镇/街道。创建完成后立即开通接单资格，并同步到加盟商 H5。</div><div class="ops-field"><label for="new-franchise-name">加盟商名称 *</label><input class="ops-input" id="new-franchise-name" maxlength="128" placeholder="例如：北京合家美宅"></div><div class="ops-field"><label for="new-franchise-owner">负责人姓名</label><input class="ops-input" id="new-franchise-owner" maxlength="64" placeholder="例如：北京负责人"></div><div class="ops-field"><label for="new-franchise-phone">联系电话</label><input class="ops-input" id="new-franchise-phone" inputmode="tel" maxlength="32"></div><label class="ops-check"><input type="checkbox" id="new-franchise-is-test"> 测试主体</label><div class="ops-field"><label>服务范围 *</label>${serviceRegionBuilderMarkup('new-franchise',provinces)}</div><div class="ops-field"><label for="new-franchise-notes">备注</label><textarea class="ops-textarea" id="new-franchise-notes" maxlength="500" placeholder="可记录签约或交接说明"></textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="new-franchise-cancel">取消</button><button class="ops-btn primary" type="submit">创建并开通</button></div></form>`,()=>{
     const form=document.querySelector('#new-franchise-form'),submit=document.querySelector('#new-franchise-form button[type="submit"]');
     document.querySelector('#new-franchise-cancel').onclick=closeModal;
     const regionBuilder=bindServiceRegionBuilder('new-franchise',cities);
-    form.onsubmit=async event=>{event.preventDefault();const name=document.querySelector('#new-franchise-name').value.trim(),primary_city_code=regionBuilder.primaryCityCode(),region_codes=regionBuilder.regionCodes();if(name.length<2||!primary_city_code||!region_codes.length){toast('请填写加盟商名称并至少添加一个主要城市',true);return}submit.disabled=true;try{const company=await api('/companies/simple',{method:'POST',body:JSON.stringify({name,owner_name:document.querySelector('#new-franchise-owner').value.trim()||null,contact_phone:document.querySelector('#new-franchise-phone').value.trim()||null,primary_city_code,district_codes:[],region_codes,serve_all_districts:false,is_test:document.querySelector('#new-franchise-is-test').checked,notes:document.querySelector('#new-franchise-notes').value.trim()||null})});closeModal();toast(`${company.name} 已创建，所选区域与接收客资已开通；请发起负责人绑定`);await companies();await companyDetail(company)}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const name=document.querySelector('#new-franchise-name').value.trim(),primary_city_code=regionBuilder.primaryCityCode(),region_codes=regionBuilder.regionCodes();if(name.length<2||!primary_city_code||!region_codes.length){toast('请填写加盟商名称并至少添加一个主要城市',true);return}submit.disabled=true;try{const company=await api('/companies/simple',{method:'POST',body:JSON.stringify({name,owner_name:document.querySelector('#new-franchise-owner').value.trim()||null,contact_phone:document.querySelector('#new-franchise-phone').value.trim()||null,primary_city_code,district_codes:[],region_codes,serve_all_districts:false,is_test:document.querySelector('#new-franchise-is-test').checked,notes:document.querySelector('#new-franchise-notes').value.trim()||null})});const isCurrent=closeModalFor(form)?beginModalRequest():()=>false;const message=`${company.name} 已创建，所选区域与接收客资已开通；请发起负责人绑定`;toast(message);await refreshAfterSuccess(companies,message);if(isCurrent())await refreshAfterSuccess(()=>companyDetail(company),message)}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
   });
 }
 async function editCompanyServiceAreas(company,profile){
+  const isCurrent=beginModalRequest();
   const cities=await platformCities();
+  if(!isCurrent())return;
   const provinces=[...new Map(cities.map(city=>[city.province_code,{code:city.province_code,name:city.province_name}])).values()];
   const activeAreas=(profile.service_areas||[]).filter(item=>item.active&&item.review_status==='APPROVED');
   modal(`编辑${company.name}服务区域`,`<form class="ops-form" id="company-service-area-form"><div class="ops-notice">可跨省市添加整市、区县或乡镇/街道。保存后立即用于客资候选匹配，历史流转记录不会删除。</div>${serviceRegionBuilderMarkup('company-service-area',provinces)}<div class="ops-actions"><button class="ops-btn" id="company-service-area-cancel" type="button">取消</button><button class="ops-btn primary" id="company-service-area-submit">保存服务区域</button></div></form>`,()=>{
     const form=document.querySelector('#company-service-area-form'),submit=document.querySelector('#company-service-area-submit'),builder=bindServiceRegionBuilder('company-service-area',cities,activeAreas);
     document.querySelector('#company-service-area-cancel').onclick=()=>companyDetail(company);
-    form.onsubmit=async event=>{event.preventDefault();const region_codes=builder.regionCodes(),primary_city_code=builder.primaryCityCode();if(!region_codes.length||!primary_city_code){toast('至少保留一个主要城市',true);return}submit.disabled=true;try{await api(`/v1.2/admin/companies/${encodeURIComponent(company.id)}/service-areas`,{method:'PUT',body:JSON.stringify({region_codes,primary_city_code})});toast('服务区域已更新');await companyDetail(company)}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const region_codes=builder.regionCodes(),primary_city_code=builder.primaryCityCode();if(!region_codes.length||!primary_city_code){toast('至少保留一个主要城市',true);return}submit.disabled=true;try{await api(`/v1.2/admin/companies/${encodeURIComponent(company.id)}/service-areas`,{method:'PUT',body:JSON.stringify({region_codes,primary_city_code})});toast('服务区域已更新');if(closeModalFor(form))await refreshAfterSuccess(()=>companyDetail(company),'服务区域已更新')}catch(error){submit.disabled=false;toast(error.message,true)}};
   });
 }
 function editCompany(company){
@@ -1065,14 +1106,16 @@ function editCompany(company){
   modal(`编辑${company.name}资料`,`<form class="ops-form" id="company-edit-form"><div class="ops-notice">此处只修改基本资料。主体启用与停用请使用列表或详情页的专用操作，确保理由和审计记录完整。联系电话留空不会覆盖原信息。</div><div class="ops-field"><label for="company-edit-name">公司名称 *</label><input class="ops-input" id="company-edit-name" maxlength="128" value="${esc(company.name||'')}"></div><div class="ops-field"><label for="company-edit-owner">负责人</label><input class="ops-input" id="company-edit-owner" maxlength="64" value="${esc(company.owner_name||'')}"></div><div class="ops-field"><label for="company-edit-phone">联系电话</label><input class="ops-input" id="company-edit-phone" inputmode="tel" maxlength="32" placeholder="当前：${esc(company.contact_phone_masked||'未填写')}；留空不修改"></div><div class="ops-field"><label for="company-edit-level">合作等级</label><input class="ops-input" id="company-edit-level" maxlength="32" value="${esc(company.level_code||'V1')}"></div><div class="ops-field"><label for="company-edit-notes">备注</label><textarea class="ops-textarea" id="company-edit-notes" maxlength="500">${esc(company.notes||'')}</textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="company-edit-cancel">取消</button><button class="ops-btn primary" id="company-edit-submit">保存资料</button></div></form>`,()=>{
     const form=document.querySelector('#company-edit-form'),submit=document.querySelector('#company-edit-submit');
     document.querySelector('#company-edit-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const name=document.querySelector('#company-edit-name').value.trim(),phone=document.querySelector('#company-edit-phone').value.trim();if(name.length<2){toast('公司名称至少 2 个字符',true);return}submit.disabled=true;try{const body={name,owner_name:document.querySelector('#company-edit-owner').value.trim()||null,level_code:document.querySelector('#company-edit-level').value.trim()||'V1',notes:document.querySelector('#company-edit-notes').value.trim()||null};if(phone)body.contact_phone=phone;await api(`/companies/${encodeURIComponent(company.id)}`,{method:'PATCH',body:JSON.stringify(body)});toast('加盟商资料已保存');closeModal();await companies()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const name=document.querySelector('#company-edit-name').value.trim(),phone=document.querySelector('#company-edit-phone').value.trim();if(name.length<2){toast('公司名称至少 2 个字符',true);return}submit.disabled=true;try{const body={name,owner_name:document.querySelector('#company-edit-owner').value.trim()||null,level_code:document.querySelector('#company-edit-level').value.trim()||'V1',notes:document.querySelector('#company-edit-notes').value.trim()||null};if(phone)body.contact_phone=phone;await api(`/companies/${encodeURIComponent(company.id)}`,{method:'PATCH',body:JSON.stringify(body)});toast('加盟商资料已保存');closeModalFor(form);await refreshAfterSuccess(companies,'加盟商资料已保存')}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
   });
 }
 const COMPANY_ACCOUNT_ROLE_LABEL={FRANCHISE_OWNER:'加盟商负责人',FRANCHISE_EMPLOYEE:'加盟商员工'};
 const isSuperAdmin=()=>primaryRole()==='SUPER_ADMIN';
 async function companyAccounts(companyId,companyName){
+  const isCurrent=beginModalRequest();
   try{
     const accounts=await api(`/companies/${encodeURIComponent(companyId)}/accounts`);
+    if(!isCurrent())return;
     const rows=accounts.map(account=>{
       const action=account.status==='ACTIVE'?'DISABLED':'ACTIVE';
       const actionLabel=action==='ACTIVE'?'启用':'停用';
@@ -1104,25 +1147,30 @@ function createCompanyAccount(companyId,companyName){
       if(!display_name||!username){toast('请填写姓名和登录账号',true);return}
       if(isSuperAdmin()&&reason.length<2){toast('超级管理员操作必须填写至少 2 个字的理由',true);return}
       submit.disabled=true;
+      const cancel=document.querySelector('#company-account-cancel');
+      lockModal(form,cancel);
       try{
         const account=await api(`/companies/${encodeURIComponent(companyId)}/accounts`,{method:'POST',body:JSON.stringify({display_name,username,role_code:document.querySelector('#company-account-role').value,reason:reason||null})});
+        unlockModal(form);
         showInitialPassword(account.initial_password,()=>companyAccounts(companyId,companyName));
-      }catch(error){submit.disabled=false;toast(error.message,true)}
+      }catch(error){unlockModal(form);submit.disabled=false;cancel.disabled=false;document.querySelector('#modal-close').disabled=false;toast(error.message,true)}
     };
   });
 }
 function changeCompanyAccountStatus(companyId,userId,status,companyName){
   const enabling=status==='ACTIVE';
-  actionForm({title:enabling?'启用加盟商账号':'停用加盟商账号',message:enabling?'启用后该账号可重新登录。':'停用会使该账号的现有会话失效。',labelText:'操作理由',required:isSuperAdmin(),minLength:2,submitLabel:enabling?'确认启用':'确认停用',danger:!enabling},async reason=>{
+  actionForm({title:enabling?'启用加盟商账号':'停用加盟商账号',message:enabling?'启用后该账号可重新登录。':'停用会使该账号的现有会话失效。',labelText:'操作理由',required:isSuperAdmin(),minLength:2,submitLabel:enabling?'确认启用':'确认停用',danger:!enabling},async(reason,isCurrent)=>{
     await api(`/companies/${encodeURIComponent(companyId)}/accounts/${encodeURIComponent(userId)}/${enabling?'enable':'disable'}`,{method:'POST',body:JSON.stringify({reason:reason||null})});
     toast(enabling?'账号已启用':'账号已停用');
-    await companyAccounts(companyId,companyName);
+    if(isCurrent())await refreshAfterSuccess(()=>companyAccounts(companyId,companyName),enabling?'账号已启用':'账号已停用');
   });
 }
 function resetCompanyAccountPassword(companyId,userId,companyName){
-  actionForm({title:'重置加盟商账号密码',message:'系统会生成新的初始密码并仅展示一次；旧会话将立即失效。',labelText:'重置理由',required:isSuperAdmin(),minLength:2,submitLabel:'确认重置',danger:true},async reason=>{
+  actionForm({title:'重置加盟商账号密码',message:'系统会生成新的初始密码并仅展示一次；旧会话将立即失效。',labelText:'重置理由',required:isSuperAdmin(),minLength:2,submitLabel:'确认重置',danger:true,lockOnSubmit:true},async(reason,_isCurrent,unlock)=>{
     const account=await api(`/companies/${encodeURIComponent(companyId)}/accounts/${encodeURIComponent(userId)}/reset-password`,{method:'POST',body:JSON.stringify({reason:reason||null})});
+    unlock();
     showInitialPassword(account.initial_password,()=>companyAccounts(companyId,companyName));
+    return false;
   });
 }
 function showInitialPassword(password,onClose){
@@ -1152,12 +1200,13 @@ async function dispatch(){
 }
 async function openDispatchCorrection(item){
   if(!item)return;
+  const isCurrent=beginModalRequest();
   try{
     const [lead,task]=await Promise.all([
       api(`/v1.2/admin/leads/${encodeURIComponent(item.id)}`),
       item.pre_dispatch_task_id?api(`/v1.2/pre-dispatch-verifications/tasks/${encodeURIComponent(item.pre_dispatch_task_id)}`):Promise.resolve(null),
     ]);
-    await openPlatformLeadForm(lead,true,{verificationInfo:task?.verification_info||null,refresh:dispatch});
+    if(isCurrent())await openPlatformLeadForm(lead,true,{verificationInfo:task?.verification_info||null,refresh:dispatch});
   }catch(error){toast(error.message,true)}
 }
 async function candidates(leadId){
@@ -1188,8 +1237,10 @@ async function candidates(leadId){
   });
 }
 async function chooseDispatchEmployee(companyId,companyName,{returnReceiverOverride=false,onSubmit}){
+  const isCurrent=beginModalRequest();
   try{
     const directory=await api(`/companies/${encodeURIComponent(companyId)}/account-directory`);
+    if(!isCurrent())return;
     const employees=(directory||[]).filter(user=>user.role_code==='FRANCHISE_EMPLOYEE'&&user.status==='ACTIVE');
     const owner=(directory||[]).find(user=>user.role_code==='FRANCHISE_OWNER'&&user.status==='ACTIVE');
     const ownerFallback=!employees.length;
@@ -1200,15 +1251,17 @@ async function chooseDispatchEmployee(companyId,companyName,{returnReceiverOverr
     modal(returnReceiverOverride?'确认例外直派':ownerFallback?'确认派发负责人':'选择接收员工',`<form class="ops-form" id="direct-dispatch-form"><div class="ops-notice">${receiverNotice}</div>${receiverField}<div class="ops-field"><label for="direct-dispatch-note">${returnReceiverOverride?'例外派发原因 *':'派发备注'}</label><textarea class="ops-textarea" id="direct-dispatch-note" ${returnReceiverOverride?'required minlength="2"':''}></textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="direct-dispatch-cancel">取消</button><button class="ops-btn primary" id="direct-dispatch-submit">确认直派</button></div></form>`,()=>{
       const form=document.querySelector('#direct-dispatch-form'),submit=document.querySelector('#direct-dispatch-submit');
       document.querySelector('#direct-dispatch-cancel').onclick=closeModal;
-      form.onsubmit=async event=>{event.preventDefault();const employeeUserId=ownerFallback?null:document.querySelector('#direct-dispatch-employee').value,note=document.querySelector('#direct-dispatch-note').value.trim();if(!ownerFallback&&!employeeUserId){toast('请选择接收员工',true);return}if(returnReceiverOverride&&note.length<2){toast('请至少填写 2 个字的例外派发原因',true);return}submit.disabled=true;try{await onSubmit(employeeUserId,note);closeModal()}catch(error){submit.disabled=false;toast(error.message,true)}};
+      form.onsubmit=async event=>{event.preventDefault();const employeeUserId=ownerFallback?null:document.querySelector('#direct-dispatch-employee').value,note=document.querySelector('#direct-dispatch-note').value.trim();if(!ownerFallback&&!employeeUserId){toast('请选择接收员工',true);return}if(returnReceiverOverride&&note.length<2){toast('请至少填写 2 个字的例外派发原因',true);return}submit.disabled=true;try{await onSubmit(employeeUserId,note);closeModalFor(form)}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
     });
   }catch(error){toast(error.message,true)}
 }
-function dispatchOne(leadId,companyId,returnReceiverOverride=false,companyName=''){chooseDispatchEmployee(companyId,companyName,{returnReceiverOverride,onSubmit:async(employeeUserId,note)=>{await api(`/v1.2/dispatch-pool/${encodeURIComponent(leadId)}/dispatch`,{method:'POST',body:JSON.stringify({company_id:companyId,employee_user_id:employeeUserId||null,idempotency_key:`dispatch-${crypto.randomUUID()}`,note:returnReceiverOverride?null:note||null,return_receiver_override:returnReceiverOverride,return_receiver_override_reason:returnReceiverOverride?note:null})});toast(employeeUserId?'客资已直派给所选员工':'客资已直派给加盟商负责人');await dispatch()}})}
+function dispatchOne(leadId,companyId,returnReceiverOverride=false,companyName=''){chooseDispatchEmployee(companyId,companyName,{returnReceiverOverride,onSubmit:async(employeeUserId,note)=>{await api(`/v1.2/dispatch-pool/${encodeURIComponent(leadId)}/dispatch`,{method:'POST',body:JSON.stringify({company_id:companyId,employee_user_id:employeeUserId||null,idempotency_key:`dispatch-${crypto.randomUUID()}`,note:returnReceiverOverride?null:note||null,return_receiver_override:returnReceiverOverride,return_receiver_override_reason:returnReceiverOverride?note:null})});toast(employeeUserId?'客资已直派给所选员工':'客资已直派给加盟商负责人');await refreshAfterSuccess(dispatch,'客资已派发')}})}
 async function returns(){const [d,t]=await Promise.all([api(`/v1.2/returns${qs({status:S.status,page:S.page,page_size:20})}`),can('verification.read')?api('/v1.2/return-verifications/tasks?page=1&page_size=100'):Promise.resolve({items:[]})]);if(can('verification.read'))await loadTelesalesUsers();const rows=(d.items||[]).map(x=>`<tr><td>${esc(recordCode(x.id,'TH'))}<br><small>派发编号 ${esc(x.assignment_code||recordCode(x.assignment_id,'PF'))}</small></td><td><b>${esc(x.customer_name||'待确认客户')}</b><br><small>${esc(x.phone||x.phone_masked||'--')} · ${esc([x.city,x.district].filter(Boolean).join(' / ')||'地区待补充')}</small></td><td>${esc(label(x.reason_code))}</td><td>${badge(x.status,returnStatusLabel(x.status))}</td><td>${x.submitted_at?fmt(x.submitted_at):'尚未提交'}</td><td><button class="ops-btn" data-return="${x.id}">${x.submitted_at?'查看与审核':'查看草稿（只读）'}</button></td></tr>`);const tasks=(t.items||[]).map(x=>{const r=x.return_request||{},lead=x.lead||{},nextStep=x.is_overdue?'已超时，需运营改派':'电销完成退回事实核验';return `<tr><td><b>${esc(lead.customer_name||'待核验客户')}</b><br><small>${esc(lead.phone||lead.phone_masked||'--')}</small></td><td>${verificationTaskBadge(x)}</td><td>${esc(telesalesName(x.assignee_user_id))}</td><td>${esc(label(r.reason_code))}</td><td>${esc(nextStep)}</td><td>${fmt(x.due_at)}</td><td><button class="ops-btn" data-task="${x.id}">查看</button> <button class="ops-btn" data-assign="${x.id}">${x.assignee_user_id?'重新分配':'分配人员'}</button></td></tr>`});const filterNotice=S.status?`<div class="ops-notice">当前筛选：${esc(returnStatusLabel(S.status))} <button class="ops-btn" id="returns-clear">查看全部</button></div>`:'';shell(`${filterNotice}<section class="ops-card"><h2>${S.status==='DRAFT'?'未提交草稿（只读）':'正式退回记录'}</h2><p>正式提交后进入运营处理流程；未提交草稿由发起人继续完善。</p>${S.status==='DRAFT'?'':'<button class="ops-btn" id="returns-drafts">查看未提交草稿</button>'}${table(['退回编号','客户','退回原因','处理状态','申诉时间','操作'],rows)}${pager(d)}</section>${can('verification.read')?`<section class="ops-card"><h2>电话核验任务</h2><p>仅在加盟商发起退回申诉后进行电话核验。</p>${table(['客户','状态','核验人员','退回原因','下一步','核验截止','操作'],tasks)}</section>`:''}`);bindPager(d,returns);document.querySelector('#returns-drafts')?.addEventListener('click',()=>{S.status='DRAFT';S.page=1;returns()});document.querySelector('#returns-clear')?.addEventListener('click',()=>go('returns'));document.querySelectorAll('[data-return]').forEach(b=>b.onclick=()=>returnDetail(b.dataset.return));document.querySelectorAll('[data-task]').forEach(b=>b.onclick=()=>taskDetail(b.dataset.task));document.querySelectorAll('[data-assign]').forEach(b=>b.onclick=()=>assignTask(b.dataset.assign));if(S.id){const id=S.id;S.id='';returnDetail(id)}}
 async function returnDetail(id){
+  const isCurrent=beginModalRequest();
   const x=await api(`/v1.2/returns/${encodeURIComponent(id)}`);
   if(can('verification.read'))await loadTelesalesUsers();
+  if(!isCurrent())return;
   const verification=x.verification||{},reward=x.reward||{};
   const canFinalReview=can('return.review')&&x.status==='REVIEWING'&&verification.conclusion;
   const canChooseVerificationPath=can('return.review')&&['SUBMITTED','VERIFYING'].includes(x.status)&&!verification.conclusion;
@@ -1221,11 +1274,13 @@ async function returnDetail(id){
     document.querySelector('[data-return-direct-invalid]')?.addEventListener('click',()=>directInvalidReturn(id));
   });
 }
-function finalReview(id,decision){const actionLabel={APPROVE:'确认无效并返分',REJECT:'确认可用，回原领取人',NEED_MORE:'要求补充证据'}[decision]||'提交终审';actionForm({title:actionLabel,message:'终审严格以电销核实结论为准：确认可用时保留原领取人；确认无效时关闭客资并返分。',labelText:'终审说明',required:true,minLength:2,submitLabel:`确认${actionLabel}`,danger:decision==='APPROVE'},async note=>{await api(`/v1.2/returns/${encodeURIComponent(id)}/final-review`,{method:'POST',body:JSON.stringify({decision,note})});toast('终审完成');await returns()})}
-function directInvalidReturn(id){actionForm({title:'运营直接判定无效',message:'此操作将跳过电销核验，确认客资无效并按原领取流水返还积分，同时处理关联供资奖励。',labelText:'判定依据',required:true,minLength:2,submitLabel:'确认无效并返分',danger:true},async note=>{await api(`/v1.2/returns/${encodeURIComponent(id)}/direct-invalid`,{method:'POST',body:JSON.stringify({note})});toast('已直接判定无效并完成关联处理');await returns()})}
+function finalReview(id,decision){const actionLabel={APPROVE:'确认无效并返分',REJECT:'确认可用，回原领取人',NEED_MORE:'要求补充证据'}[decision]||'提交终审';actionForm({title:actionLabel,message:'终审严格以电销核实结论为准：确认可用时保留原领取人；确认无效时关闭客资并返分。',labelText:'终审说明',required:true,minLength:2,submitLabel:`确认${actionLabel}`,danger:decision==='APPROVE'},async note=>{await api(`/v1.2/returns/${encodeURIComponent(id)}/final-review`,{method:'POST',body:JSON.stringify({decision,note})});toast('终审完成');await refreshAfterSuccess(returns,'终审完成')})}
+function directInvalidReturn(id){actionForm({title:'运营直接判定无效',message:'此操作将跳过电销核验，确认客资无效并按原领取流水返还积分，同时处理关联供资奖励。',labelText:'判定依据',required:true,minLength:2,submitLabel:'确认无效并返分',danger:true},async note=>{await api(`/v1.2/returns/${encodeURIComponent(id)}/direct-invalid`,{method:'POST',body:JSON.stringify({note})});toast('已直接判定无效并完成关联处理');await refreshAfterSuccess(returns,'已直接判定无效并完成关联处理')})}
 async function taskDetail(id){
+  const isCurrent=beginModalRequest();
   const x=await api(`/v1.2/return-verifications/tasks/${encodeURIComponent(id)}`);
   await loadTelesalesUsers();
+  if(!isCurrent())return;
   const r=x.return_request||{},lead=x.lead||{},info=x.verification_info||{};
   const evidenceTotal=Object.values(r.evidence_summary||{}).reduce((sum,count)=>sum+Number(count||0),0);
   const finalAction=x.conclusion==='SUPPORT_RETURN'?'<button class="ops-btn primary" data-detail-final="APPROVE">确认无效并返分</button>':x.conclusion==='DOES_NOT_SUPPORT_RETURN'?'<button class="ops-btn primary" data-detail-final="REJECT">确认可用，回原领取人</button>':x.conclusion==='INCONCLUSIVE'?'<button class="ops-btn" data-detail-final="NEED_MORE">要求补充证据</button>':'';
@@ -1238,8 +1293,10 @@ async function taskDetail(id){
   });
 }
 async function assignTask(id){
+  const isCurrent=beginModalRequest();
   try{
     const users=await loadTelesalesUsers();
+    if(!isCurrent())return;
     const options=users.map(user=>`<option value="${esc(user.id)}">${esc(user.display_name||user.username)}${user.username?` · ${esc(user.username)}`:''}</option>`).join('');
     modal('派发退回电话核验',users.length?`<form class="ops-form" id="return-assignment-form"><div class="ops-notice">电销只核实事实，不决定是否退回加盟商。改派会记录原责任人、当前责任人与派发理由。</div><div class="ops-field"><label for="telesales-assignee">电销人员 *</label><select class="ops-input" id="telesales-assignee">${options}</select></div><div class="ops-field"><label for="return-assignment-reason">派发或改派原因 *</label><textarea class="ops-textarea" id="return-assignment-reason" placeholder="例如：原人员请假，交由另一位电销继续核验"></textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="return-assignment-cancel">取消</button><button class="ops-btn primary" id="confirm-assignment">确认分配</button></div></form>`:'<div class="ops-empty">暂无可分配的电销人员</div>',()=>{
       const form=document.querySelector('#return-assignment-form');
@@ -1254,8 +1311,8 @@ async function assignTask(id){
         try{
           await api(`/v1.2/return-verifications/tasks/${encodeURIComponent(id)}/assign`,{method:'POST',body:JSON.stringify({assignee_user_id:document.querySelector('#telesales-assignee').value,reason})});
           toast('电话核验任务已分配');
-          closeModal();
-          await returns();
+          closeModalFor(form);
+          await refreshAfterSuccess(returns,'电话核验任务已分配');
         }catch(error){submit.disabled=false;toast(error.message,true)}
       };
     });
@@ -1368,15 +1425,17 @@ function rechargeCompanyPoints(companyId,companies,packages){
       try{
         await api('/points/recharge',{method:'POST',body:JSON.stringify({company_id:targetCompanyId,package_id:packageSelect.value,cash_amount_cents:Number(packageSelect.selectedOptions[0].dataset.cash),external_reference,note,idempotency_key:`recharge-${crypto.randomUUID()}`,confirmed:true})});
         toast('积分充值已入账');
-        closeModal();
-        await finance();
+        closeModalFor(form);
+        await refreshAfterSuccess(finance,'积分充值已入账');
       }catch(error){submit.disabled=false;toast(error.message,true)}
     };
   });
 }
 function reconcileCompanyPoints(companyId,companies){
   const company=companies.find(item=>item.id===companyId);
+  const isCurrent=beginModalRequest();
   api(`/points/reconciliation/${encodeURIComponent(companyId)}`).then(result=>{
+    if(!isCurrent())return;
     const status=result.balanced?'账目一致':'发现对账差异';
     modal(`${company?.name||'加盟商'} · ${status}`,`<div class="ops-detail-grid">${[['流水期末余额',result.expected_closing_balance],['账户快照余额',result.snapshot_balance],['余额差异',result.difference],['流水顺序异常',result.sequence_error_count]].map(([name,value])=>`<div class="ops-detail"><small>${name}</small><b>${esc(value)}</b></div>`).join('')}</div><div class="ops-notice">${result.balanced?'余额、流水与顺序均已核对一致。':'发现差异，请停止人工资金写入，并依据审计记录和不可变流水排查。'}</div>`);
     toast(result.balanced?'积分对账一致':'发现对账异常，请处理',!result.balanced);
@@ -1387,30 +1446,32 @@ function adjustCompanyPoints(companyId,companies){
   modal(`为${company?.name||'加盟商'}人工调账`,`<form class="ops-form" id="adjust-form"><div class="ops-notice">调整会生成不可变流水。请填写关联公司、正负积分值和可复核的原因或凭证说明。</div><div class="ops-field"><label for="adjust-delta">调整积分 *</label><input class="ops-input" id="adjust-delta" type="number" inputmode="numeric" placeholder="正数增加，负数扣减"></div><div class="ops-field"><label for="adjust-reason">调账原因及凭证说明 *</label><textarea class="ops-textarea" id="adjust-reason" minlength="3" maxlength="500"></textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="adjust-cancel">取消</button><button class="ops-btn primary" id="adjust-submit">确认调账</button></div></form>`,()=>{
     const form=document.querySelector('#adjust-form');
     document.querySelector('#adjust-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const delta=Number(document.querySelector('#adjust-delta').value),reason=document.querySelector('#adjust-reason').value.trim(),submit=document.querySelector('#adjust-submit');if(!Number.isInteger(delta)||delta===0){toast('请输入非零整数积分',true);return}if(reason.length<3){toast('请填写至少 3 个字符的调账原因及凭证说明',true);return}submit.disabled=true;try{await api('/points/adjust',{method:'POST',body:JSON.stringify({company_id:companyId,delta,reason,idempotency_key:`adjust-${crypto.randomUUID()}`})});toast('人工调账已入账');closeModal();await finance()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const delta=Number(document.querySelector('#adjust-delta').value),reason=document.querySelector('#adjust-reason').value.trim(),submit=document.querySelector('#adjust-submit');if(!Number.isInteger(delta)||delta===0){toast('请输入非零整数积分',true);return}if(reason.length<3){toast('请填写至少 3 个字符的调账原因及凭证说明',true);return}submit.disabled=true;try{await api('/points/adjust',{method:'POST',body:JSON.stringify({company_id:companyId,delta,reason,idempotency_key:`adjust-${crypto.randomUUID()}`})});toast('人工调账已入账');closeModalFor(form);await refreshAfterSuccess(finance,'人工调账已入账')}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
   });
 }
 function reverseLedger(ledgerId){
-  actionForm({title:'确认冲正人工流水',message:'冲正会生成反向流水，不会编辑或删除历史记录。仅人工充值和人工调账可从此处冲正。',labelText:'冲正原因及凭证说明',required:true,minLength:3,submitLabel:'确认冲正',danger:true},async reason=>{await api(`/points/ledgers/${encodeURIComponent(ledgerId)}/reverse`,{method:'POST',body:JSON.stringify({reason,idempotency_key:`reverse-${crypto.randomUUID()}`})});toast('积分流水已冲正');await finance()});
+  actionForm({title:'确认冲正人工流水',message:'冲正会生成反向流水，不会编辑或删除历史记录。仅人工充值和人工调账可从此处冲正。',labelText:'冲正原因及凭证说明',required:true,minLength:3,submitLabel:'确认冲正',danger:true},async reason=>{await api(`/points/ledgers/${encodeURIComponent(ledgerId)}/reverse`,{method:'POST',body:JSON.stringify({reason,idempotency_key:`reverse-${crypto.randomUUID()}`})});toast('积分流水已冲正');await refreshAfterSuccess(finance,'积分流水已冲正')});
 }
 function newPointsPackage(){
   modal('新增充值档位',`<form class="ops-form" id="package-form"><div class="ops-field"><label for="package-code">档位代码 *</label><input class="ops-input" id="package-code" maxlength="64" placeholder="例如：V2-50000"></div><div class="ops-field"><label for="package-name">档位名称 *</label><input class="ops-input" id="package-name" maxlength="128" placeholder="例如：5 万积分标准档"></div><div class="ops-field"><label for="package-cash">线下实收金额（元） *</label><input class="ops-input" id="package-cash" type="number" min="0" step="0.01"></div><div class="ops-field"><label for="package-base">基础积分 *</label><input class="ops-input" id="package-base" type="number" min="1" step="1"></div><div class="ops-field"><label for="package-bonus">赠送积分</label><input class="ops-input" id="package-bonus" type="number" min="0" step="1" value="0"></div><div class="ops-field"><label for="package-level">适用等级</label><input class="ops-input" id="package-level" maxlength="32" value="V1"></div><div class="ops-field"><label for="package-entitlement">权益说明</label><textarea class="ops-textarea" id="package-entitlement" maxlength="500"></textarea></div><div class="ops-actions"><button class="ops-btn" type="button" id="package-cancel">取消</button><button class="ops-btn primary" id="package-submit">保存并发布</button></div></form>`,()=>{
     const form=document.querySelector('#package-form');document.querySelector('#package-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const code=document.querySelector('#package-code').value.trim(),name=document.querySelector('#package-name').value.trim(),cash=Math.round(Number(document.querySelector('#package-cash').value)*100),base=Number(document.querySelector('#package-base').value),bonus=Number(document.querySelector('#package-bonus').value||0),level=document.querySelector('#package-level').value.trim()||'V1',benefit=document.querySelector('#package-entitlement').value.trim(),submit=document.querySelector('#package-submit');if(code.length<2||name.length<2||!Number.isInteger(cash)||cash<0||!Number.isInteger(base)||base<=0||!Number.isInteger(bonus)||bonus<0){toast('请完整填写充值档位信息',true);return}submit.disabled=true;try{await api('/points/packages',{method:'POST',body:JSON.stringify({code,name,cash_amount_cents:cash,base_points:base,bonus_points:bonus,level_code:level,entitlements:benefit?{benefit_summary:benefit}:{},publish:true})});toast('充值档位已发布');closeModal();await finance()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const code=document.querySelector('#package-code').value.trim(),name=document.querySelector('#package-name').value.trim(),cash=Math.round(Number(document.querySelector('#package-cash').value)*100),base=Number(document.querySelector('#package-base').value),bonus=Number(document.querySelector('#package-bonus').value||0),level=document.querySelector('#package-level').value.trim()||'V1',benefit=document.querySelector('#package-entitlement').value.trim(),submit=document.querySelector('#package-submit');if(code.length<2||name.length<2||!Number.isInteger(cash)||cash<0||!Number.isInteger(base)||base<=0||!Number.isInteger(bonus)||bonus<0){toast('请完整填写充值档位信息',true);return}submit.disabled=true;try{await api('/points/packages',{method:'POST',body:JSON.stringify({code,name,cash_amount_cents:cash,base_points:base,bonus_points:bonus,level_code:level,entitlements:benefit?{benefit_summary:benefit}:{},publish:true})});toast('充值档位已发布');closeModalFor(form);await refreshAfterSuccess(finance,'充值档位已发布')}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
   });
 }
 function priceRulePriority(values){return 1000-(values.region_code?300:0)-(values.category_code?200:0)-(values.brand_code?100:0)-(values.level_code?50:0)}
 async function newPriceRule(){
+  const isCurrent=beginModalRequest();
   const [cities,categories,brands]=await Promise.all([
     platformCities(),
     api('/master-data/dictionaries/lead_category'),
     api('/master-data/dictionaries/brand'),
   ]);
+  if(!isCurrent())return;
   const cityOptions=`<option value="">全部地区</option>${cities.map(city=>`<option value="${esc(city.code)}">${esc(city.name)}</option>`).join('')}`;
   const dictionaryOptions=(items,label)=>`<option value="">${label}</option>${items.map(item=>`<option value="${esc(item.code)}">${esc(item.label)}</option>`).join('')}`;
   modal('新增客资积分价格规则',`<form class="ops-form" id="price-rule-form"><div class="ops-notice">字段留空表示“全部”，系统会优先匹配地区、类目、品牌和等级更具体的已发布规则。</div><div class="ops-field"><label for="rule-region">适用地区</label><select class="ops-input" id="rule-region">${cityOptions}</select></div><div class="ops-field"><label for="rule-category">业务类目</label><select class="ops-input" id="rule-category">${dictionaryOptions(categories,'全部类目')}</select></div><div class="ops-field"><label for="rule-brand">品牌</label><select class="ops-input" id="rule-brand">${dictionaryOptions(brands,'全部品牌')}</select></div><div class="ops-field"><label for="rule-level">加盟商等级</label><select class="ops-input" id="rule-level"><option value="">全部等级</option><option value="V1">V1</option><option value="V2">V2</option><option value="V3">V3</option></select></div><div class="ops-field"><label for="rule-cost">领取所需积分 *</label><input class="ops-input" id="rule-cost" type="number" min="1" step="1"></div><div class="ops-actions"><button class="ops-btn" type="button" id="price-rule-cancel">取消</button><button class="ops-btn primary" id="price-rule-submit">保存并发布</button></div></form>`,()=>{
     const form=document.querySelector('#price-rule-form');document.querySelector('#price-rule-cancel').onclick=closeModal;
-    form.onsubmit=async event=>{event.preventDefault();const values={region_code:document.querySelector('#rule-region').value||null,category_code:document.querySelector('#rule-category').value||null,brand_code:document.querySelector('#rule-brand').value||null,level_code:document.querySelector('#rule-level').value||null},points_cost=Number(document.querySelector('#rule-cost').value),submit=document.querySelector('#price-rule-submit');if(!Number.isInteger(points_cost)||points_cost<=0){toast('请输入正整数领取积分',true);return}submit.disabled=true;try{await api('/points/price-rules',{method:'POST',body:JSON.stringify({...values,points_cost,priority:priceRulePriority(values),publish:true})});toast('积分价格规则已发布');closeModal();await finance()}catch(error){submit.disabled=false;toast(error.message,true)}};
+    form.onsubmit=async event=>{event.preventDefault();const values={region_code:document.querySelector('#rule-region').value||null,category_code:document.querySelector('#rule-category').value||null,brand_code:document.querySelector('#rule-brand').value||null,level_code:document.querySelector('#rule-level').value||null},points_cost=Number(document.querySelector('#rule-cost').value),submit=document.querySelector('#price-rule-submit');if(!Number.isInteger(points_cost)||points_cost<=0){toast('请输入正整数领取积分',true);return}submit.disabled=true;try{await api('/points/price-rules',{method:'POST',body:JSON.stringify({...values,points_cost,priority:priceRulePriority(values),publish:true})});toast('积分价格规则已发布');closeModalFor(form);await refreshAfterSuccess(finance,'积分价格规则已发布')}catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}};
   });
 }
 function ruleSummary(rule){
@@ -1421,15 +1482,15 @@ function ruleSummary(rule){
 }
 function rewardSection(pageData,currentRule){const rows=(pageData.items||[]).map(item=>`<tr><td>${esc(recordCode(item.id,'JL'))}<br><small>派发编号 ${esc(recordCode(item.assignment_id,'PF'))}</small></td><td>${esc(recordCode(item.supplier_company_id,'加盟商'))}</td><td>${item.claim_points}</td><td>${item.reward_points}</td><td>${badge(item.status)}</td><td>${fmt(item.reward_due_at)}</td><td><button class="ops-btn" data-reward="${item.id}">查看</button>${item.status==='OBSERVING'?` <button class="ops-btn primary" data-settle="${item.id}">结算</button>`:''}${item.status==='SETTLED'?` <button class="ops-btn danger" data-reverse="${item.id}">撤销奖励</button>`:''}</td></tr>`);const pages=Math.max(1,Math.ceil((pageData.total||0)/(pageData.page_size||20)));const pager=`<div class="ops-pager"><button class="ops-btn" id="finance-reward-prev" ${S.financeRewardPage<=1?'disabled':''}>上一页</button><span>${S.financeRewardPage}/${pages}，共 ${pageData.total||0} 条</span><button class="ops-btn" id="finance-reward-next" ${S.financeRewardPage>=pages?'disabled':''}>下一页</button></div>`;return `${currentRule?`<section class="ops-card"><div class="ops-card-head"><div><h2>供客积分结算规则</h2><p>奖励只结算给提交客资的加盟商；领取客资的加盟商不获得供客奖励。</p></div></div>${ruleSummary(currentRule)}<div class="ops-actions"><button class="ops-btn gold" id="settle-due">结算已到期奖励</button></div></section>`:''}<section class="ops-card"><div class="ops-card-head"><div><h2>供客积分明细</h2><p>按客资提供方查看奖励；正式退回暂缓未入账奖励，通过后取消未入账奖励或冲回已入账奖励。</p></div></div>${table(['奖励编号','客资提供方','领取积分','奖励积分','状态','预计结算','操作'],rows)}${pager}</section>`}
 function bindRewardActions(currentRule){document.querySelectorAll('[data-reward]').forEach(button=>button.onclick=()=>rewardDetail(button.dataset.reward));document.querySelectorAll('[data-settle]').forEach(button=>button.onclick=()=>settle(button.dataset.settle));document.querySelectorAll('[data-reverse]').forEach(button=>button.onclick=()=>reverse(button.dataset.reverse));document.querySelector('#settle-due')?.addEventListener('click',settleDue);document.querySelector('#finance-reward-prev')?.addEventListener('click',()=>{if(S.financeRewardPage>1){S.financeRewardPage--;finance()}});document.querySelector('#finance-reward-next')?.addEventListener('click',()=>{S.financeRewardPage++;finance()});if(S.id){const id=S.id;S.id='';rewardDetail(id)}}
-async function rewardDetail(id){const x=await api(`/v1.2/supplier-rewards/${encodeURIComponent(id)}`);modal('奖励详情',`<div class="ops-detail-grid">${[['奖励编号',recordCode(x.id,'JL')],['派发编号',recordCode(x.assignment_id,'PF')],['加盟商',recordCode(x.supplier_company_id,'加盟商')],['接收公司',recordCode(x.receiver_company_id,'加盟商')],['状态',label(x.status)],['领取积分',x.claim_points],['奖励积分',x.reward_points],['预计结算',fmt(x.reward_due_at)],['实际到账',fmt(x.settled_at)]].map(([a,b])=>`<div class="ops-detail"><small>${a}</small><b>${esc(b??'--')}</b></div>`).join('')}</div><section class="ops-card"><h3>本笔奖励适用规则</h3>${ruleSummary(x.rule_snapshot||{})}</section><div class="ops-notice">正式退回申请会冻结未入账奖励；已入账奖励在退回通过时自动冲回，驳回则保持入账。冲回按业务单幂等执行。</div><button class="ops-btn" id="trace">查看客资详情</button>`,()=>document.querySelector('#trace').onclick=()=>{closeModal();go('trace',id)})}
-function settle(id){actionForm({title:'确认奖励结算',message:'请核对奖励状态、关联加盟商和积分金额。结算会写入不可变流水与审计。',labelText:'结算说明',required:true,minLength:3,submitLabel:'确认结算'},async note=>{await api(`/v1.2/admin/supplier-rewards/${encodeURIComponent(id)}/settle`,{method:'POST',body:JSON.stringify({note})});toast('结算指令已执行');await finance()})}
-function settleDue(){actionForm({title:'结算已到期奖励',message:'仅结算符合到期条件的奖励；冻结奖励不会入账。请填写本批处理的核验说明。',labelText:'批量结算说明',required:true,minLength:3,submitLabel:'确认批量结算'},async note=>{await api('/v1.2/admin/supplier-rewards/settle-due',{method:'POST',body:JSON.stringify({limit:500,note})});toast('到期奖励结算已执行');await finance()})}
-function reverse(id){actionForm({title:'确认奖励冲正',message:'冲正会生成反向流水，不会修改或删除历史记录。',labelText:'冲正原因及凭证说明',required:true,minLength:5,submitLabel:'确认冲正',danger:true},async note=>{await api(`/v1.2/admin/supplier-rewards/${encodeURIComponent(id)}/reverse`,{method:'POST',body:JSON.stringify({reason_code:'ADMIN_ERROR',note})});toast('奖励已冲正');await finance()})}
+async function rewardDetail(id){const isCurrent=beginModalRequest(),x=await api(`/v1.2/supplier-rewards/${encodeURIComponent(id)}`);if(isCurrent())modal('奖励详情',`<div class="ops-detail-grid">${[['奖励编号',recordCode(x.id,'JL')],['派发编号',recordCode(x.assignment_id,'PF')],['加盟商',recordCode(x.supplier_company_id,'加盟商')],['接收公司',recordCode(x.receiver_company_id,'加盟商')],['状态',label(x.status)],['领取积分',x.claim_points],['奖励积分',x.reward_points],['预计结算',fmt(x.reward_due_at)],['实际到账',fmt(x.settled_at)]].map(([a,b])=>`<div class="ops-detail"><small>${a}</small><b>${esc(b??'--')}</b></div>`).join('')}</div><section class="ops-card"><h3>本笔奖励适用规则</h3>${ruleSummary(x.rule_snapshot||{})}</section><div class="ops-notice">正式退回申请会冻结未入账奖励；已入账奖励在退回通过时自动冲回，驳回则保持入账。冲回按业务单幂等执行。</div><button class="ops-btn" id="trace">查看客资详情</button>`,()=>document.querySelector('#trace').onclick=()=>{closeModal();go('trace',id)})}
+function settle(id){actionForm({title:'确认奖励结算',message:'请核对奖励状态、关联加盟商和积分金额。结算会写入不可变流水与审计。',labelText:'结算说明',required:true,minLength:3,submitLabel:'确认结算'},async note=>{await api(`/v1.2/admin/supplier-rewards/${encodeURIComponent(id)}/settle`,{method:'POST',body:JSON.stringify({note})});toast('结算指令已执行');await refreshAfterSuccess(finance,'结算指令已执行')})}
+function settleDue(){actionForm({title:'结算已到期奖励',message:'仅结算符合到期条件的奖励；冻结奖励不会入账。请填写本批处理的核验说明。',labelText:'批量结算说明',required:true,minLength:3,submitLabel:'确认批量结算'},async note=>{await api('/v1.2/admin/supplier-rewards/settle-due',{method:'POST',body:JSON.stringify({limit:500,note})});toast('到期奖励结算已执行');await refreshAfterSuccess(finance,'到期奖励结算已执行')})}
+function reverse(id){actionForm({title:'确认奖励冲正',message:'冲正会生成反向流水，不会修改或删除历史记录。',labelText:'冲正原因及凭证说明',required:true,minLength:5,submitLabel:'确认冲正',danger:true},async note=>{await api(`/v1.2/admin/supplier-rewards/${encodeURIComponent(id)}/reverse`,{method:'POST',body:JSON.stringify({reason_code:'ADMIN_ERROR',note})});toast('奖励已冲正');await refreshAfterSuccess(finance,'奖励已冲正')})}
 function notificationFailureAdvice(item){if(item.status==='MANUAL_ACTION_REQUIRED')return '请检查接收人是否已绑定微信，以及对应消息模板是否已启用。';if(item.status==='DEAD')return '系统多次发送未成功，请检查消息配置后重新发送。';return '系统发送未成功，可确认配置后重新发送。'}
 function notificationFailureDetail(item){
-  modal('通知异常详情',`<div class="ops-detail-grid">${[['通知事项',notificationEventLabel(item.event_type)],['当前状态',notificationStatusLabel(item.status)],['已尝试',`${item.attempts||0} 次`],['创建时间',fmt(item.created_at)],['处理建议',notificationFailureAdvice(item)],['通知编号',recordCode(item.id,'TZ')]].map(([name,value])=>`<div class="ops-detail"><small>${esc(name)}</small><b>${esc(value)}</b></div>`).join('')}</div><div class="ops-notice">请先确认接收人绑定与模板配置，再重新发送。系统底层报错不会作为业务说明直接展示。</div><div class="ops-actions"><button class="ops-btn primary" id="retry-notification">重新发送</button></div>`,()=>document.querySelector('#retry-notification').onclick=async()=>{try{await retryOutbox(item.id);closeModal()}catch(error){toast(error.message,true)}});
+  modal('通知异常详情',`<div class="ops-detail-grid">${[['通知事项',notificationEventLabel(item.event_type)],['当前状态',notificationStatusLabel(item.status)],['已尝试',`${item.attempts||0} 次`],['创建时间',fmt(item.created_at)],['处理建议',notificationFailureAdvice(item)],['通知编号',recordCode(item.id,'TZ')]].map(([name,value])=>`<div class="ops-detail"><small>${esc(name)}</small><b>${esc(value)}</b></div>`).join('')}</div><div class="ops-notice">请先确认接收人绑定与模板配置，再重新发送。系统底层报错不会作为业务说明直接展示。</div><div class="ops-actions"><button class="ops-btn primary" id="retry-notification">重新发送</button></div>`,()=>{const button=document.querySelector('#retry-notification');button.onclick=async()=>{button.disabled=true;try{await retryOutbox(item.id);closeModalFor(button)}catch(error){if(button.isConnected)button.disabled=false;toast(error.message,true)}}});
 }
-async function retryOutbox(outboxId){await api(`/notifications/outbox/${encodeURIComponent(outboxId)}/retry`,{method:'POST'});toast('已加入重新发送队列');await audit()}
+async function retryOutbox(outboxId){await api(`/notifications/outbox/${encodeURIComponent(outboxId)}/retry`,{method:'POST'});toast('已加入重新发送队列');await refreshAfterSuccess(audit,'已加入重新发送队列')}
 const AUDIT_FIELD_LABEL={name:'名称',status:'状态',reason:'处理说明',note:'处理说明',username:'登录账号',display_name:'姓名',role_code:'角色',company_id:'加盟商',lead_id:'客资',assignment_id:'派发单',return_id:'退回申诉',points:'积分',points_cost:'所需积分',source_kind:'客资来源',review_status:'审核结果',region_code:'所在地',contact_result:'联系结果',conclusion:'核验结论'};
 const auditValue=value=>value==null||value===''?'--':Array.isArray(value)?value.map(auditValue).join('、'):typeof value==='object'?'已记录详情':readableLabel(value,String(value));
 Object.assign(AUDIT_FIELD_LABEL,{operation_claim_points:'运营客资领取积分',supplier_provision_points:'加盟商供客积分',configured:'已启用固定积分',version:'配置版本'});

@@ -56,7 +56,7 @@ def test_supplier_region_candidates_show_full_parent_path_and_clear_invalid_chil
     assert "districtSelect.value=''" in form
     assert "townshipSelect.value=''" in form
     assert "districtSearch.value=''" in form
-    assert "loadSupplyTownships('')" in form
+    assert "zsSetSafeHtml(townshipSelect,'<option value=\"\">请先选择区县</option>')" in form
     assert "districts.map(row=>`<option" in form
     assert "row.option_name||row.name" in form
     assert ".wb-region-empty[hidden]" in WORKBENCH_CSS.read_text(encoding="utf-8")
@@ -83,7 +83,7 @@ def test_supplier_workbench_assets_are_cache_busted_for_feedback_911() -> None:
     html = WORKBENCH_HTML.read_text(encoding="utf-8")
 
     assert "v12-workbench.css?v=20260911-feedback-911" in html
-    assert "v12-workbench.js?v=20260912-fixed-points-feedback" in html
+    assert "v12-workbench.js?v=20260913-reward-48h-modal" in html
 
 
 def test_supplier_customer_name_is_optional_and_blank_is_submitted_unchanged() -> None:

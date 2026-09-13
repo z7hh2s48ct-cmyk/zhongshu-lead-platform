@@ -10,7 +10,7 @@
 
 - 宝塔宿主 Nginx：终止 TLS 并将请求代理到 `127.0.0.1:${HTTP_PORT}`；容器 Nginx 仅提供回环 HTTP 网关，配置安全响应头、限流和 25MB 上传限制；
 - API：FastAPI，托管加盟商 H5、内部电销 H5、管理后台和业务接口；
-- Scheduler：处理通知 Outbox、领取/跟进任务、低积分提醒和每小时供应奖励结算；
+- Scheduler：处理通知 Outbox、领取/跟进任务、低积分提醒，并约每 5 分钟扫描到期供应奖励；
 - PostgreSQL 16：唯一生产主库；
 - 腾讯云 COS（上海 `ap-shanghai`）私有 Bucket：保存聊天截图和电话录音；
 - 日志与告警平台：采集 API、Scheduler、Nginx、数据库和备份任务；

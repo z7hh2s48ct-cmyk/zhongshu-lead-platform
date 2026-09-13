@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+
+
+ADMIN = Path("apps/admin/public/v12-operations.js")
+
+
+def run_reset_flow(scenario: str) -> dict:
+    source = ADMIN.read_text(encoding="utf-8")
+    form_handlers = source[source.index("let modalIntent="):source.index("function allowed(")]
+    password_handlers = source[
+        source.index("function resetCompanyAccountPassword("):source.index("async function dispatch(")
+    ]
+    harness = """
+const nodes={},messages=[],calls=[],copied=[],refreshed=[];
+let markup='';
+const modalRoot={get innerHTML(){return markup},set innerHTML(value){
+ for(const node of Object.values(nodes))node.isConnected=false;
+ for(const key of Object.keys(nodes))delete nodes[key];
+ markup=value;
+}};
+const document={body:{classList:{add(){},remove(){}}},
+ querySelector:key=>nodes[key]??={value:'',isConnected:true,focus(){}}};
+const zsSetSafeHtml=(node,html)=>{node.innerHTML=html};
+const esc=String,isSuperAdmin=()=>true;
+const toast=(message,error=false)=>messages.push({message,error});
+const companyAccounts=(...args)=>refreshed.push(args);
+let resetFailure=false,copyFailure=false,resetGate=null,finishReset=null;
+const api=async(path,options)=>{
+ calls.push({path,body:JSON.parse(options.body)});
+ if(resetGate)await resetGate;
+ if(resetFailure)throw new Error('重置失败');
+ return {initial_password:'SyntheticOnly9'};
+};
+const navigator={clipboard:{writeText:async value=>{
+ if(copyFailure)throw new Error('剪贴板不可用');
+ copied.push(value);
+}}};
+const submit=()=>nodes['#action-form'].onsubmit({preventDefault(){}});
+const result=()=>({html:modalRoot.innerHTML,messages:[...messages],calls:[...calls],
+ copied:[...copied],refreshed:[...refreshed],
+ disabled:nodes['#action-submit']?.disabled??null,
+ closeDisabled:nodes['#modal-close']?.disabled??null,
+ cancelDisabled:nodes['#action-cancel']?.disabled??null});
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "--eval", harness + form_handlers + password_handlers + """
+resetCompanyAccountPassword('test-company','test-user','测试公司');
+nodes['#action-value'].value='用户申请';
+""" + scenario],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=20,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_reset_keeps_new_password_visible_after_copy_until_saved() -> None:
+    outcome = run_reset_flow("""
+await submit();
+const shown=result();
+await nodes['#copy-initial-password'].onclick();
+const afterCopy=result();
+nodes['#initial-password-close'].onclick();
+console.log(JSON.stringify({shown,afterCopy,afterSave:result()}));
+""")
+    assert 'id="initial-password">SyntheticOnly9</b>' in outcome["shown"]["html"]
+    assert outcome["afterCopy"]["html"] == outcome["shown"]["html"]
+    assert outcome["afterCopy"]["copied"] == ["SyntheticOnly9"]
+    assert outcome["afterCopy"]["refreshed"] == []
+    assert outcome["afterSave"]["html"] == ""
+    assert outcome["afterSave"]["refreshed"] == [["test-company", "测试公司"]]
+    assert outcome["shown"]["calls"] == [{
+        "path": "/companies/test-company/accounts/test-user/reset-password",
+        "body": {"reason": "用户申请"},
+    }]
+
+
+def test_copy_failure_keeps_password_visible_for_manual_copy() -> None:
+    outcome = run_reset_flow("""
+await submit();copyFailure=true;
+await nodes['#copy-initial-password'].onclick();
+console.log(JSON.stringify(result()));
+""")
+    assert 'id="initial-password">SyntheticOnly9</b>' in outcome["html"]
+    assert outcome["copied"] == []
+    assert outcome["messages"] == [{"message": "浏览器不支持自动复制，请手动复制", "error": True}]
+
+
+def test_reset_request_cannot_be_closed_or_replaced_while_password_is_pending() -> None:
+    outcome = run_reset_flow("""
+resetGate=new Promise(resolve=>{finishReset=resolve});
+const pending=submit();
+closeModal();modal('其它弹窗','不应覆盖');
+const during=result();
+finishReset();await pending;
+console.log(JSON.stringify({during,after:result()}));
+""")
+    assert 'id="action-form"' in outcome["during"]["html"]
+    assert outcome["during"]["closeDisabled"] is True
+    assert outcome["during"]["cancelDisabled"] is True
+    assert 'id="initial-password">SyntheticOnly9</b>' in outcome["after"]["html"]
+
+
+def test_reset_failure_preserves_form_and_allows_retry() -> None:
+    outcome = run_reset_flow("""
+resetFailure=true;await submit();
+console.log(JSON.stringify(result()));
+""")
+    assert 'id="action-form"' in outcome["html"]
+    assert 'id="initial-password"' not in outcome["html"]
+    assert outcome["disabled"] is False
+    assert outcome["closeDisabled"] is False
+    assert outcome["cancelDisabled"] is False
+    assert outcome["messages"] == [{"message": "重置失败", "error": True}]

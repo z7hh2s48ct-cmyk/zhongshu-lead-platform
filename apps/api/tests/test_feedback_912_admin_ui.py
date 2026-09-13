@@ -151,6 +151,7 @@ def test_admin_reward_detail_displays_zero_points_as_zero():
 const api=async()=>({id:'reward-zero',reward_points:0,claim_points:100,
  rule_snapshot:{calculation_mode:'FIXED',fixed_points:0}});
 const esc=String,recordCode=String,label=String,fmt=()=>'',ruleSummary=()=>'';
+const beginModalRequest=()=>()=>true;
 let html='';const modal=(title,body)=>{html=body};
 """ + fragment("async function rewardDetail", "function settle(") + """
 await rewardDetail('reward-zero');

@@ -2,7 +2,7 @@ const API = '/api/v1';
 const app = document.querySelector('#app');
 const toastBox = document.querySelector('#toast');
 const sheetRoot = document.querySelector('#sheet-root');
-const S = { me: null, view: 'home', fundData: null };
+const S = { me: null, view: 'home', fundData: null, sheetSequence: 0 };
 
 const ROLE_META = {
   SUPER_ADMIN: {
@@ -57,9 +57,10 @@ function toast(message, error = false) {
   toast.timer = setTimeout(() => { toastBox.className = 'platform-toast'; }, 2400);
 }
 
-function closeSheet() { sheetRoot.innerHTML = ''; }
+function closeSheet() { S.sheetSequence++; sheetRoot.innerHTML = ''; }
 
 function openSheet(title, body, bind) {
+  S.sheetSequence++;
   zsSetSafeHtml(sheetRoot, `<div class="sheet-mask"><section class="sheet"><header class="sheet-head"><h2>${esc(title)}</h2><button class="btn small" id="sheet-close">关闭</button></header>${body}</section></div>`);
   document.querySelector('#sheet-close').onclick = closeSheet;
   bind?.();
@@ -196,10 +197,12 @@ async function funds() {
 }
 
 async function reconcile(companyId) {
+  const requestId = ++S.sheetSequence;
   try {
     const result = await api(`/points/reconciliation/${encodeURIComponent(companyId)}`);
+    if (requestId !== S.sheetSequence) return;
     openSheet(result.balanced ? '账目核对一致' : '发现账目差异', `<div class="detail-grid">${[['流水期末余额', result.expected_closing_balance], ['账户快照余额', result.snapshot_balance], ['余额差异', result.difference], ['流水顺序异常', result.sequence_error_count]].map(([key, value]) => `<div class="detail"><small>${key}</small><b>${esc(value)}</b></div>`).join('')}</div><p class="notice">${result.balanced ? '余额、流水和顺序均已核对一致。' : '请停止继续人工资金写入，并在桌面审计中依据不可变流水排查差异。'}</p>`);
-  } catch (error) { toast(error.message, true); }
+  } catch (error) { if (requestId === S.sheetSequence) toast(error.message, true); }
 }
 
 function rechargeSheet(companyId) {
@@ -209,7 +212,8 @@ function rechargeSheet(companyId) {
   if (!options) { toast('请先在桌面资金页配置可用充值档位', true); return; }
   openSheet(`为${company?.name || '加盟商'}充值`, `<form class="form" id="recharge-form"><div class="notice">请先完成线下收款核验。提交后写入不可变流水和审计。</div><div class="field"><label for="recharge-package">充值档位 *</label><select class="select" id="recharge-package">${options}</select></div><div class="field"><label for="recharge-reference">外部收款凭据号 *</label><input class="input" id="recharge-reference" minlength="3" maxlength="128"></div><div class="field"><label for="recharge-note">收款核验与凭证说明 *</label><textarea class="textarea" id="recharge-note" minlength="3" maxlength="500"></textarea></div><label class="check"><input type="checkbox" id="recharge-confirmed"> 我已核实本笔线下款项</label><div class="sheet-actions"><button type="button" class="btn" id="recharge-cancel">取消</button><button class="btn primary" id="recharge-submit">确认充值</button></div></form>`, () => {
     document.querySelector('#recharge-cancel').onclick = closeSheet;
-    document.querySelector('#recharge-form').onsubmit = async event => {
+    const form = document.querySelector('#recharge-form');
+    form.onsubmit = async event => {
       event.preventDefault();
       const reference = document.querySelector('#recharge-reference').value.trim();
       const note = document.querySelector('#recharge-note').value.trim();
@@ -219,8 +223,12 @@ function rechargeSheet(companyId) {
       try {
         const selected = document.querySelector('#recharge-package').selectedOptions[0];
         await api('/points/recharge', { method: 'POST', body: JSON.stringify({ company_id: companyId, package_id: selected.value, cash_amount_cents: Number(selected.dataset.cash), external_reference: reference, note, confirmed: true, idempotency_key: `h5-recharge-${crypto.randomUUID()}` }) });
-        closeSheet(); toast('积分已充值入账'); funds();
-      } catch (error) { button.disabled = false; toast(error.message, true); }
+      } catch (error) { button.disabled = false; toast(error.message, true); return; }
+      toast('积分已充值入账');
+      if (form.isConnected) {
+        closeSheet();
+        try { await funds(); } catch { toast('积分已充值入账，列表刷新失败，请手动刷新查看', true); }
+      }
     };
   });
 }
@@ -229,7 +237,8 @@ function adjustmentSheet(companyId) {
   const company = S.fundData.companies.find(item => item.id === companyId);
   openSheet(`为${company?.name || '加盟商'}人工调账`, `<form class="form" id="adjustment-form"><div class="notice">调整会生成不可变流水。请填写正负积分值及可复核的原因或凭证说明。</div><div class="field"><label for="adjustment-delta">调整积分 *</label><input class="input" id="adjustment-delta" type="number" inputmode="numeric" placeholder="正数增加，负数扣减"></div><div class="field"><label for="adjustment-reason">调账原因及凭证说明 *</label><textarea class="textarea" id="adjustment-reason" minlength="3" maxlength="500"></textarea></div><div class="sheet-actions"><button type="button" class="btn" id="adjustment-cancel">取消</button><button class="btn primary" id="adjustment-submit">确认调账</button></div></form>`, () => {
     document.querySelector('#adjustment-cancel').onclick = closeSheet;
-    document.querySelector('#adjustment-form').onsubmit = async event => {
+    const form = document.querySelector('#adjustment-form');
+    form.onsubmit = async event => {
       event.preventDefault();
       const delta = Number(document.querySelector('#adjustment-delta').value);
       const reason = document.querySelector('#adjustment-reason').value.trim();
@@ -237,8 +246,12 @@ function adjustmentSheet(companyId) {
       const button = document.querySelector('#adjustment-submit'); button.disabled = true;
       try {
         await api('/points/adjust', { method: 'POST', body: JSON.stringify({ company_id: companyId, delta, reason, idempotency_key: `h5-adjust-${crypto.randomUUID()}` }) });
-        closeSheet(); toast('积分调账已入账'); funds();
-      } catch (error) { button.disabled = false; toast(error.message, true); }
+      } catch (error) { button.disabled = false; toast(error.message, true); return; }
+      toast('积分调账已入账');
+      if (form.isConnected) {
+        closeSheet();
+        try { await funds(); } catch { toast('积分调账已入账，列表刷新失败，请手动刷新查看', true); }
+      }
     };
   });
 }
@@ -246,15 +259,20 @@ function adjustmentSheet(companyId) {
 function reversalSheet(ledgerId) {
   openSheet('确认人工流水冲正', `<form class="form" id="reversal-form"><div class="notice">仅能冲正人工充值和人工调账。领取、退回和奖励必须通过各自业务流程处理。</div><div class="field"><label for="reversal-reason">冲正原因及凭证说明 *</label><textarea class="textarea" id="reversal-reason" minlength="3" maxlength="500"></textarea></div><div class="sheet-actions"><button type="button" class="btn" id="reversal-cancel">取消</button><button class="btn danger" id="reversal-submit">确认冲正</button></div></form>`, () => {
     document.querySelector('#reversal-cancel').onclick = closeSheet;
-    document.querySelector('#reversal-form').onsubmit = async event => {
+    const form = document.querySelector('#reversal-form');
+    form.onsubmit = async event => {
       event.preventDefault();
       const reason = document.querySelector('#reversal-reason').value.trim();
       if (reason.length < 3) { toast('请填写至少 3 个字符的冲正说明', true); return; }
       const button = document.querySelector('#reversal-submit'); button.disabled = true;
       try {
         await api(`/points/ledgers/${encodeURIComponent(ledgerId)}/reverse`, { method: 'POST', body: JSON.stringify({ reason, idempotency_key: `h5-reverse-${crypto.randomUUID()}` }) });
-        closeSheet(); toast('人工流水已冲正'); funds();
-      } catch (error) { button.disabled = false; toast(error.message, true); }
+      } catch (error) { button.disabled = false; toast(error.message, true); return; }
+      toast('人工流水已冲正');
+      if (form.isConnected) {
+        closeSheet();
+        try { await funds(); } catch { toast('人工流水已冲正，列表刷新失败，请手动刷新查看', true); }
+      }
     };
   });
 }
@@ -348,6 +366,7 @@ function renderInvalidLink() {
 }
 
 async function render() {
+  closeSheet();
   if (!S.me) return renderLogin();
   if (!roleMeta()) return renderAccessDenied();
   S.view = routeName();
