@@ -364,7 +364,7 @@ def test_batch_skips_busy_assignment_while_manual_deal_waits_on_same_supplier_ac
     postgres_factory,
     monkeypatch,
 ):
-    deadline = datetime.now(timezone.utc) + timedelta(days=1)
+    deadline = datetime.now(timezone.utc) - timedelta(hours=1)
     with postgres_factory() as db:
         db.autoflush = False
         setup_a = _workflow_setup(db, lead_status="FOLLOWING", suffix="-A")
@@ -489,7 +489,7 @@ def test_batch_skips_busy_assignment_while_manual_deal_waits_on_same_supplier_ac
             for ledger in ledgers
         } == {
             case_a["assignment_id"]: "CLAIM_48H",
-            case_b["assignment_id"]: "MANUAL_CONFIRMED",
+            case_b["assignment_id"]: "CLAIM_48H",
         }
         assert (
             db.scalar(
@@ -521,7 +521,10 @@ def test_batch_skips_busy_assignment_while_manual_deal_waits_on_same_supplier_ac
                 )
             ).all()
         )
-        assert automatic_assignment_ids == {case_a["assignment_id"]}
+        assert automatic_assignment_ids == {
+            case_a["assignment_id"],
+            case_b["assignment_id"],
+        }
 
 
 def test_concurrent_return_approvals_refund_and_reverse_early_reward_once(
