@@ -342,6 +342,7 @@ def reconcile_v12(db: Session, *, require_completed_backfill: bool = True) -> Re
 
     account_mismatches: list[dict[str, Any]] = []
     sequence_error_total = 0
+    kind_errors: list[dict[str, Any]] = []
     accounts = list(db.scalars(select(PointsAccount).order_by(PointsAccount.company_id)).all())
     for account in accounts:
         ledgers = list(
@@ -351,16 +352,44 @@ def reconcile_v12(db: Session, *, require_completed_backfill: bool = True) -> Re
                 .order_by(PointsLedger.created_at.asc(), PointsLedger.id.asc())
             ).all()
         )
-        running = 0
+        running = {"CUSTOMER": 0, "SUPPLY": 0}
+        ledger_by_id = {ledger.id: ledger for ledger in ledgers}
         sequence_errors: list[dict[str, Any]] = []
         company_errors: list[dict[str, Any]] = []
         for ledger in ledgers:
-            running += int(ledger.delta)
-            if int(ledger.balance_after) != running:
+            kind = ledger.point_kind
+            if kind not in running:
+                kind_errors.append({"ledger_id": ledger.id, "point_kind": kind, "reason": "UNKNOWN_POINT_KIND"})
+                continue
+            required_kind = {
+                "REWARD": "SUPPLY",
+                "RECHARGE": "CUSTOMER",
+                "CLAIM": "CUSTOMER",
+                "RETURN": "CUSTOMER",
+            }.get(ledger.ledger_type)
+            if required_kind and kind != required_kind:
+                kind_errors.append({
+                    "ledger_id": ledger.id,
+                    "point_kind": kind,
+                    "expected_point_kind": required_kind,
+                    "reason": "BUSINESS_TYPE_MISMATCH",
+                })
+            if ledger.ledger_type == "REVERSAL":
+                original = ledger_by_id.get(ledger.related_ledger_id)
+                if original is None or original.point_kind != kind:
+                    kind_errors.append({
+                        "ledger_id": ledger.id,
+                        "point_kind": kind,
+                        "related_ledger_id": ledger.related_ledger_id,
+                        "reason": "REVERSAL_KIND_MISMATCH",
+                    })
+            running[kind] += int(ledger.delta)
+            if int(ledger.balance_after) != running[kind]:
                 sequence_errors.append(
                     {
                         "ledger_id": ledger.id,
-                        "expected_balance_after": running,
+                        "point_kind": kind,
+                        "expected_balance_after": running[kind],
                         "actual_balance_after": int(ledger.balance_after),
                     }
                 )
@@ -373,19 +402,20 @@ def reconcile_v12(db: Session, *, require_completed_backfill: bool = True) -> Re
                     }
                 )
         sequence_error_total += len(sequence_errors)
-        latest_balance = int(ledgers[-1].balance_after) if ledgers else None
+        account_balances = {
+            "CUSTOMER": int(account.balance),
+            "SUPPLY": int(account.supply_balance),
+        }
         if (
-            running != int(account.balance)
-            or (latest_balance is not None and latest_balance != int(account.balance))
+            running != account_balances
             or sequence_errors
             or company_errors
         ):
             account_mismatches.append(
                 {
                     "company_id": account.company_id,
-                    "account_balance": int(account.balance),
-                    "ledger_sum": running,
-                    "latest_balance_after": latest_balance,
+                    "account_balances": account_balances,
+                    "ledger_sums": running,
                     "sequence_error_count": len(sequence_errors),
                     "sequence_errors": sequence_errors[:_MAX_SEMANTIC_SAMPLES],
                     "company_error_count": len(company_errors),
@@ -395,12 +425,22 @@ def reconcile_v12(db: Session, *, require_completed_backfill: bool = True) -> Re
     report.metrics["points_accounts_total"] = len(accounts)
     report.metrics["points_account_mismatches"] = len(account_mismatches)
     report.metrics["points_ledger_sequence_errors"] = sequence_error_total
+    report.metrics["points_ledger_kind_errors"] = len(kind_errors)
     if account_mismatches:
         report.errors.append(
             _issue(
                 "POINTS_RECONCILIATION_MISMATCH",
                 "积分账户与不可变流水不一致",
                 samples=account_mismatches[:_MAX_SEMANTIC_SAMPLES],
+            )
+        )
+    if kind_errors:
+        report.errors.append(
+            _issue(
+                "POINTS_LEDGER_KIND_MISMATCH",
+                "积分流水业务类型与积分账户不一致",
+                count=len(kind_errors),
+                samples=kind_errors[:_MAX_SEMANTIC_SAMPLES],
             )
         )
 

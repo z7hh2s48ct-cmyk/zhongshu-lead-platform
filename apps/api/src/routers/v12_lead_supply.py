@@ -36,6 +36,7 @@ from ..schemas.v12_lead_supply import (
     TestLeadDeleteBody,
 )
 from ..services.lead_deletion_v12 import delete_operation_lead, preview_lead_deletion, require_lead_not_deleted
+from ..services.supply_termination import require_supply_write_enabled
 from ..services.audit import write_audit
 from ..services.company_profile_v12 import (
     list_capabilities,
@@ -1068,6 +1069,7 @@ def create_supplier_lead(
     principal=Depends(require_permissions("supplier.lead.manage")),
     db: Session = Depends(get_db),
 ):
+    require_supply_write_enabled(db, principal.company_id)
     lead = create_draft(
         db,
         principal=principal,
@@ -1095,6 +1097,7 @@ def update_supplier_lead(
     principal=Depends(require_permissions("supplier.lead.manage")),
     db: Session = Depends(get_db),
 ):
+    require_supply_write_enabled(db, principal.company_id)
     lead = get_lead_or_404(db, lead_id)
     before = lead_supply_to_dict(lead, principal)
     update_draft(db, lead=lead, principal=principal, values=body.model_dump(exclude_unset=True))
@@ -1143,6 +1146,7 @@ def revise_rejected_supplier_lead(
     principal=Depends(require_permissions("supplier.lead.manage")),
     db: Session = Depends(get_db),
 ):
+    require_supply_write_enabled(db, principal.company_id)
     lead = get_lead_or_404(db, lead_id)
     before = lead_supply_to_dict(lead, principal)
     reopen_rejected_supplier_lead(db, lead=lead, principal=principal)
@@ -1168,6 +1172,7 @@ def submit_supplier_lead(
     principal=Depends(require_permissions("supplier.lead.manage")),
     db: Session = Depends(get_db),
 ):
+    require_supply_write_enabled(db, principal.company_id)
     lead = get_lead_or_404(db, lead_id)
     result = submit_draft(db, lead=lead, principal=principal)
     write_audit(

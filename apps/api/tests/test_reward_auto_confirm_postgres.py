@@ -602,7 +602,7 @@ def test_concurrent_return_approvals_refund_and_reverse_early_reward_once(
         )
         assert request.status == "APPROVED"
         assert reward.status == "REVERSED"
-        assert supplier_account.balance == 0
+        assert supplier_account.supply_balance == 0
         assert receiver_account.balance == 1000
         assert (
             db.scalar(
@@ -669,6 +669,7 @@ def test_return_approval_reverses_exactly_after_concurrent_supplier_spend(
                 business_id=case["reward_id"],
                 idempotency_key=f"test-concurrent-spend:{case['reward_id']}",
                 created_by=case["reviewer"].user_id,
+                point_kind="SUPPLY",
             )
             db.commit()
 
@@ -720,7 +721,7 @@ def test_return_approval_reverses_exactly_after_concurrent_supplier_spend(
             )
         )
         reward = db.get(SupplierLeadReward, case["reward_id"])
-        assert supplier_account.balance == -25
+        assert supplier_account.supply_balance == -25
         assert receiver_account.balance == 1000
         assert reward.status == "REVERSED"
         assert (
@@ -856,7 +857,7 @@ def test_batch_skips_account_locked_by_return_then_settles_next_run(
                 PointsAccount.company_id == return_case["supplier_company_id"]
             )
         )
-        assert supplier_account.balance == 30
+        assert supplier_account.supply_balance == 30
         assert (
             db.scalar(
                 select(func.count(PointsLedger.id)).where(

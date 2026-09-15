@@ -15,9 +15,11 @@ from apps.api.src.core.models import (
     PointsAccount,
     PointsLedger,
     ReturnRequest,
+    SupplyTerminationRequest,
     User,
 )
 from apps.api.src.core.models_v12 import SupplierLeadReward
+from apps.api.src.core.security import encrypt_text
 from apps.api.src.services.points_service import reverse_ledger
 
 
@@ -296,6 +298,65 @@ def test_operation_can_read_report_and_audit_after_sprint5_rbac(api_client):
 
     assert client.get("/api/v1/v1.2/reports/overview").status_code == 200
     assert client.get("/api/v1/v1.2/audit-events").status_code == 200
+
+
+def test_operation_audit_cannot_read_full_supply_termination_payment_reference(api_client):
+    client, factory = api_client
+    with factory() as db:
+        admin = db.scalar(select(User).where(User.username == "admin"))
+        assert admin is not None
+        company = Company(
+            code="AUDIT-PAYMENT-MASK",
+            name="付款审计脱敏公司",
+            status="ACTIVE",
+            supplier_cooperation_status="TERMINATION_PENDING",
+        )
+        db.add(company)
+        db.flush()
+        db.add(PointsAccount(company_id=company.id, balance=100))
+        termination = SupplyTerminationRequest(
+            company_id=company.id,
+            status="APPROVED_PENDING_PAYMENT",
+            reason="停止提供客资",
+            requested_by=admin.id,
+            payee_name_encrypted=encrypt_text("张三"),
+            payee_account_encrypted=encrypt_text("6222000012345678"),
+            payment_method="BANK_TRANSFER",
+            blockers_json=[],
+            customer_points_snapshot=100,
+            supply_points_snapshot=0,
+            general_points_snapshot=100,
+            cash_cents_per_point_snapshot=25,
+            cash_amount_cents_snapshot=2500,
+        )
+        db.add(termination)
+        db.commit()
+        termination_id = termination.id
+
+    login(client, "admin", "Admin123!")
+    payment_reference = "BANK-SENSITIVE-123456"
+    paid = client.post(
+        f"/api/v1/v1.2/supply-terminations/{termination_id}/payment",
+        json={
+            "external_reference": payment_reference,
+            "paid_at": datetime.now(timezone.utc).isoformat(),
+            "payment_amount_cents": 2500,
+            "note": "已核对线下付款",
+        },
+    )
+    assert paid.status_code == 200, paid.text
+
+    login(client, "operation", "Operation123!")
+    response = client.get(
+        "/api/v1/v1.2/audit-events?action=V12_SUPPLY_TERMINATION_PAYMENT_RECORDED"
+    )
+    assert response.status_code == 200, response.text
+    assert payment_reference not in response.text
+    event = response.json()["data"]["items"][0]
+    assert event["after"]["payment_external_reference_masked"] == (
+        "*" * (len(payment_reference) - 4) + "3456"
+    )
+    assert "payment_external_reference" not in event["after"]
 
 
 def test_audit_events_expose_the_business_operator_name(api_client):

@@ -23,11 +23,13 @@ from apps.api.src.core.models import (
     ReturnEvidence,
     ReturnRequest,
     StorageCleanupOutbox,
+    SupplyTerminationRequest,
     User,
     WechatIdentity,
 )
 from apps.api.src.core.models_v12 import LeadDedupEvent, SupplierLeadReward
 from apps.api.src.services.auth_service import bind_wechat_by_invite
+from apps.api.src.core.security import encrypt_text
 from apps.api.src.services.outbox_worker import process_outbox
 from apps.api.src.services.storage import get_storage
 from apps.api.src.services.storage_cleanup_worker import process_storage_cleanup
@@ -269,7 +271,19 @@ def test_delete_removes_disabled_test_company_and_binding(api_client) -> None:
         company_id,
         "openid-delete-test",
     )
+    with factory() as db:
+        db.add(SupplyTerminationRequest(
+            company_id=company_id,
+            status="CANCELLED",
+            reason="测试结算记录",
+            requested_by=owner_user_id,
+            payee_name_encrypted=encrypt_text("测试收款人"),
+            payee_account_encrypted=encrypt_text("6222000012345678"),
+            payment_method="BANK_TRANSFER",
+        ))
+        db.commit()
     _disable_company(client, operation, company_id)
+    assert _purge_preview(client, admin, company_id)["counts"]["supply_terminations"] == 1
     with factory() as db:
         unrelated_notification = Notification(
             user_id=owner_user_id,
@@ -1068,11 +1082,12 @@ def test_test_receiver_can_be_deleted_after_supplier_reward_settlement(api_clien
         )
         db.add(reward)
         db.flush()
-        supplier_account.balance = 30
+        supplier_account.supply_balance = 30
         reward_ledger = PointsLedger(
             account_id=supplier_account.id,
             company_id=supplier_id,
             ledger_type="REWARD",
+            point_kind="SUPPLY",
             delta=30,
             balance_after=30,
             business_type="V12_SUPPLIER_REWARD",
@@ -1106,7 +1121,7 @@ def test_test_receiver_can_be_deleted_after_supplier_reward_settlement(api_clien
         assert db.get(PointsLedger, reward_ledger_id) is None
         supplier_account = db.get(PointsAccount, supplier_account_id)
         assert supplier_account is not None
-        assert supplier_account.balance == 0
+        assert supplier_account.supply_balance == 0
 
 
 def test_test_marker_cannot_be_changed_through_general_company_update(api_client) -> None:

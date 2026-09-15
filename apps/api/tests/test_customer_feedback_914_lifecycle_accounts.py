@@ -245,7 +245,7 @@ def test_operation_deletion_settles_reward_that_was_already_effective(db):
     supplier_account = db.scalar(
         select(PointsAccount).where(PointsAccount.company_id == supplier.id)
     )
-    assert supplier_account is not None and supplier_account.balance == 30
+    assert supplier_account is not None and supplier_account.supply_balance == 30
     assert assignment.status == "RELEASED"
     assert lead.current_assignment_id is None
 

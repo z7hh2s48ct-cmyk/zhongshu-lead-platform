@@ -25,7 +25,7 @@ from ..core.state_machine_v12 import assert_reward_transition
 from ..core.time import as_utc
 from ..core.v12_enums import ReturnV12Status, RewardStatus
 from .lead_correction_guard import CORRECTION_REVIEW_REASON
-from .points_service import change_points, get_or_create_account
+from .points_service import change_points
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,7 @@ REWARD_SETTLEMENT_BLOCKED_CODES = {
     "REWARD_CORRECTION_PENDING",
     "REWARD_SETTLEMENT_BUSY",
     "REWARD_LEAD_DELETED",
+    "POINTS_SPLIT_RECONCILIATION_REQUIRED",
 }
 
 
@@ -500,6 +501,7 @@ def settle_supplier_reward(
         business_id=reward.id,
         idempotency_key=f"v12-reward:{reward.id}:settle",
         created_by=settled_by,
+        point_kind="SUPPLY",
         metadata={
             "assignment_id": reward.assignment_id,
             "lead_id": reward.lead_id,
@@ -701,53 +703,6 @@ def drain_due_supplier_reward_settlement(
     return totals
 
 
-def _change_points_allow_negative(
-    db: Session,
-    *,
-    company_id: str,
-    delta: int,
-    business_id: str,
-    idempotency_key: str,
-    related_ledger_id: str,
-    created_by: str,
-    metadata: dict[str, Any],
-) -> PointsLedger:
-    existing = db.scalar(
-        select(PointsLedger).where(
-            PointsLedger.company_id == company_id,
-            PointsLedger.idempotency_key == idempotency_key,
-        )
-    )
-    if existing:
-        return existing
-    account = db.scalar(
-        select(PointsAccount)
-        .where(PointsAccount.company_id == company_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if account is None:
-        account = get_or_create_account(db, company_id)
-    account.balance = int(account.balance) + int(delta)
-    account.version += 1
-    ledger = PointsLedger(
-        account_id=account.id,
-        company_id=company_id,
-        ledger_type=PointsLedgerType.REVERSAL.value,
-        delta=delta,
-        balance_after=int(account.balance),
-        business_type="V12_SUPPLIER_REWARD_REVERSAL",
-        business_id=business_id,
-        idempotency_key=idempotency_key,
-        related_ledger_id=related_ledger_id,
-        metadata_json=metadata,
-        created_by=created_by,
-    )
-    db.add(ledger)
-    db.flush()
-    return ledger
-
-
 def reverse_supplier_reward(
     db: Session,
     *,
@@ -807,14 +762,26 @@ def reverse_supplier_reward(
     ):
         raise AppError("REWARD_LEDGER_MISSING", "未找到原奖励结算流水", 409)
 
-    ledger = _change_points_allow_negative(
+    from .supply_termination import prepare_supplier_reward_reversal
+
+    prepare_supplier_reward_reversal(
+        db,
+        company_id=reward.supplier_company_id,
+        reward_id=reward.id,
+    )
+
+    ledger = change_points(
         db,
         company_id=reward.supplier_company_id,
         delta=-abs(int(original.delta)),
+        ledger_type=PointsLedgerType.REVERSAL.value,
+        business_type="V12_SUPPLIER_REWARD_REVERSAL",
         business_id=reward.id,
         idempotency_key=f"v12-reward:{reward.id}:reverse",
         related_ledger_id=original.id,
         created_by=reversed_by,
+        point_kind="SUPPLY",
+        allow_negative=True,
         metadata={
             "reason_code": normalized_reason,
             "note": note.strip(),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import os
 import subprocess
 import sys
@@ -628,3 +628,266 @@ def test_feedback_migration_downgrade_refuses_to_drop_business_data(
     assert "source_detail" not in {
         column["name"] for column in inspector.get_columns("leads")
     }
+
+
+def test_supply_wallet_migration_preserves_total_and_blocks_bad_accounts(tmp_path: Path) -> None:
+    database = tmp_path / "supply-wallet-split.db"
+    database_url = f"sqlite:///{database}"
+    _alembic(database_url, "upgrade", "0020_audit_action_resource_index")
+    engine = create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine)
+    companies = metadata.tables["companies"]
+    accounts = metadata.tables["points_accounts"]
+    ledgers = metadata.tables["points_ledgers"]
+    now = datetime.now(timezone.utc)
+    valid_company, blocked_company, missing_reward_company, sequence_company, orphan_reward_company = (
+        str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    )
+    valid_account, blocked_account, missing_reward_account, sequence_account, orphan_reward_account = (
+        str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    )
+    reward_ledger_id = str(uuid.uuid4())
+    supplier_rewards = metadata.tables["supplier_lead_rewards"]
+    with engine.begin() as connection:
+        connection.execute(companies.insert(), [
+            _required_row(companies, id=valid_company, code="SPLIT-OK", name="可分账", status="ACTIVE", created_at=now, updated_at=now),
+            _required_row(companies, id=blocked_company, code="SPLIT-BAD", name="异常分账", status="ACTIVE", created_at=now, updated_at=now),
+            _required_row(companies, id=missing_reward_company, code="SPLIT-MISSING", name="奖励关联缺失", status="ACTIVE", created_at=now, updated_at=now),
+            _required_row(companies, id=sequence_company, code="SPLIT-SEQUENCE", name="流水顺序异常", status="ACTIVE", created_at=now, updated_at=now),
+            _required_row(companies, id=orphan_reward_company, code="SPLIT-ORPHAN", name="奖励流水缺失", status="ACTIVE", created_at=now, updated_at=now),
+        ])
+        connection.execute(accounts.insert(), [
+            _required_row(accounts, id=valid_account, company_id=valid_company, balance=60, version=1, created_at=now, updated_at=now),
+            _required_row(accounts, id=blocked_account, company_id=blocked_company, balance=-1, version=1, created_at=now, updated_at=now),
+            _required_row(accounts, id=missing_reward_account, company_id=missing_reward_company, balance=10, version=1, created_at=now, updated_at=now),
+            _required_row(accounts, id=sequence_account, company_id=sequence_company, balance=10, version=1, created_at=now, updated_at=now),
+            _required_row(accounts, id=orphan_reward_account, company_id=orphan_reward_company, balance=0, version=1, created_at=now, updated_at=now),
+        ])
+        connection.execute(supplier_rewards.insert(), [
+            _required_row(
+                supplier_rewards,
+                id="reward-1",
+                lead_id="reward-lead-1",
+                assignment_id="reward-assignment-1",
+                supplier_company_id=valid_company,
+                receiver_company_id=valid_company,
+                status="SETTLED",
+                reward_points=100,
+                ledger_id=reward_ledger_id,
+                created_at=now,
+                updated_at=now,
+            ),
+            _required_row(
+                supplier_rewards,
+                id="orphan-reward",
+                lead_id="orphan-reward-lead",
+                assignment_id="orphan-reward-assignment",
+                supplier_company_id=orphan_reward_company,
+                receiver_company_id=orphan_reward_company,
+                status="SETTLED",
+                reward_points=20,
+                ledger_id=None,
+                created_at=now,
+                updated_at=now,
+            ),
+        ])
+        connection.execute(ledgers.insert(), [
+            _required_row(ledgers, id=reward_ledger_id, account_id=valid_account, company_id=valid_company, ledger_type="REWARD", delta=100, balance_after=100, business_type="V12_SUPPLIER_REWARD", business_id="reward-1", idempotency_key="split-reward-1", created_at=now),
+            _required_row(ledgers, id=str(uuid.uuid4()), account_id=valid_account, company_id=valid_company, ledger_type="CLAIM", delta=-40, balance_after=60, business_type="ASSIGNMENT", business_id="claim-1", idempotency_key="split-claim-1", created_at=now + timedelta(seconds=1)),
+            _required_row(ledgers, id=str(uuid.uuid4()), account_id=blocked_account, company_id=blocked_company, ledger_type="CLAIM", delta=-1, balance_after=-1, business_type="ASSIGNMENT", business_id="claim-bad", idempotency_key="split-claim-bad", created_at=now),
+            _required_row(ledgers, id=str(uuid.uuid4()), account_id=missing_reward_account, company_id=missing_reward_company, ledger_type="REWARD", delta=10, balance_after=10, business_type="V12_SUPPLIER_REWARD", business_id="missing-reward", idempotency_key="split-missing-reward", created_at=now),
+            _required_row(ledgers, id=str(uuid.uuid4()), account_id=sequence_account, company_id=sequence_company, ledger_type="ADJUST", delta=20, balance_after=19, business_type="MANUAL_ADJUSTMENT", business_id="bad-sequence-1", idempotency_key="bad-sequence-1", created_at=now),
+            _required_row(ledgers, id=str(uuid.uuid4()), account_id=sequence_account, company_id=sequence_company, ledger_type="CLAIM", delta=-10, balance_after=10, business_type="ASSIGNMENT", business_id="bad-sequence-2", idempotency_key="bad-sequence-2", created_at=now + timedelta(seconds=1)),
+        ])
+    _alembic(database_url, "upgrade", "head")
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["points_accounts", "points_ledgers", "system_configs"])
+    accounts, ledgers = metadata.tables["points_accounts"], metadata.tables["points_ledgers"]
+    with engine.connect() as connection:
+        valid = connection.execute(sa.select(accounts).where(accounts.c.id == valid_account)).mappings().one()
+        blocked = connection.execute(sa.select(accounts).where(accounts.c.id == blocked_account)).mappings().one()
+        missing_reward = connection.execute(sa.select(accounts).where(accounts.c.id == missing_reward_account)).mappings().one()
+        bad_sequence = connection.execute(sa.select(accounts).where(accounts.c.id == sequence_account)).mappings().one()
+        orphan_reward = connection.execute(sa.select(accounts).where(accounts.c.id == orphan_reward_account)).mappings().one()
+        deltas = connection.execute(sa.select(ledgers.c.point_kind, sa.func.sum(ledgers.c.delta)).where(
+            ledgers.c.company_id == valid_company
+        ).group_by(ledgers.c.point_kind)).all()
+        rate_count = connection.execute(sa.text(
+            "SELECT count(*) FROM system_configs WHERE domain='supply_termination' AND key='cashout_rate'"
+        )).scalar_one()
+        legacy_balance = connection.execute(sa.select(ledgers.c.legacy_balance_after).where(ledgers.c.id == reward_ledger_id)).scalar_one()
+        split_metadata = connection.execute(sa.select(ledgers.c.metadata_json).where(
+            ledgers.c.business_type == "POINTS_WALLET_SPLIT",
+            ledgers.c.company_id == valid_company,
+        )).scalars().first()
+    assert valid["balance"] == 0
+    assert valid["supply_balance"] == 60
+    assert valid["balance"] + valid["supply_balance"] == 60
+    assert dict(deltas) == {"CUSTOMER": 0, "SUPPLY": 60}
+    assert blocked["points_split_status"] == "BLOCKED"
+    assert valid["points_split_snapshot_json"] == {
+        "rule_version": 1, "old_balance": 60, "ledger_total": 60,
+        "reward_net": 100, "customer_result": 0, "supply_result": 60,
+        "exception_reason": None,
+    }
+    assert blocked["points_split_snapshot_json"]["exception_reason"] == "NEGATIVE_BALANCE"
+    assert missing_reward["points_split_status"] == "BLOCKED"
+    assert missing_reward["points_split_snapshot_json"]["exception_reason"] == "MISSING_REWARD_ASSOCIATION"
+    assert bad_sequence["points_split_status"] == "BLOCKED"
+    assert bad_sequence["points_split_snapshot_json"]["exception_reason"] == "LEDGER_SEQUENCE_MISMATCH"
+    assert orphan_reward["points_split_status"] == "BLOCKED"
+    assert orphan_reward["points_split_snapshot_json"]["exception_reason"] == "MISSING_REWARD_LEDGER"
+    assert legacy_balance == 100
+    assert split_metadata["old_balance"] == 60 and split_metadata["zero_sum"] is True
+    assert blocked["balance"] == -1 and blocked["supply_balance"] == 0
+    assert rate_count == 0
+
+    _alembic(database_url, "downgrade", "0020_audit_action_resource_index")
+    downgraded = sa.MetaData()
+    downgraded.reflect(engine, only=["points_accounts", "points_ledgers"])
+    old_accounts, old_ledgers = downgraded.tables["points_accounts"], downgraded.tables["points_ledgers"]
+    with engine.connect() as connection:
+        assert connection.execute(sa.select(old_accounts.c.balance).where(old_accounts.c.id == valid_account)).scalar_one() == 60
+        sequence = connection.execute(sa.select(old_ledgers.c.balance_after).where(
+            old_ledgers.c.company_id == valid_company
+        ).order_by(old_ledgers.c.created_at, old_ledgers.c.id)).scalars().all()
+        assert sequence == [100, 60]
+        assert connection.execute(sa.select(sa.func.sum(old_ledgers.c.delta)).where(old_ledgers.c.company_id == valid_company)).scalar_one() == 60
+
+    _alembic(database_url, "upgrade", "head")
+
+
+def test_supply_wallet_downgrade_refuses_to_drop_settlement_history(tmp_path: Path) -> None:
+    database = tmp_path / "supply-wallet-history.db"
+    database_url = f"sqlite:///{database}"
+    _alembic(database_url, "upgrade", "head")
+    engine = create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine, only=["companies", "supply_termination_requests"])
+    companies = metadata.tables["companies"]
+    requests = metadata.tables["supply_termination_requests"]
+    now = datetime.now(timezone.utc)
+    company_id = str(uuid.uuid4())
+    with engine.begin() as connection:
+        connection.execute(
+            companies.insert(),
+            _required_row(
+                companies,
+                id=company_id,
+                code="SPLIT-HISTORY",
+                name="结算历史保留",
+                status="ACTIVE",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+        connection.execute(
+            requests.insert(),
+            _required_row(
+                requests,
+                company_id=company_id,
+                status="TERMINATED",
+                reason="已完成线下结算",
+                created_at=now,
+                updated_at=now,
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="cannot downgrade while supply termination history exists"):
+        _alembic(database_url, "downgrade", "0020_audit_action_resource_index")
+
+    assert "supply_termination_requests" in inspect(engine).get_table_names()
+    with engine.connect() as connection:
+        assert connection.execute(sa.select(sa.func.count()).select_from(requests)).scalar_one() == 1
+
+
+def test_supply_wallet_migration_blocks_reward_ledger_status_mismatches(tmp_path: Path) -> None:
+    database = tmp_path / "supply-wallet-reward-status.db"
+    database_url = f"sqlite:///{database}"
+    _alembic(database_url, "upgrade", "0020_audit_action_resource_index")
+    engine = create_engine(database_url)
+    metadata = sa.MetaData()
+    metadata.reflect(engine)
+    companies = metadata.tables["companies"]
+    accounts = metadata.tables["points_accounts"]
+    ledgers = metadata.tables["points_ledgers"]
+    rewards = metadata.tables["supplier_lead_rewards"]
+    now = datetime.now(timezone.utc)
+    cancelled_company, settled_company = str(uuid.uuid4()), str(uuid.uuid4())
+    cancelled_account, settled_account = str(uuid.uuid4()), str(uuid.uuid4())
+    cancelled_ledger = str(uuid.uuid4())
+    settled_ledger, unexpected_reversal = str(uuid.uuid4()), str(uuid.uuid4())
+    with engine.begin() as connection:
+        connection.execute(companies.insert(), [
+            _required_row(
+                companies, id=cancelled_company, code="SPLIT-CANCELLED-REWARD",
+                name="已取消奖励异常", status="ACTIVE", created_at=now, updated_at=now,
+            ),
+            _required_row(
+                companies, id=settled_company, code="SPLIT-SETTLED-REVERSAL",
+                name="已结算冲回异常", status="ACTIVE", created_at=now, updated_at=now,
+            ),
+        ])
+        connection.execute(accounts.insert(), [
+            _required_row(
+                accounts, id=cancelled_account, company_id=cancelled_company,
+                balance=10, version=1, created_at=now, updated_at=now,
+            ),
+            _required_row(
+                accounts, id=settled_account, company_id=settled_company,
+                balance=0, version=1, created_at=now, updated_at=now,
+            ),
+        ])
+        connection.execute(rewards.insert(), [
+            _required_row(
+                rewards, id="cancelled-reward-with-ledger",
+                lead_id="cancelled-reward-lead", assignment_id="cancelled-reward-assignment",
+                supplier_company_id=cancelled_company, receiver_company_id=cancelled_company,
+                status="CANCELLED", reward_points=10, ledger_id=cancelled_ledger,
+                created_at=now, updated_at=now,
+            ),
+            _required_row(
+                rewards, id="settled-reward-with-reversal",
+                lead_id="settled-reward-lead", assignment_id="settled-reward-assignment",
+                supplier_company_id=settled_company, receiver_company_id=settled_company,
+                status="SETTLED", reward_points=10, ledger_id=settled_ledger,
+                reversal_ledger_id=unexpected_reversal, created_at=now, updated_at=now,
+            ),
+        ])
+        connection.execute(ledgers.insert(), [
+            _required_row(
+                ledgers, id=cancelled_ledger, account_id=cancelled_account,
+                company_id=cancelled_company, ledger_type="REWARD", delta=10,
+                balance_after=10, business_type="V12_SUPPLIER_REWARD",
+                business_id="cancelled-reward-with-ledger",
+                idempotency_key="cancelled-reward-ledger", created_at=now,
+            ),
+            _required_row(
+                ledgers, id=settled_ledger, account_id=settled_account,
+                company_id=settled_company, ledger_type="REWARD", delta=10,
+                balance_after=10, business_type="V12_SUPPLIER_REWARD",
+                business_id="settled-reward-with-reversal",
+                idempotency_key="settled-reward-ledger", created_at=now,
+            ),
+            _required_row(
+                ledgers, id=unexpected_reversal, account_id=settled_account,
+                company_id=settled_company, ledger_type="REVERSAL", delta=-10,
+                balance_after=0, business_type="V12_SUPPLIER_REWARD_REVERSAL",
+                business_id="settled-reward-with-reversal",
+                idempotency_key="settled-reward-unexpected-reversal",
+                related_ledger_id=settled_ledger, created_at=now + timedelta(seconds=1),
+            ),
+        ])
+
+    _alembic(database_url, "upgrade", "head")
+    migrated = sa.MetaData()
+    migrated.reflect(engine, only=["points_accounts"])
+    migrated_accounts = migrated.tables["points_accounts"]
+    with engine.connect() as connection:
+        rows = connection.execute(sa.select(migrated_accounts).where(
+            migrated_accounts.c.id.in_((cancelled_account, settled_account))
+        )).mappings().all()
+    snapshots = {row["id"]: row["points_split_snapshot_json"] for row in rows}
+    assert snapshots[cancelled_account]["exception_reason"] == "REWARD_STATUS_LEDGER_MISMATCH"
+    assert snapshots[settled_account]["exception_reason"] == "REWARD_STATUS_LEDGER_MISMATCH"

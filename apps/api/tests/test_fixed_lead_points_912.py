@@ -319,7 +319,7 @@ def test_supplier_fixed_points_keep_48h_window_and_snapshot(db) -> None:
         )
     ) == 1
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == supplier.id))
-    assert account is not None and account.balance == 36
+    assert account is not None and account.supply_balance == 36
 
 
 def test_lead_points_settings_start_unconfigured(db) -> None:

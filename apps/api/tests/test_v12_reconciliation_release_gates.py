@@ -53,6 +53,36 @@ def test_reconciliation_rejects_corrupted_intermediate_balance_snapshot(db) -> N
     assert report.valid is False
 
 
+def test_reconciliation_accepts_independent_customer_and_supply_wallets(db) -> None:
+    company = Company(code="DUAL-WALLET", name="双积分对账公司", status="ACTIVE")
+    db.add(company)
+    db.flush()
+    account = PointsAccount(company_id=company.id, balance=0, supply_balance=30)
+    db.add(account)
+    db.flush()
+    db.add(
+        PointsLedger(
+            account_id=account.id,
+            company_id=company.id,
+            ledger_type="ADJUST",
+            point_kind="SUPPLY",
+            delta=30,
+            balance_after=30,
+            business_type="MANUAL_ADJUSTMENT",
+            business_id="dual-wallet-supply",
+            idempotency_key="dual-wallet-supply",
+            metadata_json={},
+        )
+    )
+    db.flush()
+
+    report = reconcile_v12(db, require_completed_backfill=False)
+
+    assert "POINTS_RECONCILIATION_MISMATCH" not in {item["code"] for item in report.errors}
+    assert report.metrics["points_account_mismatches"] == 0
+    assert report.metrics["points_ledger_sequence_errors"] == 0
+
+
 def test_reconciliation_rejects_ledger_posted_to_another_company_account(db) -> None:
     account_company = Company(code="ACC-OWNER", name="账户归属公司", status="ACTIVE")
     ledger_company = Company(code="LEDGER-OWNER", name="流水归属公司", status="ACTIVE")

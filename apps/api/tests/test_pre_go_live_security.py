@@ -617,6 +617,7 @@ def test_points_idempotency_negative_balance_and_privilege_boundaries(api_client
         headers=attacker,
         json={
             "company_id": graph["target_company_id"],
+            "point_kind": "CUSTOMER",
             "delta": 10,
             "reason": "越权调整积分",
             "idempotency_key": "security-forbidden-adjust",
@@ -632,6 +633,7 @@ def test_points_idempotency_negative_balance_and_privilege_boundaries(api_client
         headers=admin,
         json={
             "company_id": graph["attacker_company_id"],
+            "point_kind": "CUSTOMER",
             "delta": 25,
             "reason": "安全测试幂等加分",
             "idempotency_key": key,
@@ -642,6 +644,7 @@ def test_points_idempotency_negative_balance_and_privilege_boundaries(api_client
         headers=admin,
         json={
             "company_id": graph["attacker_company_id"],
+            "point_kind": "CUSTOMER",
             "delta": 25,
             "reason": "安全测试幂等加分重复请求",
             "idempotency_key": key,
@@ -665,6 +668,7 @@ def test_points_idempotency_negative_balance_and_privilege_boundaries(api_client
         headers=admin,
         json={
             "company_id": graph["attacker_company_id"],
+            "point_kind": "CUSTOMER",
             "delta": -100000,
             "reason": "安全测试禁止负余额",
             "idempotency_key": "security-negative-balance",

@@ -889,7 +889,7 @@ def test_final_reject_restores_following_and_settles_reward_immediately(db) -> N
             PointsAccount.company_id == setup["supplier"].id
         )
     )
-    assert supplier_account is not None and supplier_account.balance == 30
+    assert supplier_account is not None and supplier_account.supply_balance == 30
     assert db.scalar(
         select(Notification).where(Notification.scene == "V12_RETURN_REJECTED")
     ) is None

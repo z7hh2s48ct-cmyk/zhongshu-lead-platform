@@ -295,7 +295,7 @@ def test_due_reward_settles_once_and_credits_supplier(db) -> None:
     assert reward.status == RewardStatus.SETTLED.value
     assert result.ledger is not None and result.ledger.delta == 30
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == supplier.id))
-    assert account is not None and account.balance == 30
+    assert account is not None and account.supply_balance == 30
 
     repeated = settle_supplier_reward(db, reward_id=reward.id, settled_by=user.id)
     db.commit()
@@ -308,7 +308,7 @@ def test_due_reward_settles_once_and_credits_supplier(db) -> None:
         )
     ).all()
     assert len(ledgers) == 1
-    assert db.get(PointsAccount, account.id).balance == 30
+    assert db.get(PointsAccount, account.id).supply_balance == 30
 
 
 def test_waiting_reward_cannot_be_settled_before_claim_48h(db) -> None:
@@ -331,7 +331,7 @@ def test_waiting_reward_cannot_be_settled_before_claim_48h(db) -> None:
     assert reward.status == RewardStatus.WAITING_CLAIM.value
     assert reward.ledger_id is None
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == supplier.id))
-    assert account is None or account.balance == 0
+    assert account is None or account.supply_balance == 0
 
 
 def test_due_settlement_freezes_if_active_appeal_exists(db) -> None:
@@ -370,7 +370,7 @@ def test_deleted_lead_reward_is_not_selected_or_settled(db) -> None:
     account = db.scalar(
         select(PointsAccount).where(PointsAccount.company_id == supplier.id)
     )
-    assert account is None or account.balance == 0
+    assert account is None or account.supply_balance == 0
     with pytest.raises(AppError) as exc_info:
         settle_supplier_reward(db, reward_id=reward.id, settled_by=user.id)
     assert exc_info.value.code == "REWARD_LEAD_DELETED"
@@ -402,7 +402,7 @@ def test_rejected_overdue_appeal_settles_immediately_on_commit(db) -> None:
     assert reward.status == RewardStatus.SETTLED.value
     assert reward.ledger_id is not None
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == supplier.id))
-    assert account is not None and account.balance == 30
+    assert account is not None and account.supply_balance == 30
     event = db.scalar(
         select(AssignmentEvent).where(
             AssignmentEvent.assignment_id == assignment.id,
@@ -462,6 +462,7 @@ def test_exceptional_reversal_is_idempotent_and_can_create_debt(db) -> None:
         business_id=reward.id,
         idempotency_key=f"test-spend:{reward.id}",
         created_by=user.id,
+        point_kind="SUPPLY",
     )
     db.commit()
 
@@ -477,7 +478,7 @@ def test_exceptional_reversal_is_idempotent_and_can_create_debt(db) -> None:
     assert reward.status == RewardStatus.REVERSED.value
     assert reversed_result.ledger.delta == -30
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == supplier.id))
-    assert account is not None and account.balance == -25
+    assert account is not None and account.supply_balance == -25
 
     repeated = reverse_supplier_reward(
         db,
@@ -495,7 +496,36 @@ def test_exceptional_reversal_is_idempotent_and_can_create_debt(db) -> None:
         )
     )
     assert reversal_count == 1
-    assert db.get(PointsAccount, account.id).balance == -25
+    assert db.get(PointsAccount, account.id).supply_balance == -25
+
+
+def test_reward_reversal_rejects_an_idempotency_key_owned_by_another_business(db) -> None:
+    supplier, _, user, _, _, reward = _reward_setup(db)
+    settle_supplier_reward(db, reward_id=reward.id, settled_by=user.id)
+    change_points(
+        db,
+        company_id=supplier.id,
+        delta=1,
+        ledger_type=PointsLedgerType.ADJUST.value,
+        business_type="TEST_COLLISION",
+        business_id=reward.id,
+        idempotency_key=f"v12-reward:{reward.id}:reverse",
+        created_by=user.id,
+        point_kind="SUPPLY",
+    )
+    db.commit()
+
+    with pytest.raises(AppError) as exc:
+        reverse_supplier_reward(
+            db,
+            reward_id=reward.id,
+            reason_code="SYSTEM_ERROR",
+            note="验证奖励冲回幂等冲突",
+            reversed_by=user.id,
+        )
+
+    assert exc.value.code == "POINTS_IDEMPOTENCY_CONFLICT"
+    assert reward.status == RewardStatus.SETTLED.value
 
 
 def test_only_exceptional_reason_codes_can_reverse(db) -> None:

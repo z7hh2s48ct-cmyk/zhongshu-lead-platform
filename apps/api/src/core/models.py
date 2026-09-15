@@ -103,6 +103,9 @@ class Company(Base, TimestampMixin):
     code: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="ACTIVE", nullable=False, index=True)
+    supplier_cooperation_status: Mapped[str] = mapped_column(
+        String(32), default="ACTIVE", nullable=False, index=True
+    )
     is_test: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     owner_name: Mapped[str | None] = mapped_column(String(64))
     contact_phone_encrypted: Mapped[str | None] = mapped_column(Text)
@@ -444,6 +447,11 @@ class PointsAccount(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="CASCADE"), unique=True, nullable=False)
     balance: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    supply_balance: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    frozen_customer_points: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    frozen_supply_points: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    points_split_status: Mapped[str] = mapped_column(String(32), default="READY", nullable=False)
+    points_split_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     company: Mapped[Company] = relationship(back_populates="points_account")
@@ -460,8 +468,10 @@ class PointsLedger(Base):
     account_id: Mapped[str] = mapped_column(ForeignKey("points_accounts.id", ondelete="RESTRICT"), index=True)
     company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="RESTRICT"), index=True)
     ledger_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    point_kind: Mapped[str] = mapped_column(String(16), default="CUSTOMER", nullable=False, index=True)
     delta: Mapped[int] = mapped_column(BigInteger, nullable=False)
     balance_after: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    legacy_balance_after: Mapped[int | None] = mapped_column(BigInteger)
     business_type: Mapped[str] = mapped_column(String(64), nullable=False)
     business_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -470,6 +480,42 @@ class PointsLedger(Base):
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class SupplyTerminationRequest(Base, TimestampMixin):
+    __tablename__ = "supply_termination_requests"
+    __table_args__ = (
+        Index("ix_supply_termination_company_created", "company_id", "created_at"),
+        Index("ix_supply_termination_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="REQUESTED", nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    payee_name_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    payee_account_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    blockers_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    customer_points_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    supply_points_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    general_points_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    cash_cents_per_point_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    cash_amount_cents_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    rate_config_id: Mapped[str | None] = mapped_column(ForeignKey("system_configs.id", ondelete="RESTRICT"))
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payment_external_reference: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    payment_note: Mapped[str | None] = mapped_column(Text)
+    payment_proof_url: Mapped[str | None] = mapped_column(Text)
+    payment_history_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payment_amount_cents: Mapped[int | None] = mapped_column(BigInteger)
+    payment_recorded_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    writeoff_idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True)
+    terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PointsPackage(Base, TimestampMixin):

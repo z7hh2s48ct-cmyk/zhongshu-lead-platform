@@ -67,3 +67,4 @@ opacity:0;transform:translateY(12px);transition:.2s;pointer-events:none}.ops-toa
 .ops-company-invite-history .ops-table{min-width:0;table-layout:fixed}
 .ops-company-invite-history .ops-table th,.ops-company-invite-history .ops-table td{overflow-wrap:anywhere}
 @media(max-width:680px){.ops-overlay:has(.ops-company-detail){align-items:start;padding:0}.ops-modal:has(.ops-company-detail){width:100%;min-height:100dvh;max-height:none;overflow:visible;border-radius:0}}
+.ops-termination-blockers{display:grid;gap:8px;margin:12px 0 0;padding:0;list-style:none}.ops-termination-blockers li{display:grid;gap:3px;padding:10px 12px;border-radius:10px;background:#fff7e9}.ops-termination-blockers span{color:#765019;font-size:13px}
