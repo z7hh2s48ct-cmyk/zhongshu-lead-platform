@@ -164,6 +164,7 @@ def list_ledgers(
     db: Session = Depends(get_db),
     company_id: str | None = Query(default=None),
     ledger_type: str | None = Query(default=None),
+    point_kind: str | None = Query(default=None),
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
@@ -179,6 +180,12 @@ def list_ledgers(
     if ledger_type:
         stmt = stmt.where(PointsLedger.ledger_type == ledger_type)
         count_stmt = count_stmt.where(PointsLedger.ledger_type == ledger_type)
+    if point_kind:
+        normalized_kind = point_kind.strip().upper()
+        if normalized_kind not in {"CUSTOMER", "SUPPLY"}:
+            raise AppError("POINT_KIND_INVALID", "积分账户类型无效", 422)
+        stmt = stmt.where(PointsLedger.point_kind == normalized_kind)
+        count_stmt = count_stmt.where(PointsLedger.point_kind == normalized_kind)
     total = db.scalar(count_stmt) or 0
     items = db.scalars(stmt.order_by(PointsLedger.created_at.desc()).offset((page_no - 1) * page_size).limit(page_size)).all()
     return ok(request, page([ledger_to_dict(x) for x in items], total, page_no, page_size))
@@ -224,8 +231,8 @@ def recharge(body: RechargeBody, request: Request, principal=Depends(require_per
 
 @router.post("/adjust")
 def adjust(body: ManualAdjustmentBody, request: Request, principal=Depends(require_permissions("points.recharge")), db: Session = Depends(get_db)):
-    ledger = change_points(db, company_id=body.company_id, delta=body.delta, ledger_type="ADJUST", business_type="MANUAL_ADJUSTMENT", business_id=body.idempotency_key, idempotency_key=body.idempotency_key, created_by=principal.user_id, metadata={"reason": body.reason})
-    write_audit(db, principal=principal, action="POINTS_ADJUST", resource_type="points_ledger", resource_id=ledger.id, company_id=body.company_id, after=ledger_to_dict(ledger), request_id=request.state.request_id)
+    ledger = change_points(db, company_id=body.company_id, delta=body.delta, ledger_type="ADJUST", business_type="MANUAL_ADJUSTMENT", business_id=body.idempotency_key, idempotency_key=body.idempotency_key, created_by=principal.user_id, metadata={"reason": body.reason, "point_kind": body.point_kind}, point_kind=body.point_kind)
+    write_audit(db, principal=principal, action="POINTS_ADJUST", resource_type="points_ledger", resource_id=ledger.id, company_id=body.company_id, after=ledger_to_dict(ledger), metadata={"point_kind": body.point_kind}, request_id=request.state.request_id)
     db.commit()
     return ok(request, ledger_to_dict(ledger))
 
@@ -249,12 +256,19 @@ def reconciliation(
     request: Request,
     principal=Depends(require_permissions("points.read")),
     db: Session = Depends(get_db),
+    point_kind: str = Query(default="CUSTOMER"),
     start_at: datetime | None = Query(default=None),
     end_at: datetime | None = Query(default=None),
 ):
     if start_at and end_at and start_at >= end_at:
         raise AppError("POINTS_RECONCILIATION_RANGE_INVALID", "开始时间必须早于结束时间", 422)
-    result = reconcile_points_account(db, company_id, start_at=start_at, end_at=end_at)
-    write_audit(db, principal=principal, action="POINTS_RECONCILE", resource_type="points_account", resource_id=company_id, company_id=company_id, metadata={"balanced": result["balanced"], "difference": result["difference"]}, request_id=request.state.request_id)
+    result = reconcile_points_account(
+        db,
+        company_id,
+        point_kind=point_kind,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    write_audit(db, principal=principal, action="POINTS_RECONCILE", resource_type="points_account", resource_id=company_id, company_id=company_id, metadata={"point_kind": result["point_kind"], "balanced": result["balanced"], "difference": result["difference"]}, request_id=request.state.request_id)
     db.commit()
     return ok(request, result)

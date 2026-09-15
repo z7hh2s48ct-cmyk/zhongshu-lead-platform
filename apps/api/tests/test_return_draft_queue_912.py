@@ -127,3 +127,22 @@ def test_expire_unsubmitted_return_drafts_is_idempotent_and_audited(db, monkeypa
     assert len(events) == 1
     assert events[0].payload["return_request_id"] == expired.id
     assert events[0].payload["reason"] == "UNSUBMITTED_48H_WINDOW_EXPIRED"
+
+
+def test_expire_return_drafts_skips_deleted_lead_and_continues_batch(db, monkeypatch) -> None:
+    now = datetime(2026, 9, 15, 9, tzinfo=timezone.utc)
+    deleted_setup = _workflow_setup(db, suffix="-JOB-DELETED")
+    active_setup = _workflow_setup(db, suffix="-JOB-CONTINUE")
+    deleted = _draft(db, deleted_setup)
+    active = _draft(db, active_setup)
+    deleted_setup["assignment"].claimed_at = now - timedelta(hours=50)
+    active_setup["assignment"].claimed_at = now - timedelta(hours=49)
+    deleted_setup["lead"].deleted_at = now - timedelta(minutes=1)
+    db.commit()
+    monkeypatch.setattr(service, "_now", lambda: now)
+
+    result = service.expire_unsubmitted_return_drafts(db, batch_size=100)
+
+    assert result == {"scanned": 1, "expired": 1}
+    assert db.get(ReturnRequest, deleted.id).status == ReturnV12Status.DRAFT.value
+    assert db.get(ReturnRequest, active.id).status == ReturnV12Status.EXPIRED.value

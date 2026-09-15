@@ -12,7 +12,7 @@ from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.enums import EvidenceType, VerificationTaskStatus
 from ..core.errors import AppError
-from ..core.models import Assignment, ReturnEvidence, ReturnRequest, VerificationTask
+from ..core.models import Assignment, Lead, ReturnEvidence, ReturnRequest, VerificationTask
 from ..core.responses import ok, page
 from ..core.v12_enums import ReturnV12Status, VerificationTaskType
 from ..schemas.v12_returns import (
@@ -74,6 +74,9 @@ AUDIO_MIME = {
 def _can_read_return(db: Session, principal, item: ReturnRequest) -> bool:
     if principal.can("*") or principal.can("return.read") or principal.can("return.evidence.read"):
         return True
+    lead = db.get(Lead, item.lead_id)
+    if lead is None or lead.deleted_at is not None:
+        return False
     if principal.has_any_role("TELESALES") and principal.can("verification.task.read"):
         assigned_task = db.scalar(
             select(VerificationTask.id).where(
@@ -316,6 +319,12 @@ def list_returns_v12(
     else:
         raise AppError("FORBIDDEN", "无权查看退回申请", 403)
     normalized_status = status.strip().upper() if status else None
+    if not can_read_all:
+        filters.append(
+            ReturnRequest.lead_id.in_(
+                select(Lead.id).where(Lead.deleted_at.is_(None))
+            )
+        )
     if normalized_status:
         filters.append(ReturnRequest.status == normalized_status)
     elif can_read_all:
@@ -326,7 +335,7 @@ def list_returns_v12(
     items = db.scalars(
         select(ReturnRequest)
         .where(*filters)
-        .order_by(ReturnRequest.created_at.desc())
+        .order_by(ReturnRequest.created_at.desc(), ReturnRequest.id.desc())
         .offset((page_no - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -356,6 +365,9 @@ def return_detail_v12(
     if item is None:
         raise AppError("RETURN_NOT_FOUND", "退回申请不存在", 404)
     if not _can_read_return(db, principal, item):
+        lead = db.get(Lead, item.lead_id)
+        if lead is not None and lead.deleted_at is not None:
+            raise AppError("RETURN_NOT_FOUND", "退回申请不存在", 404)
         raise AppError("FORBIDDEN", "无权查看退回申请", 403)
     data = return_request_to_dict(
         db,
@@ -434,6 +446,12 @@ def list_return_verification_tasks(
                 select(ReturnRequest.id).where(ReturnRequest.status.in_(_OPEN_RETURN_REQUEST_STATUSES))
             )
         )
+    if principal.has_any_role("TELESALES") or (not submitted_history and not status):
+        filters.append(
+            VerificationTask.lead_id.in_(
+                select(Lead.id).where(Lead.deleted_at.is_(None))
+            )
+        )
     total = db.scalar(select(func.count(VerificationTask.id)).where(*filters)) or 0
     order_by = (
         (
@@ -481,6 +499,11 @@ def return_verification_task_detail(
 ):
     task = db.get(VerificationTask, task_id)
     if task is None or task.task_type != VerificationTaskType.RETURN_VERIFY.value:
+        raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    lead = db.get(Lead, task.lead_id)
+    if principal.has_any_role("TELESALES") and (
+        lead is None or lead.deleted_at is not None
+    ):
         raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
     if principal.has_any_role("TELESALES") and task.assignee_user_id != principal.user_id:
         raise AppError("FORBIDDEN", "无权查看该退回核验任务", 403)
@@ -581,6 +604,13 @@ def dial_return_verification(
     if (
         task is None
         or task.task_type != VerificationTaskType.RETURN_VERIFY.value
+        or db.scalar(
+            select(Lead.id).where(
+                Lead.id == task.lead_id,
+                Lead.deleted_at.is_(None),
+            )
+        )
+        is None
         or task.assignee_user_id != principal.user_id
         or task.status != VerificationTaskStatus.IN_PROGRESS.value
     ):

@@ -49,6 +49,8 @@ def claim_assignment(db: Session, assignment_id: str, principal: Principal, idem
         .with_for_update()
         .execution_options(populate_existing=True)
     )
+    if lead is None or lead.deleted_at is not None:
+        raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     require_correction_review_resolved(lead)
     existing_ledger = db.scalar(
         select(PointsLedger).where(
@@ -95,6 +97,8 @@ def claim_assignment(db: Session, assignment_id: str, principal: Principal, idem
 def own_assignment_detail(db: Session, assignment: Assignment, principal: Principal) -> dict[str, Any]:
     require_company_assignment_access(principal, assignment)
     lead = db.get(Lead, assignment.lead_id)
+    if lead is None or lead.deleted_at is not None:
+        raise AppError("ASSIGNMENT_NOT_FOUND", "派发订单不存在", 404)
     correction_blocked = bool(
         lead and lead.pending_reason == "CORRECTION_REVIEW_REQUIRED"
     )
@@ -139,7 +143,14 @@ def run_assignment_timeouts(db: Session) -> dict[str, int]:
     now = utcnow()
     reminded = 0
     expired = 0
-    pending = db.scalars(select(Assignment).where(Assignment.status == AssignmentStatus.PENDING_CLAIM)).all()
+    pending = db.scalars(
+        select(Assignment)
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .where(
+            Assignment.status == AssignmentStatus.PENDING_CLAIM,
+            Lead.deleted_at.is_(None),
+        )
+    ).all()
     for assignment in pending:
         assigned_at = as_utc(assignment.assigned_at) or now
         expires_at = as_utc(assignment.expires_at)

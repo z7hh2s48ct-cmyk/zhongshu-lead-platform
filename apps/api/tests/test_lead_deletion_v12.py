@@ -24,7 +24,7 @@ from apps.api.src.core.models import (
 from apps.api.src.core.security import encrypt_text, hash_phone
 from apps.api.src.core.time import as_utc
 from apps.api.src.services.lead_deletion_v12 import (
-    delete_own_lead,
+    delete_operation_lead,
     preview_lead_deletion,
 )
 
@@ -76,7 +76,7 @@ def test_owner_can_soft_delete_each_allowed_source_and_state(db, owned_lead, sou
     assert preview["blockers"] == []
     assert preview["deleted"] is False
 
-    result = delete_own_lead(db, lead_id=lead.id, principal=principal, reason="  重复录入  ")
+    result = delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="  重复录入  ")
     db.flush()
     assert result.idempotent is False
     assert result.lead is lead
@@ -93,7 +93,7 @@ def test_only_operation_role_can_delete_even_its_own_lead(db, owned_lead, role):
     principal = _principal(owner.user_id, role)
     for action in (
         lambda: preview_lead_deletion(db, lead_id=lead.id, principal=principal),
-        lambda: delete_own_lead(db, lead_id=lead.id, principal=principal, reason="本人误录"),
+        lambda: delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="本人误录"),
     ):
         with pytest.raises(AppError) as error:
             action()
@@ -101,47 +101,38 @@ def test_only_operation_role_can_delete_even_its_own_lead(db, owned_lead, role):
     assert lead.deleted_at is None
 
 
-def test_another_operation_cannot_delete_or_preview_the_lead(db, owned_lead):
+def test_another_operation_can_delete_the_lead(db, owned_lead):
     lead, _ = owned_lead
     other = _principal("another-operation")
-    for action in (
-        lambda: preview_lead_deletion(db, lead_id=lead.id, principal=other),
-        lambda: delete_own_lead(db, lead_id=lead.id, principal=other, reason="别人误录"),
-    ):
-        with pytest.raises(AppError) as error:
-            action()
-        assert error.value.status_code == 403
-    assert lead.deleted_at is None
+    assert preview_lead_deletion(db, lead_id=lead.id, principal=other)["deletable"] is True
+    delete_operation_lead(db, lead_id=lead.id, principal=other, reason="运营清理")
+    assert lead.deleted_at is not None
 
 
 @pytest.mark.parametrize("source", ["SUPPLIER_H5", "FEISHU_LEGACY", None])
-def test_supplier_and_unattributed_legacy_sources_cannot_use_owner_deletion(db, owned_lead, source):
+def test_operation_can_delete_every_lead_source(db, owned_lead, source):
     lead, principal = owned_lead
     lead.source_kind = source
-    with pytest.raises(AppError) as error:
-        delete_own_lead(db, lead_id=lead.id, principal=principal, reason="本人误录")
-    assert error.value.status_code == 403
-    assert lead.deleted_at is None
+    delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="停止处理")
+    assert lead.deleted_at is not None
 
 
 @pytest.mark.parametrize("status", ["PENDING_TELESALES_VERIFY", "DISPATCHED", "CLAIMED", "FOLLOWING", "COMPLETED", "INVALID", "CLOSED"])
-def test_other_states_are_reported_in_preview_and_rejected_on_execution(db, owned_lead, status):
+def test_operation_can_delete_every_lead_state(db, owned_lead, status):
     lead, principal = owned_lead
     lead.status = status
     preview = preview_lead_deletion(db, lead_id=lead.id, principal=principal)
-    assert preview["deletable"] is False
-    assert "LEAD_DELETE_STATE_NOT_ALLOWED" in preview["blockers"]
-    with pytest.raises(AppError) as error:
-        delete_own_lead(db, lead_id=lead.id, principal=principal, reason="本人误录")
-    assert error.value.code == "LEAD_DELETE_STATE_NOT_ALLOWED"
-    assert lead.deleted_at is None
+    assert preview["deletable"] is True
+    assert preview["blockers"] == []
+    delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="停止处理")
+    assert lead.deleted_at is not None
 
 
 @pytest.mark.parametrize("reason", ["", " ", "错", " 错 "])
 def test_delete_requires_a_reason_of_at_least_two_characters(db, owned_lead, reason):
     lead, principal = owned_lead
     with pytest.raises(AppError) as error:
-        delete_own_lead(db, lead_id=lead.id, principal=principal, reason=reason)
+        delete_operation_lead(db, lead_id=lead.id, principal=principal, reason=reason)
     assert error.value.status_code == 422
     assert lead.deleted_at is None
 
@@ -162,32 +153,29 @@ def _assignment(db, lead, principal, status="RELEASED"):
     return assignment
 
 
-def test_released_assignment_history_blocks_deletion_even_after_returning_to_pool(db, owned_lead):
+def test_released_assignment_history_is_reported_and_preserved_after_deletion(db, owned_lead):
     lead, principal = owned_lead
     _assignment(db, lead, principal)
     lead.status = "READY_DISPATCH"
     lead.current_assignment_id = None
     preview = preview_lead_deletion(db, lead_id=lead.id, principal=principal)
     assert preview["impact"]["assignment_history"] == 1
-    assert "LEAD_DELETE_DISPATCH_HISTORY_EXISTS" in preview["blockers"]
-    with pytest.raises(AppError) as error:
-        delete_own_lead(db, lead_id=lead.id, principal=principal, reason="本人误录")
-    assert error.value.code == "LEAD_DELETE_DISPATCH_HISTORY_EXISTS"
-    assert lead.deleted_at is None
+    assert preview["blockers"] == []
+    delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="停止处理")
+    assert lead.deleted_at is not None
+    assert db.scalar(select(Assignment.id).where(Assignment.lead_id == lead.id)) is not None
 
 
 @pytest.mark.parametrize("status", ["PENDING", "ASSIGNED", "IN_PROGRESS"])
-def test_active_verification_blocks_deletion_regardless_of_displayed_lead_state(db, owned_lead, status):
+def test_active_verification_is_reported_but_does_not_block_deletion(db, owned_lead, status):
     lead, principal = owned_lead
     db.add(VerificationTask(lead_id=lead.id, status=status))
     db.flush()
     preview = preview_lead_deletion(db, lead_id=lead.id, principal=principal)
     assert preview["impact"]["active_verification_tasks"] == 1
-    assert "LEAD_DELETE_VERIFICATION_ACTIVE" in preview["blockers"]
-    with pytest.raises(AppError) as error:
-        delete_own_lead(db, lead_id=lead.id, principal=principal, reason="本人误录")
-    assert error.value.code == "LEAD_DELETE_VERIFICATION_ACTIVE"
-    assert lead.deleted_at is None
+    assert preview["blockers"] == []
+    delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="停止处理")
+    assert lead.deleted_at is not None
 
 
 @pytest.mark.parametrize("status", ["DRAFT", "SUBMITTED", "VERIFYING", "REVIEWING", "NEED_MORE_EVIDENCE"])
@@ -206,8 +194,8 @@ def test_preview_reports_active_returns_even_with_other_dispatch_blockers(db, ow
     db.flush()
     preview = preview_lead_deletion(db, lead_id=lead.id, principal=principal)
     assert preview["impact"]["active_return_requests"] == 1
-    assert "LEAD_DELETE_RETURN_ACTIVE" in preview["blockers"]
-    assert preview["deletable"] is False
+    assert preview["blockers"] == []
+    assert preview["deletable"] is True
 
 
 def test_soft_delete_preserves_completed_verification_import_and_source_identity(db, owned_lead):
@@ -223,7 +211,7 @@ def test_soft_delete_preserves_completed_verification_import_and_source_identity
     submission = VerificationSubmission(task_id=task.id, lead_id=lead.id, result="NEED_MORE", submitted_by=principal.user_id)
     db.add(submission)
     db.flush()
-    delete_own_lead(db, lead_id=lead.id, principal=principal, reason="不再处理")
+    delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="不再处理")
     db.commit()
     assert db.get(VerificationTask, task.id) is not None
     assert db.get(VerificationSubmission, submission.id) is not None
@@ -233,10 +221,10 @@ def test_soft_delete_preserves_completed_verification_import_and_source_identity
 
 def test_repeated_deletion_preserves_first_actor_reason_and_time(db, owned_lead):
     lead, principal = owned_lead
-    first = delete_own_lead(db, lead_id=lead.id, principal=principal, reason="首次原因")
+    first = delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="首次原因")
     db.commit()
     deleted_at = first.lead.deleted_at
-    second = delete_own_lead(db, lead_id=lead.id, principal=principal, reason="不同原因")
+    second = delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="不同原因")
     assert second.idempotent is True
     assert as_utc(second.lead.deleted_at) == as_utc(deleted_at)
     assert second.lead.delete_reason == "首次原因"
@@ -254,7 +242,7 @@ def test_deletion_uses_a_row_lock_and_does_not_commit_the_callers_transaction(db
 
     event.listen(db, "do_orm_execute", observe)
     try:
-        delete_own_lead(db, lead_id=lead_id, principal=principal, reason="可回滚删除")
+        delete_operation_lead(db, lead_id=lead_id, principal=principal, reason="可回滚删除")
     finally:
         event.remove(db, "do_orm_execute", observe)
     assert locking_queries
@@ -269,21 +257,18 @@ def test_execution_refreshes_state_after_another_transaction_changes_the_lead(db
         other_session.execute(update(Lead).where(Lead.id == lead.id).values(status="COMPLETED"))
         other_session.commit()
     assert lead.status == "DRAFT"
-    with pytest.raises(AppError) as error:
-        delete_own_lead(db, lead_id=lead.id, principal=principal, reason="使用旧页面删除")
-    assert error.value.code == "LEAD_DELETE_STATE_NOT_ALLOWED"
+    delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="使用旧页面删除")
     assert lead.status == "COMPLETED"
-    assert lead.deleted_at is None
+    assert lead.deleted_at is not None
 
 
-def test_execution_rechecks_dispatch_history_after_a_successful_preview(db, owned_lead):
+def test_execution_preserves_dispatch_history_added_after_a_successful_preview(db, owned_lead):
     lead, principal = owned_lead
     assert preview_lead_deletion(db, lead_id=lead.id, principal=principal)["deletable"] is True
     _assignment(db, lead, principal)
-    with pytest.raises(AppError) as error:
-        delete_own_lead(db, lead_id=lead.id, principal=principal, reason="使用旧页面删除")
-    assert error.value.code == "LEAD_DELETE_DISPATCH_HISTORY_EXISTS"
-    assert lead.deleted_at is None
+    delete_operation_lead(db, lead_id=lead.id, principal=principal, reason="使用旧页面删除")
+    assert lead.deleted_at is not None
+    assert db.scalar(select(Assignment.id).where(Assignment.lead_id == lead.id)) is not None
 
 
 def test_missing_lead_returns_not_found(db):

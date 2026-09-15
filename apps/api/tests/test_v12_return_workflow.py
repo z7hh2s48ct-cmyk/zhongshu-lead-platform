@@ -25,6 +25,7 @@ from apps.api.src.core.models import (
 )
 from apps.api.src.core.models_v12 import SupplierLeadReward
 from apps.api.src.core.security import encrypt_text, fingerprint_phone, hash_phone
+from apps.api.src.core.time import as_utc
 from apps.api.src.core.v12_enums import (
     LeadSourceKind,
     LeadV12Status,
@@ -861,7 +862,7 @@ def test_missing_return_submission_event_never_misattributed_review_note(db, cap
     assert request.id in caplog.text
 
 
-def test_final_reject_restores_following_and_unfreezes_reward(db) -> None:
+def test_final_reject_restores_following_and_settles_reward_immediately(db) -> None:
     setup = _workflow_setup(db, lead_status=LeadV12Status.FOLLOWING.value)
     request, task = _submit_and_verify(db, setup, conclusion="DOES_NOT_SUPPORT_RETURN")
     reviewer = _principal(setup["reviewer"], "return.review")
@@ -878,9 +879,17 @@ def test_final_reject_restores_following_and_unfreezes_reward(db) -> None:
     assert request.status == ReturnV12Status.REJECTED.value
     assert setup["assignment"].status == AssignmentStatus.FOLLOWING.value
     assert setup["lead"].status == LeadV12Status.FOLLOWING.value
-    assert setup["reward"].status == RewardStatus.OBSERVING.value
+    assert setup["reward"].status == RewardStatus.SETTLED.value
+    assert setup["reward"].ledger_id is not None
+    assert as_utc(setup["reward"].reward_due_at) == as_utc(request.reviewed_at)
     assert task.status == VerificationTaskStatus.RELEASED.value
     assert db.get(PointsAccount, setup["account"].id).balance == 900
+    supplier_account = db.scalar(
+        select(PointsAccount).where(
+            PointsAccount.company_id == setup["supplier"].id
+        )
+    )
+    assert supplier_account is not None and supplier_account.supply_balance == 30
     assert db.scalar(
         select(Notification).where(Notification.scene == "V12_RETURN_REJECTED")
     ) is None

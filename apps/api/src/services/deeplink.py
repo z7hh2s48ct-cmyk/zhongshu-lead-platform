@@ -79,6 +79,6 @@ def resolve_assignment_link(db: Session, token: str, principal: Principal) -> As
     if assignment.status not in _ALLOWED_LINK_STATUSES:
         raise AppError("DEEPLINK_ASSIGNMENT_INACTIVE", "客资已回收、退回或过期", 409)
     lead = db.get(Lead, assignment.lead_id)
-    if not lead or lead.current_assignment_id != assignment.id:
+    if not lead or lead.deleted_at is not None or lead.current_assignment_id != assignment.id:
         raise AppError("DEEPLINK_ASSIGNMENT_INACTIVE", "客资已重新分配，请从最新消息进入", 409)
     return assignment

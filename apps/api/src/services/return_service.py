@@ -14,6 +14,7 @@ from ..core.models import Assignment, AssignmentEvent, Lead, PointsLedger, Retur
 from ..core.time import as_utc, utcnow
 from .notification_service import create_station_message, enqueue_outbox
 from .points_service import change_points
+from .lead_deletion_v12 import require_lead_not_deleted
 
 settings = get_settings()
 
@@ -28,6 +29,7 @@ def create_or_update_return(
 ) -> ReturnRequest:
     if assignment.company_id != principal.company_id:
         raise AppError("FORBIDDEN", "无权申请退回该客资", 403)
+    require_lead_not_deleted(db.get(Lead, assignment.lead_id))
     if assignment.status not in {AssignmentStatus.CLAIMED, AssignmentStatus.FOLLOWING, AssignmentStatus.RETURN_PENDING}:
         raise AppError("RETURN_NOT_ALLOWED", "订单当前不可申请退回", 409)
     if not assignment.claimed_at:
@@ -75,6 +77,7 @@ def add_evidence(
     duration_seconds: int | None,
     uploaded_by: str,
 ) -> ReturnEvidence:
+    require_lead_not_deleted(db.get(Lead, request.lead_id))
     if request.status not in {ReturnStatus.DRAFT, ReturnStatus.NEED_MORE}:
         raise AppError("RETURN_EVIDENCE_LOCKED", "当前状态不能上传证据", 409)
     evidence = ReturnEvidence(
@@ -96,6 +99,7 @@ def add_evidence(
 def submit_return(db: Session, request: ReturnRequest, principal: Principal) -> ReturnRequest:
     if request.company_id != principal.company_id or request.submitted_by != principal.user_id:
         raise AppError("FORBIDDEN", "无权提交该退回申请", 403)
+    require_lead_not_deleted(db.get(Lead, request.lead_id))
     if request.status not in {ReturnStatus.DRAFT, ReturnStatus.NEED_MORE}:
         raise AppError("RETURN_NOT_SUBMITTABLE", "退回申请当前不可提交", 409)
     now = utcnow()
@@ -139,6 +143,7 @@ def review_return(
     lead = db.scalar(select(Lead).where(Lead.id == request.lead_id).with_for_update())
     if not assignment or not lead:
         raise AppError("RETURN_DATA_MISSING", "退回关联数据不完整", 409)
+    require_lead_not_deleted(lead)
     now = utcnow()
     request.reviewed_by = principal.user_id
     request.reviewed_at = now

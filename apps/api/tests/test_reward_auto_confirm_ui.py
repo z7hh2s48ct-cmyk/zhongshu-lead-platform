@@ -126,13 +126,45 @@ def test_assignment_list_and_detail_project_auto_confirmation_without_n_plus_one
         _as_utc(items[assignment_id]["auto_confirmed_at"]) == _as_utc(processed_at)
         for assignment_id in assignment_ids
     )
+    assert all(
+        _as_utc(items[assignment_id]["transaction_confirmed_at"])
+        == _as_utc(items[assignment_id]["claimed_at"]) + timedelta(hours=48)
+        for assignment_id in assignment_ids
+    )
+    assert all(
+        items[assignment_id]["transaction_confirmation_policy"] == "CLAIM_48H"
+        for assignment_id in assignment_ids
+    )
     assert len(statements) == 1
 
     detail = _data(
         client.get(f"/api/v1/v1.2/assignments/{assignment_ids[0]}", headers=headers)
     )
     assert _as_utc(detail["auto_confirmed_at"]) == _as_utc(processed_at)
+    assert _as_utc(detail["transaction_confirmed_at"]) == _as_utc(
+        detail["claimed_at"]
+    ) + timedelta(hours=48)
     assert detail["current_follow_status"] == "CONTACTED"
+
+
+def test_assignment_list_accepts_one_unified_multi_status_page(api_client):
+    client, factory = api_client
+    assignment_ids, _ = _add_auto_confirmed_assignments(factory)
+    headers = _login(client, "franchise_demo", "Franchise123!")
+
+    page = _data(
+        client.get(
+            "/api/v1/v1.2/assignments?status=CLAIMED,FOLLOWING,RETURN_PENDING,COMPLETED&page=1&page_size=100",
+            headers=headers,
+        )
+    )
+
+    listed_ids = {item["id"] for item in page["items"]}
+    assert set(assignment_ids) <= listed_ids
+    assert all(
+        item["status"] in {"CLAIMED", "FOLLOWING", "RETURN_PENDING", "COMPLETED"}
+        for item in page["items"]
+    )
 
 
 def test_admin_trace_exposes_auto_confirmation_as_an_independent_event(api_client):
@@ -155,7 +187,12 @@ def test_admin_trace_exposes_auto_confirmation_as_an_independent_event(api_clien
     assignment = next(
         item for item in trace["assignments"] if item["id"] == assignment_ids[0]
     )
-    assert _as_utc(assignment["auto_confirmed_at"]) == _as_utc(processed_at)
+    assert _as_utc(assignment["auto_confirmed_at"]) == _as_utc(
+        assignment["claimed_at"]
+    ) + timedelta(hours=48)
+    assert _as_utc(assignment["transaction_confirmed_at"]) == _as_utc(
+        assignment["claimed_at"]
+    ) + timedelta(hours=48)
     assert assignment["current_follow_status"] == "CONTACTED"
     auto_event = next(
         item for item in trace["timeline"] if item["action"] == AUTO_CONFIRMED_EVENT
@@ -226,23 +263,23 @@ def test_h5_and_admin_explain_the_48_hour_auto_confirmation_rule() -> None:
     admin = Path("apps/admin/public/v12-operations.js").read_text(encoding="utf-8")
 
     assert "有效认定" in h5
-    assert "超时自动有效" in h5
+    assert "领取满48小时自动有效" in h5
     assert "领取后连续 48 小时未正式申请退回则自动结算入账" in h5
     assert "人工电话确认有效时及时结算" in h5
     assert "已入账奖励在退回审核通过时自动冲回" in h5
     assert "驳回则保持已入账" in h5
     assert "退回审核中" in h5
     assert "退回审核通过 · 已判无效" in h5
-    assert h5.index("assignment.status==='RETURNED'") < h5.index("assignment.auto_confirmed_at")
+    assert h5.index("assignment.status==='RETURNED'") < h5.index("assignment.transaction_confirmed_at")
     assert "派发状态" in admin
     assert "接收确认" in admin
     assert "有效认定" in admin
-    assert "超时自动有效" in admin
+    assert "领取满48小时自动有效" in admin
     assert "人工电话确认有效时及时结算" in admin
     assert "已入账奖励在退回通过时自动冲回" in admin
     assert "驳回则保持入账" in admin
     assert "退回审核通过 · 已判无效" in admin
-    assert admin.index("assignment?.status==='RETURNED'") < admin.index("assignment?.auto_confirmed_at")
+    assert admin.index("assignment?.status==='RETURNED'") < admin.index("assignment?.transaction_confirmed_at")
     for source in (h5, admin):
         assert "被领取并电话确认有效后" not in source
         assert "等待领取人电话确认客资有效" not in source

@@ -41,6 +41,7 @@ from .routers import (
     master_data,
     notifications,
     points,
+    supply_termination,
     returns,
     users,
     v12_admin,
@@ -117,6 +118,7 @@ app.include_router(leads.router, prefix=api_prefix)
 app.include_router(lead_points_v12.router, prefix=api_prefix)
 app.include_router(verification.router, prefix=api_prefix)
 app.include_router(points.router, prefix=api_prefix)
+app.include_router(supply_termination.router, prefix=api_prefix)
 app.include_router(dispatch.router, prefix=api_prefix)
 app.include_router(claim.router, prefix=api_prefix)
 app.include_router(followups.router, prefix=api_prefix)

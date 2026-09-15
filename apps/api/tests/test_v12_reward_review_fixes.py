@@ -185,7 +185,7 @@ def test_hourly_drain_processes_later_rows_after_oldest_failure(db) -> None:
     assert first.status == RewardStatus.SETTLED.value
     assert second.status == RewardStatus.SETTLED.value
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == supplier.id))
-    assert account is not None and account.balance == 60
+    assert account is not None and account.balance == 0 and account.supply_balance == 60
 
 
 def test_receiver_history_filter_uses_published_historical_window(db) -> None:

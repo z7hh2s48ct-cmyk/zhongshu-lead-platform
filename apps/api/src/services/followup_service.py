@@ -50,7 +50,7 @@ def add_followup(
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if lead is None:
+    if lead is None or lead.deleted_at is not None:
         raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     if assignment.status not in {
         AssignmentStatus.CLAIMED.value,
@@ -124,8 +124,9 @@ def followup_to_dict(item: FollowUp) -> dict[str, Any]:
 def overdue_followups(db: Session, now: datetime | None = None) -> list[Assignment]:
     now = now or datetime.now(timezone.utc)
     return db.scalars(
-        select(Assignment).where(
+        select(Assignment).join(Lead, Lead.id == Assignment.lead_id).where(
             Assignment.status.in_([AssignmentStatus.CLAIMED, AssignmentStatus.FOLLOWING]),
+            Lead.deleted_at.is_(None),
             Assignment.first_followup_due_at.is_not(None),
             Assignment.first_followup_due_at <= now,
             ~select(FollowUp.id).where(FollowUp.assignment_id == Assignment.id).exists(),

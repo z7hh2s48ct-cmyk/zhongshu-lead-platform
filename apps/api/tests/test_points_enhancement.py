@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
-from apps.api.src.core.models import Company, Notification, NotificationOutbox, PointsPackage
+from apps.api.src.core.errors import AppError
+from apps.api.src.core.models import Company, Notification, NotificationOutbox, PointsAccount, PointsPackage
 from apps.api.src.schemas.company import CompanyCreateBody
 from apps.api.src.services.auth_service import create_internal_user
 from apps.api.src.services.company_service import create_company
@@ -131,6 +133,136 @@ def test_points_reconciliation_detects_balanced_ledger(db):
     assert result["sequence_error_count"] == 0
 
 
+def test_supply_points_reconciliation_uses_the_supply_wallet(db):
+    company = create_company(db, CompanyCreateBody(code="P104", name="供客积分对账公司"))
+    change_points(
+        db,
+        company_id=company.id,
+        delta=80,
+        ledger_type="REWARD",
+        business_type="TEST",
+        business_id="supply-r1",
+        idempotency_key="recon-supply-r1",
+        created_by=None,
+        point_kind="SUPPLY",
+    )
+    change_points(
+        db,
+        company_id=company.id,
+        delta=-20,
+        ledger_type="ADJUST",
+        business_type="TEST",
+        business_id="supply-a1",
+        idempotency_key="recon-supply-a1",
+        created_by=None,
+        point_kind="SUPPLY",
+    )
+    db.commit()
+
+    customer = reconcile_points_account(db, company.id, point_kind="CUSTOMER")
+    supply = reconcile_points_account(db, company.id, point_kind="SUPPLY")
+
+    assert customer["point_kind"] == "CUSTOMER"
+    assert customer["snapshot_balance"] == 0
+    assert supply["point_kind"] == "SUPPLY"
+    assert supply["balanced"] is True
+    assert supply["expected_closing_balance"] == 60
+    assert supply["snapshot_balance"] == 60
+
+
+def test_points_writes_are_blocked_until_historical_split_is_reconciled(db):
+    company = create_company(db, CompanyCreateBody(code="P105", name="历史分账异常公司"))
+    account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == company.id))
+    assert account is not None
+    account.points_split_status = "BLOCKED"
+    db.commit()
+
+    with pytest.raises(AppError) as exc:
+        change_points(
+            db,
+            company_id=company.id,
+            delta=10,
+            ledger_type="ADJUST",
+            business_type="TEST",
+            business_id="blocked-split",
+            idempotency_key="blocked-split-write",
+            created_by=None,
+        )
+
+    assert exc.value.code == "POINTS_SPLIT_RECONCILIATION_REQUIRED"
+
+
+def test_idempotency_key_reuse_with_different_ledger_semantics_is_rejected(db):
+    company = create_company(db, CompanyCreateBody(code="P106", name="积分幂等冲突公司"))
+    change_points(
+        db,
+        company_id=company.id,
+        delta=20,
+        ledger_type="ADJUST",
+        business_type="TEST",
+        business_id="first",
+        idempotency_key="same-key-different-request",
+        created_by=None,
+    )
+
+    with pytest.raises(AppError) as exc:
+        change_points(
+            db,
+            company_id=company.id,
+            delta=-20,
+            ledger_type="TERMINATION_WRITEOFF",
+            business_type="SUPPLY_TERMINATION",
+            business_id="another-business",
+            idempotency_key="same-key-different-request",
+            created_by=None,
+            allow_frozen=True,
+        )
+
+    assert exc.value.code == "POINTS_IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    ("ledger_type", "point_kind"),
+    [("REWARD", "CUSTOMER"), ("RECHARGE", "SUPPLY"), ("CLAIM", "SUPPLY"), ("RETURN", "SUPPLY")],
+)
+def test_business_ledger_type_cannot_write_to_the_wrong_wallet(db, ledger_type, point_kind):
+    company = create_company(db, CompanyCreateBody(code=f"KIND-{ledger_type}", name=f"{ledger_type} 钱包约束"))
+
+    with pytest.raises(AppError) as exc:
+        change_points(
+            db,
+            company_id=company.id,
+            delta=10,
+            ledger_type=ledger_type,
+            business_type="TEST",
+            business_id=f"wrong-{ledger_type}",
+            idempotency_key=f"wrong-wallet-{ledger_type}",
+            created_by=None,
+            point_kind=point_kind,
+        )
+
+    assert exc.value.code == "POINT_KIND_BUSINESS_MISMATCH"
+
+
+def test_only_reversals_can_explicitly_create_a_negative_balance(db):
+    company = create_company(db, CompanyCreateBody(code="NEGATIVE-GUARD", name="负积分约束公司"))
+
+    with pytest.raises(AppError) as exc:
+        change_points(
+            db,
+            company_id=company.id,
+            delta=-10,
+            ledger_type="ADJUST",
+            business_type="TEST",
+            business_id="negative-adjust",
+            idempotency_key="negative-adjust",
+            created_by=None,
+            allow_negative=True,
+        )
+
+    assert exc.value.code == "POINTS_NEGATIVE_BALANCE_NOT_ALLOWED"
+
+
 def _login(client, username: str, password: str) -> dict[str, str]:
     response = client.post("/api/v1/auth/login", json={"username": username, "password": password})
     assert response.status_code == 200, response.text
@@ -222,6 +354,7 @@ def test_financial_writes_require_voucher_and_preserve_business_ledger_semantics
 
     adjustment_payload = {
         "company_id": company_id,
+        "point_kind": "CUSTOMER",
         "delta": 10,
         "reason": "测试人工调账原因",
         "idempotency_key": "adjust-p101-voucher",

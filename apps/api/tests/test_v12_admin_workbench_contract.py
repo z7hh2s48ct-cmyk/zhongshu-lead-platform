@@ -12,8 +12,8 @@ def test_desktop_workbench_uses_role_specific_navigation_and_lower_left_entrypoi
     source = WORKBENCH.read_text(encoding="utf-8")
 
     assert "ADMIN_VIEW_CONTRACT" in source
-    assert "SUPER_ADMIN:['overview','leads','supplements','publicPool','companies','finance']" in source
-    assert "OPERATION:['overview','leads','supplements','publicPool','telesales','dispatch','companies']" in source
+    assert "SUPER_ADMIN:['overview','leads','supplements','closed','publicPool','companies','finance']" in source
+    assert "OPERATION:['overview','leads','supplements','closed','publicPool','telesales','dispatch','companies','economics']" in source
     assert 'data-account-center' in source
     assert 'data-account-tool' in source
     assert 'data-account-settings' not in source

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..core.enums import PointsLedgerType
@@ -25,7 +25,7 @@ from ..core.state_machine_v12 import assert_reward_transition
 from ..core.time import as_utc
 from ..core.v12_enums import ReturnV12Status, RewardStatus
 from .lead_correction_guard import CORRECTION_REVIEW_REASON
-from .points_service import change_points, get_or_create_account
+from .points_service import change_points
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,8 @@ REWARD_SETTLEMENT_BLOCKED_CODES = {
     "REWARD_ASSIGNMENT_INACTIVE",
     "REWARD_CORRECTION_PENDING",
     "REWARD_SETTLEMENT_BUSY",
+    "REWARD_LEAD_DELETED",
+    "POINTS_SPLIT_RECONCILIATION_REQUIRED",
 }
 
 
@@ -65,6 +67,23 @@ class RewardReversalResult:
     reward: SupplierLeadReward
     ledger: PointsLedger
     idempotent: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveConfirmation:
+    effective_at: datetime | None
+    policy: str | None
+    deadline_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmationSqlExpressions:
+    effective_at: Any
+    policy: Any
+    manual_confirmed_at: Any
+    formal_return_submitted_at: Any
+    rejected_return_at: Any
+    deadline_at: Any
 
 
 def _now(value: datetime | None = None) -> datetime:
@@ -132,6 +151,121 @@ def _manual_confirmation_at(db: Session, assignment_id: str) -> datetime | None:
     )
 
 
+def resolve_effective_confirmation(
+    db: Session,
+    assignment: Assignment,
+    *,
+    as_of: datetime,
+) -> EffectiveConfirmation:
+    """Return the earliest time at which this assignment legally became effective."""
+
+    now = _now(as_of)
+    claimed_at = as_utc(assignment.claimed_at)
+    if claimed_at is None:
+        return EffectiveConfirmation(None, None, None)
+    deadline_at = claimed_at + timedelta(hours=48)
+    manual_at = _manual_confirmation_at(db, assignment.id)
+    return_request = db.scalar(
+        select(ReturnRequest)
+        .where(
+            ReturnRequest.assignment_id == assignment.id,
+            ReturnRequest.submitted_at.is_not(None),
+        )
+        .order_by(ReturnRequest.submitted_at.asc(), ReturnRequest.id.asc())
+        .limit(1)
+    )
+    submitted_at = as_utc(return_request.submitted_at) if return_request else None
+    if (
+        manual_at is not None
+        and (deadline_at is None or manual_at <= deadline_at)
+        and (submitted_at is None or manual_at <= submitted_at)
+        and manual_at <= now
+    ):
+        return EffectiveConfirmation(manual_at, "MANUAL_CONFIRMED", deadline_at)
+    if (
+        deadline_at is not None
+        and deadline_at <= now
+        and (submitted_at is None or submitted_at > deadline_at)
+    ):
+        return EffectiveConfirmation(deadline_at, "CLAIM_48H", deadline_at)
+    rejected_at = (
+        as_utc(return_request.reviewed_at)
+        if return_request
+        and return_request.status == ReturnV12Status.REJECTED.value
+        else None
+    )
+    if rejected_at is not None and rejected_at <= now:
+        return EffectiveConfirmation(rejected_at, "RETURN_REJECTED", deadline_at)
+    return EffectiveConfirmation(None, None, deadline_at)
+
+
+def confirmation_sql_expressions(*, dialect_name: str) -> ConfirmationSqlExpressions:
+    """Build the report form of ``resolve_effective_confirmation``."""
+
+    manual_at = (
+        select(func.min(FollowUp.created_at))
+        .where(FollowUp.assignment_id == Assignment.id, FollowUp.status == "DEAL")
+        .correlate(Assignment)
+        .scalar_subquery()
+    )
+    submitted_at = (
+        select(func.min(ReturnRequest.submitted_at))
+        .where(
+            ReturnRequest.assignment_id == Assignment.id,
+            ReturnRequest.submitted_at.is_not(None),
+        )
+        .correlate(Assignment)
+        .scalar_subquery()
+    )
+    rejected_at = (
+        select(func.min(ReturnRequest.reviewed_at))
+        .where(
+            ReturnRequest.assignment_id == Assignment.id,
+            ReturnRequest.status == ReturnV12Status.REJECTED.value,
+        )
+        .correlate(Assignment)
+        .scalar_subquery()
+    )
+    deadline_at = (
+        func.datetime(
+            Assignment.claimed_at,
+            "+48 hours",
+            type_=Assignment.claimed_at.type,
+        )
+        if dialect_name == "sqlite"
+        else Assignment.claimed_at + text("INTERVAL '48 hours'")
+    )
+    manual_is_first = and_(
+        manual_at.is_not(None),
+        or_(deadline_at.is_(None), manual_at <= deadline_at),
+        or_(submitted_at.is_(None), manual_at <= submitted_at),
+    )
+    deadline_is_effective = and_(
+        deadline_at.is_not(None),
+        or_(submitted_at.is_(None), submitted_at > deadline_at),
+    )
+    effective_at = case(
+        (manual_is_first, manual_at),
+        (deadline_is_effective, deadline_at),
+        (rejected_at.is_not(None), rejected_at),
+        else_=None,
+    )
+    policy = case(
+        (manual_is_first, "MANUAL_CONFIRMED"),
+        (deadline_is_effective, "CLAIM_48H"),
+        (rejected_at.is_not(None), "RETURN_REJECTED"),
+        else_=None,
+    )
+    return ConfirmationSqlExpressions(
+        effective_at=effective_at,
+        policy=policy,
+        manual_confirmed_at=manual_at,
+        formal_return_submitted_at=submitted_at,
+        rejected_return_at=rejected_at,
+        deadline_at=deadline_at,
+    )
+
+
 def _lock_reward_context(
     db: Session, reward_id: str, *, skip_locked: bool = False
 ) -> tuple[Assignment, Lead, SupplierLeadReward]:
@@ -163,6 +297,8 @@ def _lock_reward_context(
                 "REWARD_SETTLEMENT_BUSY", "客资正在处理中，下轮重试结算", 409
             )
         raise AppError("REWARD_ASSIGNMENT_INVALID", "奖励关联客资不存在", 409)
+    if lead.deleted_at is not None:
+        raise AppError("REWARD_LEAD_DELETED", "客资已删除，奖励不能继续结算", 409)
     reward = db.scalar(
         select(SupplierLeadReward)
         .where(SupplierLeadReward.id == reward_id)
@@ -216,21 +352,14 @@ def _lock_settlement_account(
 
 
 def _record_automatic_confirmation(
-    db: Session, assignment: Assignment, lead: Lead, *, due_at: datetime, now: datetime
+    db: Session,
+    assignment: Assignment,
+    *,
+    effective_at: datetime,
+    policy: str,
+    now: datetime,
 ) -> None:
     # An automatic validity decision is not a telephone call or a sales follow-up.
-    manual_confirmation = db.scalar(
-        select(FollowUp.id)
-        .where(
-            FollowUp.assignment_id == assignment.id,
-            FollowUp.status == "DEAL",
-        )
-        .limit(1)
-    )
-    if manual_confirmation or (
-        assignment.status == "COMPLETED" and lead.current_follow_status == "DEAL"
-    ):
-        return
     existing = db.scalar(
         select(AssignmentEvent.id)
         .where(
@@ -241,27 +370,17 @@ def _record_automatic_confirmation(
     )
     if existing:
         return
-    rejected_return = db.scalar(
-        select(ReturnRequest.id)
-        .where(
-            ReturnRequest.assignment_id == assignment.id,
-            ReturnRequest.submitted_at.is_not(None),
-            ReturnRequest.status == ReturnV12Status.REJECTED.value,
-        )
-        .limit(1)
-    )
     db.add(
         AssignmentEvent(
             assignment_id=assignment.id,
             event_type="V12_ASSIGNMENT_AUTO_CONFIRMED",
             actor_user_id=None,
-            occurred_at=now,
+            occurred_at=effective_at,
             payload={
-                "effective_at": due_at.isoformat(),
+                "effective_at": effective_at.isoformat(),
+                "processed_at": now.isoformat(),
                 "claimed_at": as_utc(assignment.claimed_at).isoformat(),
-                "reason": "RETURN_REJECTED"
-                if rejected_return
-                else "NO_RETURN_WITHIN_48H",
+                "reason": policy,
             },
         )
     )
@@ -302,15 +421,23 @@ def settle_supplier_reward(
     claimed_at = as_utc(assignment.claimed_at)
     if claimed_at is None:
         raise AppError("REWARD_ASSIGNMENT_INVALID", "奖励缺少有效领取时间", 409)
-    manual_confirmed_at = _manual_confirmation_at(db, assignment.id)
-    due_at = manual_confirmed_at or claimed_at + timedelta(hours=48)
-    # Only actual manual completion can bypass the automatic 48-hour boundary.
-    if due_at > now:
+    confirmation = resolve_effective_confirmation(db, assignment, as_of=now)
+    active_appeal = _active_appeal_exists(db, reward.assignment_id)
+    due_at = confirmation.effective_at
+    if due_at is None and active_appeal:
+        deadline_at = confirmation.deadline_at
+        if deadline_at is not None and deadline_at <= now:
+            due_at = deadline_at
+    if due_at is None:
         raise AppError(
             "REWARD_NOT_DUE",
             "奖励尚未到结算时间",
             409,
-            {"reward_due_at": due_at.isoformat() if due_at else None},
+            {
+                "reward_due_at": confirmation.deadline_at.isoformat()
+                if confirmation.deadline_at
+                else None
+            },
         )
     if (
         reward.lead_id != lead.id
@@ -339,9 +466,7 @@ def settle_supplier_reward(
     reward.observed_at = reward.observed_at or claimed_at
     reward.appeal_deadline_at = claimed_at + timedelta(hours=48)
     reward.reward_due_at = due_at
-    if assignment.status == "RETURN_PENDING" or _active_appeal_exists(
-        db, reward.assignment_id
-    ):
+    if assignment.status == "RETURN_PENDING" or active_appeal:
         assert_reward_transition(RewardStatus.OBSERVING, RewardStatus.FROZEN)
         reward.status = RewardStatus.FROZEN.value
         reward.frozen_at = reward.frozen_at or now
@@ -354,8 +479,18 @@ def settle_supplier_reward(
         raise AppError("REWARD_POINTS_INVALID", "奖励积分必须大于 0 才能结算", 409)
 
     _lock_settlement_account(db, reward.supplier_company_id, skip_locked=skip_locked)
-    if manual_confirmed_at is None:
-        _record_automatic_confirmation(db, assignment, lead, due_at=due_at, now=now)
+    if confirmation.policy != "MANUAL_CONFIRMED":
+        _record_automatic_confirmation(
+            db,
+            assignment,
+            effective_at=due_at,
+            policy=(
+                "RETURN_REJECTED"
+                if confirmation.policy == "RETURN_REJECTED"
+                else "NO_RETURN_WITHIN_48H"
+            ),
+            now=now,
+        )
     db.flush()
     ledger = change_points(
         db,
@@ -366,6 +501,7 @@ def settle_supplier_reward(
         business_id=reward.id,
         idempotency_key=f"v12-reward:{reward.id}:settle",
         created_by=settled_by,
+        point_kind="SUPPLY",
         metadata={
             "assignment_id": reward.assignment_id,
             "lead_id": reward.lead_id,
@@ -374,10 +510,10 @@ def settle_supplier_reward(
             "reward_ratio_bps": int(reward.reward_ratio_bps),
             "reward_points": int(reward.reward_points),
             "rule_version": int(reward.rule_version),
-            "rule_snapshot": dict(reward.rule_snapshot_json or {}),
-            "settlement_policy": "MANUAL_CONFIRMED"
-            if manual_confirmed_at
-            else "CLAIM_48H",
+            "rule_snapshot": dict(
+                getattr(reward, "rule_snapshot_json", None) or {}
+            ),
+            "settlement_policy": confirmation.policy,
             "claimed_at": claimed_at.isoformat(),
             "eligible_at": due_at.isoformat(),
         },
@@ -424,7 +560,8 @@ def _select_due_reward_ids(
         db.scalars(
             select(SupplierLeadReward.id)
             .join(Assignment, Assignment.id == SupplierLeadReward.assignment_id)
-            .where(*filters)
+            .join(Lead, Lead.id == Assignment.lead_id)
+            .where(*filters, Lead.deleted_at.is_(None))
             .order_by(Assignment.claimed_at.asc(), SupplierLeadReward.id.asc())
             .limit(max(1, min(int(limit), 1000)))
         ).all()
@@ -566,53 +703,6 @@ def drain_due_supplier_reward_settlement(
     return totals
 
 
-def _change_points_allow_negative(
-    db: Session,
-    *,
-    company_id: str,
-    delta: int,
-    business_id: str,
-    idempotency_key: str,
-    related_ledger_id: str,
-    created_by: str,
-    metadata: dict[str, Any],
-) -> PointsLedger:
-    existing = db.scalar(
-        select(PointsLedger).where(
-            PointsLedger.company_id == company_id,
-            PointsLedger.idempotency_key == idempotency_key,
-        )
-    )
-    if existing:
-        return existing
-    account = db.scalar(
-        select(PointsAccount)
-        .where(PointsAccount.company_id == company_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if account is None:
-        account = get_or_create_account(db, company_id)
-    account.balance = int(account.balance) + int(delta)
-    account.version += 1
-    ledger = PointsLedger(
-        account_id=account.id,
-        company_id=company_id,
-        ledger_type=PointsLedgerType.REVERSAL.value,
-        delta=delta,
-        balance_after=int(account.balance),
-        business_type="V12_SUPPLIER_REWARD_REVERSAL",
-        business_id=business_id,
-        idempotency_key=idempotency_key,
-        related_ledger_id=related_ledger_id,
-        metadata_json=metadata,
-        created_by=created_by,
-    )
-    db.add(ledger)
-    db.flush()
-    return ledger
-
-
 def reverse_supplier_reward(
     db: Session,
     *,
@@ -672,14 +762,26 @@ def reverse_supplier_reward(
     ):
         raise AppError("REWARD_LEDGER_MISSING", "未找到原奖励结算流水", 409)
 
-    ledger = _change_points_allow_negative(
+    from .supply_termination import prepare_supplier_reward_reversal
+
+    prepare_supplier_reward_reversal(
+        db,
+        company_id=reward.supplier_company_id,
+        reward_id=reward.id,
+    )
+
+    ledger = change_points(
         db,
         company_id=reward.supplier_company_id,
         delta=-abs(int(original.delta)),
+        ledger_type=PointsLedgerType.REVERSAL.value,
+        business_type="V12_SUPPLIER_REWARD_REVERSAL",
         business_id=reward.id,
         idempotency_key=f"v12-reward:{reward.id}:reverse",
         related_ledger_id=original.id,
         created_by=reversed_by,
+        point_kind="SUPPLY",
+        allow_negative=True,
         metadata={
             "reason_code": normalized_reason,
             "note": note.strip(),
@@ -710,7 +812,7 @@ def reward_to_dict(reward: SupplierLeadReward) -> dict[str, Any]:
         "reward_ratio_bps": int(reward.reward_ratio_bps),
         "reward_points": int(reward.reward_points),
         "rule_version": int(reward.rule_version),
-        "rule_snapshot": dict(reward.rule_snapshot_json or {}),
+        "rule_snapshot": dict(getattr(reward, "rule_snapshot_json", None) or {}),
         "observed_at": reward.observed_at.isoformat() if reward.observed_at else None,
         "appeal_deadline_at": reward.appeal_deadline_at.isoformat()
         if reward.appeal_deadline_at

@@ -310,6 +310,7 @@ def test_approved_return_reverses_early_reward_and_refunds_claim_once(
             business_id=reward.id,
             idempotency_key=f"early-spend:{reward.id}",
             created_by=setup["reviewer"].id,
+            point_kind="SUPPLY",
         )
         db.commit()
     principal = _principal(setup["reviewer"], "return.final.review")
@@ -334,14 +335,13 @@ def test_approved_return_reverses_early_reward_and_refunds_claim_once(
     assert reversal.metadata_json["reason_code"] == "RETURN_APPROVED"
     assert reversal.metadata_json["return_request_id"] == request.id
     assert result.refund_ledger.delta == 100
-    assert (
-        db.scalar(
-            select(PointsAccount.balance).where(
-                PointsAccount.company_id == setup["supplier"].id
-            )
+    supplier_account = db.scalar(
+        select(PointsAccount).where(
+            PointsAccount.company_id == setup["supplier"].id
         )
-        == -spent
     )
+    assert supplier_account.balance == 0
+    assert supplier_account.supply_balance == -spent
     assert (
         db.scalar(
             select(PointsAccount.balance).where(
@@ -397,14 +397,13 @@ def test_rejected_return_keeps_early_reward_paid(db):
     assert setup["reward"].status == "SETTLED"
     assert setup["reward"].reversal_ledger_id is None
     assert setup["assignment"].status == "COMPLETED"
-    assert (
-        db.scalar(
-            select(PointsAccount.balance).where(
-                PointsAccount.company_id == setup["supplier"].id
-            )
+    supplier_account = db.scalar(
+        select(PointsAccount).where(
+            PointsAccount.company_id == setup["supplier"].id
         )
-        == 30
     )
+    assert supplier_account.balance == 0
+    assert supplier_account.supply_balance == 30
     assert (
         db.scalar(
             select(func.count(PointsLedger.id)).where(
@@ -444,7 +443,7 @@ def test_reversal_failure_rolls_back_refund_and_return_approval(db, monkeypatch)
         raise AppError("TEST_REVERSAL_FAILED", "模拟冲回失败", 500)
 
     monkeypatch.setattr(
-        "apps.api.src.services.supplier_reward_v12._change_points_allow_negative",
+        "apps.api.src.services.supplier_reward_v12.change_points",
         fail_reversal,
     )
     with pytest.raises(AppError, match="TEST_REVERSAL_FAILED"):
@@ -468,14 +467,13 @@ def test_reversal_failure_rolls_back_refund_and_return_approval(db, monkeypatch)
         )
         == 900
     )
-    assert (
-        db.scalar(
-            select(PointsAccount.balance).where(
-                PointsAccount.company_id == setup["supplier"].id
-            )
+    supplier_account = db.scalar(
+        select(PointsAccount).where(
+            PointsAccount.company_id == setup["supplier"].id
         )
-        == 30
     )
+    assert supplier_account.balance == 0
+    assert supplier_account.supply_balance == 30
     assert (
         db.scalar(
             select(func.count(PointsLedger.id)).where(
@@ -496,9 +494,16 @@ def test_reversal_failure_rolls_back_refund_and_return_approval(db, monkeypatch)
     )
 
 
-@pytest.mark.parametrize("ledger_type", ["REWARD", "RETURN", "RECHARGE"])
+@pytest.mark.parametrize(
+    ("ledger_type", "point_kind", "expected_customer", "expected_supply"),
+    [
+        ("REWARD", "SUPPLY", 0, -15),
+        ("RETURN", "CUSTOMER", 10, -25),
+        ("RECHARGE", "CUSTOMER", 10, -25),
+    ],
+)
 def test_credit_can_reduce_reversal_debt_without_allowing_more_spending(
-    db, ledger_type
+    db, ledger_type, point_kind, expected_customer, expected_supply
 ):
     setup, request = _early_paid_return(db)
     supplier_id = setup["supplier"].id
@@ -511,6 +516,7 @@ def test_credit_can_reduce_reversal_debt_without_allowing_more_spending(
         business_id=request.id,
         idempotency_key=f"spend:{request.id}",
         created_by=setup["reviewer"].id,
+        point_kind="SUPPLY",
     )
     db.commit()
     direct_invalid_return(
@@ -529,24 +535,27 @@ def test_credit_can_reduce_reversal_debt_without_allowing_more_spending(
         business_id=request.id,
         idempotency_key=f"credit:{request.id}",
         created_by=setup["reviewer"].id,
+        point_kind=point_kind,
     )
     db.commit()
-    assert credit.balance_after == -15
-    assert (
-        db.scalar(
-            select(PointsAccount.balance).where(PointsAccount.company_id == supplier_id)
-        )
-        == -15
+    assert credit.balance_after == (
+        expected_customer if point_kind == "CUSTOMER" else expected_supply
     )
+    supplier_account = db.scalar(
+        select(PointsAccount).where(PointsAccount.company_id == supplier_id)
+    )
+    assert supplier_account.balance == expected_customer
+    assert supplier_account.supply_balance == expected_supply
     with pytest.raises(AppError) as error:
         change_points(
             db,
             company_id=supplier_id,
             delta=-1,
-            ledger_type="CLAIM",
+            ledger_type="ADJUST",
             business_type="TEST_OVERSPEND",
             business_id=request.id,
             idempotency_key=f"overspend:{request.id}",
             created_by=setup["reviewer"].id,
+            point_kind="SUPPLY",
         )
     assert error.value.code == "POINTS_INSUFFICIENT"

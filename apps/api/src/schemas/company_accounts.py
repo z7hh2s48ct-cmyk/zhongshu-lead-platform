@@ -33,6 +33,16 @@ class CompanyAccountPasswordBody(CompanyAccountReasonBody):
     new_password: str | None = Field(default=None, max_length=128)
 
 
+class CompanyOwnerCredentialBody(CompanyAccountReasonBody):
+    username: str | None = Field(default=None, min_length=2, max_length=64)
+    password: str | None = Field(default=None, max_length=128)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, value: str | None) -> str | None:
+        return value.strip() if value else None
+
+
 class CompanyAccountRequestCreateBody(BaseModel):
     request_type: Literal["CREATE_EMPLOYEE", "DISABLE_EMPLOYEE"]
     username: str | None = Field(default=None, min_length=2, max_length=64)

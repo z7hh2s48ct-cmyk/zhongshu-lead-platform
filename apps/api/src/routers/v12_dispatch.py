@@ -37,6 +37,7 @@ from ..services.dispatch_v12 import (
     refuse_pending_assignment,
 )
 from ..services.pre_dispatch_v12 import latest_submitted_pre_dispatch_task_ids
+from ..services.supplier_reward_v12 import confirmation_sql_expressions
 
 router = APIRouter(prefix="/v1.2", tags=["v1.2-dispatch-claim"])
 
@@ -87,6 +88,19 @@ def _assignment_auto_confirmed_at_expression():
     )
 
 
+def _assignment_confirmation_expressions(dialect_name: str):
+    confirmation = confirmation_sql_expressions(dialect_name=dialect_name)
+    confirmed_at = case(
+        (confirmation.effective_at <= func.now(), confirmation.effective_at),
+        else_=None,
+    ).label("transaction_confirmed_at")
+    policy = case(
+        (confirmation.effective_at <= func.now(), confirmation.policy),
+        else_=None,
+    ).label("transaction_confirmation_policy")
+    return confirmed_at, policy
+
+
 def _assignment_dict(
     assignment: Assignment,
     lead: Lead,
@@ -94,6 +108,8 @@ def _assignment_dict(
     reveal_phone: bool = False,
     follow_status: str | None = None,
     auto_confirmed_at=None,
+    transaction_confirmed_at=None,
+    transaction_confirmation_policy: str | None = None,
 ) -> dict:
     reveal_phone = reveal_phone and lead.pending_reason != "CORRECTION_REVIEW_REQUIRED"
     phone = decrypt_text(lead.phone_encrypted) if reveal_phone else None
@@ -129,6 +145,10 @@ def _assignment_dict(
         "auto_confirmed_at": auto_confirmed_at.isoformat()
         if auto_confirmed_at
         else None,
+        "transaction_confirmed_at": transaction_confirmed_at.isoformat()
+        if transaction_confirmed_at
+        else None,
+        "transaction_confirmation_policy": transaction_confirmation_policy,
         "points_price": assignment.points_price,
         "claim_points": assignment.claim_points,
         "price_rule_id": assignment.price_rule_id,
@@ -167,7 +187,14 @@ def _assignment_dict(
     }
 
 
-def _assignment_detail_projection(assignment_id: str, company_id: str):
+def _assignment_detail_projection(
+    assignment_id: str,
+    company_id: str,
+    dialect_name: str = "postgresql",
+):
+    transaction_confirmed_at, transaction_confirmation_policy = (
+        _assignment_confirmation_expressions(dialect_name)
+    )
     return (
         select(
             Assignment.id,
@@ -200,9 +227,15 @@ def _assignment_detail_projection(assignment_id: str, company_id: str):
             Lead.pending_reason.label("lead_pending_reason"),
             _assignment_follow_status_expression(),
             _assignment_auto_confirmed_at_expression(),
+            transaction_confirmed_at,
+            transaction_confirmation_policy,
         )
         .join(Lead, Lead.id == Assignment.lead_id)
-        .where(Assignment.id == assignment_id, Assignment.company_id == company_id)
+        .where(
+            Assignment.id == assignment_id,
+            Assignment.company_id == company_id,
+            Lead.deleted_at.is_(None),
+        )
     )
 
 
@@ -232,6 +265,10 @@ def _projected_assignment_dict(row, *, reveal_phone: bool = False) -> dict:
         "auto_confirmed_at": row.auto_confirmed_at.isoformat()
         if row.auto_confirmed_at
         else None,
+        "transaction_confirmed_at": row.transaction_confirmed_at.isoformat()
+        if row.transaction_confirmed_at
+        else None,
+        "transaction_confirmation_policy": row.transaction_confirmation_policy,
         "points_price": row.points_price,
         "claim_points": row.claim_points,
         "price_rule_id": row.price_rule_id,
@@ -435,18 +472,34 @@ def own_assignments(
     else:
         raise AppError("FORBIDDEN", "无权查看加盟商领取客资", 403)
     if status:
-        filters.append(Assignment.status == status.strip().upper())
-    total = db.scalar(select(func.count(Assignment.id)).where(*filters)) or 0
+        statuses = list(
+            dict.fromkeys(
+                item.strip().upper() for item in status.split(",") if item.strip()
+            )
+        )
+        if statuses:
+            filters.append(Assignment.status.in_(statuses))
+    visible_assignments = (
+        select(func.count(Assignment.id))
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .where(*filters, Lead.deleted_at.is_(None))
+    )
+    total = db.scalar(visible_assignments) or 0
+    transaction_confirmed_at, transaction_confirmation_policy = (
+        _assignment_confirmation_expressions(db.get_bind().dialect.name)
+    )
     rows = db.execute(
         select(
             Assignment,
             Lead,
             _assignment_follow_status_expression(),
             _assignment_auto_confirmed_at_expression(),
+            transaction_confirmed_at,
+            transaction_confirmation_policy,
         )
         .join(Lead, Lead.id == Assignment.lead_id)
-        .where(*filters)
-        .order_by(Assignment.assigned_at.desc())
+        .where(*filters, Lead.deleted_at.is_(None))
+        .order_by(Assignment.assigned_at.desc(), Assignment.id.desc())
         .offset((page_no - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -457,8 +510,10 @@ def own_assignments(
             reveal_phone=assignment.status in CLAIMED_CONTACT_STATUSES,
             follow_status=follow_status,
             auto_confirmed_at=auto_confirmed_at,
+            transaction_confirmed_at=transaction_confirmed_at,
+            transaction_confirmation_policy=transaction_confirmation_policy,
         )
-        for assignment, lead, follow_status, auto_confirmed_at in rows
+        for assignment, lead, follow_status, auto_confirmed_at, transaction_confirmed_at, transaction_confirmation_policy in rows
     ]
     return ok(request, page(items, int(total), page_no, page_size))
 
@@ -471,7 +526,11 @@ def own_assignment_detail(
     db: Session = Depends(get_db),
 ):
     company_id = _principal_company_id(principal)
-    statement = _assignment_detail_projection(assignment_id, company_id)
+    statement = _assignment_detail_projection(
+        assignment_id,
+        company_id,
+        db.get_bind().dialect.name,
+    )
     if principal.has_any_role("FRANCHISE_OWNER") and principal.can("assignment.own.read"):
         pass
     elif principal.has_any_role("FRANCHISE_EMPLOYEE") and principal.can("assignment.employee.read"):

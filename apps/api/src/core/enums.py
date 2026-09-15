@@ -73,6 +73,8 @@ class PointsLedgerType(StrEnum):
     REWARD = "REWARD"
     ADJUST = "ADJUST"
     REVERSAL = "REVERSAL"
+    MIGRATION_SPLIT = "MIGRATION_SPLIT"
+    TERMINATION_WRITEOFF = "TERMINATION_WRITEOFF"
 
 
 class FollowStatus(StrEnum):

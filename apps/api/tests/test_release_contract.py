@@ -54,4 +54,9 @@ def test_live_openapi_contains_v12_contract_and_no_online_payment():
     }
     assert legacy_required <= set(paths)
     assert v12_required <= set(paths)
-    assert not any("payment" in path.lower() or "wechat-pay" in path.lower() for path in paths)
+    online_payment_paths = [
+        path for path in paths
+        if "/supply-terminations/" not in path
+        and ("payment" in path.lower() or "wechat-pay" in path.lower())
+    ]
+    assert online_payment_paths == []

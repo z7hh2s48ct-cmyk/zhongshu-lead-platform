@@ -61,6 +61,8 @@ def test_superadmin_h5_funds_reuses_the_audited_financial_write_contracts() -> N
         "/points/ledgers/${encodeURIComponent(ledgerId)}/reverse",
         "收款核验与凭证说明",
         "调账原因及凭证说明",
+        "adjustment-point-kind",
+        "point_kind",
         "冲正原因及凭证说明",
         "crypto.randomUUID()",
     ):

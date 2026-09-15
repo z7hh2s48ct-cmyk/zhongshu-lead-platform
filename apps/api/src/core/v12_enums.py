@@ -55,6 +55,7 @@ class ReturnV12Status(StrEnum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
 
 
 class ReturnReasonCode(StrEnum):
@@ -83,6 +84,23 @@ class RewardStatus(StrEnum):
 class CompanyLeadCapabilityCode(StrEnum):
     LEAD_SUPPLIER = "LEAD_SUPPLIER"
     LEAD_RECEIVER = "LEAD_RECEIVER"
+
+
+class SupplierCooperationStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    TERMINATION_PENDING = "TERMINATION_PENDING"
+    TERMINATED = "TERMINATED"
+
+
+class SupplyTerminationStatus(StrEnum):
+    REQUESTED = "REQUESTED"
+    NEED_MORE = "NEED_MORE"
+    REJECTED = "REJECTED"
+    APPROVED_PENDING_PAYMENT = "APPROVED_PENDING_PAYMENT"
+    PAID_PENDING_WRITE_OFF = "PAID_PENDING_WRITE_OFF"
+    PAYMENT_FAILED = "PAYMENT_FAILED"
+    CANCELLED = "CANCELLED"
+    TERMINATED = "TERMINATED"
 
 
 class ReviewDecision(StrEnum):

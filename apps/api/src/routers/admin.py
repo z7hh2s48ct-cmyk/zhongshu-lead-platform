@@ -42,6 +42,14 @@ def _validate_wechat_template_config(domain: str, value: dict) -> None:
         raise AppError("WECHAT_TEMPLATE_CONFIG_INVALID", "微信模板字段来源只支持 title、scene、body、remark 或 literal:文本", 422)
 
 
+def _validate_supply_termination_rate(domain: str, key: str, value: dict) -> None:
+    if (domain, key) != ("supply_termination", "cashout_rate"):
+        return
+    rate = value.get("cash_cents_per_point")
+    if not isinstance(rate, int) or isinstance(rate, bool) or rate <= 0:
+        raise AppError("SUPPLY_TERMINATION_RATE_INVALID", "兑换比例必须是正整数分/积分", 422)
+
+
 @router.get("/dashboard/summary")
 def summary(request: Request, principal: CurrentPrincipal, db: Session = Depends(get_db)):
     if not any(
@@ -106,14 +114,19 @@ def alerts(request: Request, principal: CurrentPrincipal, db: Session = Depends(
 @router.get("/system-configs")
 def list_configs(
     request: Request,
-    principal=Depends(require_permissions("*")),
+    principal: CurrentPrincipal,
     db: Session = Depends(get_db),
     domain: str | None = None,
     status: str | None = None,
 ):
+    if not principal.can("*"):
+        if not principal.can("supply.termination.review") or domain != "supply_termination":
+            raise AppError("FORBIDDEN", "无权查看系统配置", 403)
     stmt = select(SystemConfig)
     if domain:
         stmt = stmt.where(SystemConfig.domain == domain)
+    if not principal.can("*"):
+        stmt = stmt.where(SystemConfig.key == "cashout_rate")
     if status:
         stmt = stmt.where(SystemConfig.status == status)
     items = db.scalars(stmt.order_by(SystemConfig.domain, SystemConfig.key, SystemConfig.version.desc())).all()
@@ -148,6 +161,7 @@ def create_config(
     )
     if body.publish_immediately:
         _validate_wechat_template_config(body.domain, body.value)
+        _validate_supply_termination_rate(body.domain, body.key, body.value)
     item = SystemConfig(
         domain=body.domain,
         key=body.key,
@@ -196,6 +210,7 @@ def publish_config(
     if item.status == ConfigStatus.PUBLISHED:
         return ok(request, {"id": item.id, "status": item.status}, "配置已发布")
     _validate_wechat_template_config(item.domain, item.value_json)
+    _validate_supply_termination_rate(item.domain, item.key, item.value_json)
     prior = db.scalars(
         select(SystemConfig).where(
             SystemConfig.domain == item.domain,

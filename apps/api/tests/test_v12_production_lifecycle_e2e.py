@@ -534,13 +534,21 @@ def _run_return_flow(
 
 def _assert_account_reconciles(db: Session, company_id: str) -> None:
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == company_id))
-    ledger_total = db.scalar(
+    customer_total = db.scalar(
         select(func.coalesce(func.sum(PointsLedger.delta), 0)).where(
-            PointsLedger.company_id == company_id
+            PointsLedger.company_id == company_id,
+            PointsLedger.point_kind == "CUSTOMER",
+        )
+    )
+    supply_total = db.scalar(
+        select(func.coalesce(func.sum(PointsLedger.delta), 0)).where(
+            PointsLedger.company_id == company_id,
+            PointsLedger.point_kind == "SUPPLY",
         )
     )
     assert account is not None
-    assert int(account.balance) == int(ledger_total or 0)
+    assert int(account.balance) == int(customer_total or 0)
+    assert int(account.supply_balance) == int(supply_total or 0)
 
 
 def test_v12_empty_database_to_reward_settlement_lifecycle(

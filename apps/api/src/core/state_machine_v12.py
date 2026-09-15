@@ -61,18 +61,41 @@ LEAD_TRANSITIONS: Mapping[LeadV12Status, Set[LeadV12Status]] = {
     LeadV12Status.COMPLETED: {LeadV12Status.CLOSED},
     LeadV12Status.INVALID: {LeadV12Status.CLOSED},
     LeadV12Status.DUPLICATE: {LeadV12Status.READY_DISPATCH, LeadV12Status.CLOSED},
-    LeadV12Status.CLOSED: set(),
+    LeadV12Status.CLOSED: {LeadV12Status.READY_DISPATCH},
 }
 
 RETURN_TRANSITIONS: Mapping[ReturnV12Status, Set[ReturnV12Status]] = {
-    ReturnV12Status.DRAFT: {ReturnV12Status.SUBMITTED, ReturnV12Status.EXPIRED},
-    ReturnV12Status.SUBMITTED: {ReturnV12Status.VERIFYING, ReturnV12Status.NEED_MORE_EVIDENCE, ReturnV12Status.EXPIRED},
-    ReturnV12Status.VERIFYING: {ReturnV12Status.REVIEWING, ReturnV12Status.NEED_MORE_EVIDENCE},
-    ReturnV12Status.NEED_MORE_EVIDENCE: {ReturnV12Status.SUBMITTED, ReturnV12Status.EXPIRED},
-    ReturnV12Status.REVIEWING: {ReturnV12Status.APPROVED, ReturnV12Status.REJECTED, ReturnV12Status.NEED_MORE_EVIDENCE},
+    ReturnV12Status.DRAFT: {
+        ReturnV12Status.SUBMITTED,
+        ReturnV12Status.EXPIRED,
+        ReturnV12Status.CANCELLED,
+    },
+    ReturnV12Status.SUBMITTED: {
+        ReturnV12Status.VERIFYING,
+        ReturnV12Status.NEED_MORE_EVIDENCE,
+        ReturnV12Status.EXPIRED,
+        ReturnV12Status.CANCELLED,
+    },
+    ReturnV12Status.VERIFYING: {
+        ReturnV12Status.REVIEWING,
+        ReturnV12Status.NEED_MORE_EVIDENCE,
+        ReturnV12Status.CANCELLED,
+    },
+    ReturnV12Status.NEED_MORE_EVIDENCE: {
+        ReturnV12Status.SUBMITTED,
+        ReturnV12Status.EXPIRED,
+        ReturnV12Status.CANCELLED,
+    },
+    ReturnV12Status.REVIEWING: {
+        ReturnV12Status.APPROVED,
+        ReturnV12Status.REJECTED,
+        ReturnV12Status.NEED_MORE_EVIDENCE,
+        ReturnV12Status.CANCELLED,
+    },
     ReturnV12Status.APPROVED: set(),
     ReturnV12Status.REJECTED: set(),
     ReturnV12Status.EXPIRED: set(),
+    ReturnV12Status.CANCELLED: set(),
 }
 
 REWARD_TRANSITIONS: Mapping[RewardStatus, Set[RewardStatus]] = {

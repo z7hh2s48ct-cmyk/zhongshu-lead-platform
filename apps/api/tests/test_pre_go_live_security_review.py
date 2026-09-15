@@ -220,6 +220,7 @@ def test_points_same_idempotency_key_is_atomic_under_concurrent_requests(api_cli
 
     payload = {
         "company_id": company_id,
+        "point_kind": "CUSTOMER",
         "delta": 37,
         "reason": "并发幂等安全负例",
         "idempotency_key": "security-concurrent-points-idempotency",

@@ -24,7 +24,9 @@ from ..core.models import (
     User,
     UserRole,
 )
+from ..core.models_v12 import SupplierLeadReward
 from ..core.security import decrypt_text, hash_phone, mask_phone, normalize_phone
+from ..core.time import as_utc
 from .public_pool_v12 import public_pool_lead_conditions
 from .storage import get_storage
 from .storage_cleanup_worker import enqueue_storage_cleanup
@@ -69,6 +71,9 @@ class LeadReportRow:
     latest_followup_next_at: datetime | None
     latest_followup_by_name: str | None
     latest_followup_at: datetime | None
+    supplier_reward_status: str | None = None
+    supplier_reward_points: int | None = None
+    supplier_reward_settled_at: datetime | None = None
 
 
 def _datetime_value(value: Any) -> datetime | None:
@@ -167,6 +172,7 @@ def _report_select(
     internal_assignee = aliased(User, name="internal_assignee")
     internal_user_role = aliased(UserRole, name="internal_user_role")
     internal_role = aliased(Role, name="internal_assignee_role")
+    current_reward = aliased(SupplierLeadReward, name="current_supplier_reward")
     selected = [
         Lead,
         current_assignment,
@@ -176,6 +182,9 @@ def _report_select(
         supplier.name.label("supplier_company_name"),
         internal_assignee.display_name.label("internal_assignee_name"),
         internal_role.code.label("internal_assignee_role_code"),
+        current_reward.status.label("supplier_reward_status"),
+        current_reward.reward_points.label("supplier_reward_points"),
+        current_reward.settled_at.label("supplier_reward_settled_at"),
     ]
     statement = (
         select(*selected)
@@ -200,6 +209,7 @@ def _report_select(
             internal_user_role.user_id == internal_assignee.id,
         )
         .outerjoin(internal_role, internal_role.id == internal_user_role.role_id)
+        .outerjoin(current_reward, current_reward.assignment_id == current_assignment.id)
         .where(*_conditions(filters, current_assignment))
     )
     if include_latest_followup:
@@ -261,6 +271,9 @@ def _lead_report_row(row: Any) -> LeadReportRow:
         latest_followup_next_at=getattr(row, "latest_followup_next_at", None),
         latest_followup_by_name=getattr(row, "latest_followup_by_name", None),
         latest_followup_at=getattr(row, "latest_followup_at", None),
+        supplier_reward_status=getattr(row, "supplier_reward_status", None),
+        supplier_reward_points=getattr(row, "supplier_reward_points", None),
+        supplier_reward_settled_at=getattr(row, "supplier_reward_settled_at", None),
     )
 
 
@@ -317,6 +330,7 @@ def lead_report_to_dicts(
     *,
     include_full_phone: bool = False,
     include_latest_followup: bool = True,
+    sequence_start: int = 1,
 ) -> list[dict[str, Any]]:
     assignment_ids = {
         row.assignment.id for row in rows if row.assignment is not None
@@ -352,7 +366,7 @@ def lead_report_to_dicts(
                 created_by_name=created_by_name,
             )
     result: list[dict[str, Any]] = []
-    for row in rows:
+    for sequence, row in enumerate(rows, start=sequence_start):
         lead = row.lead
         assignment = row.assignment
         franchise_handler_name, franchise_handler_kind = _franchise_handler(row)
@@ -364,6 +378,7 @@ def lead_report_to_dicts(
         )
         result.append(
             {
+                "sequence": sequence,
                 "id": lead.id,
                 "is_test": bool(getattr(lead, "is_test", False)),
                 "customer_name": lead.customer_name,
@@ -411,6 +426,17 @@ def lead_report_to_dicts(
                     else None
                 ),
                 "latest_followup": latest_followups.get(assignment.id) if assignment else None,
+                "supplier_reward_status": row.supplier_reward_status,
+                "supplier_reward_points": (
+                    int(row.supplier_reward_points)
+                    if row.supplier_reward_points is not None
+                    else None
+                ),
+                "supplier_reward_settled_at": (
+                    as_utc(row.supplier_reward_settled_at).isoformat()
+                    if row.supplier_reward_settled_at
+                    else None
+                ),
                 "created_at": lead.created_at.isoformat(),
             }
         )
@@ -418,6 +444,7 @@ def lead_report_to_dicts(
 
 
 LEAD_EXPORT_FIELDS = [
+    "序号",
     "客资编号",
     "客户姓名",
     "完整手机号",
@@ -450,6 +477,7 @@ LEAD_EXPORT_FIELDS = [
 ]
 
 FOLLOWUP_EXPORT_FIELDS = [
+    "序号",
     "客资编号",
     "客户姓名",
     "派发单编号",
@@ -550,8 +578,9 @@ def _iter_followup_export_rows(db: Session, filters: dict[str, Any]):
             yield_per=EXPORT_STREAM_BATCH_SIZE
         )
     )
-    for row in rows:
+    for sequence, row in enumerate(rows, start=1):
         yield {
+            "序号": sequence,
             "客资编号": row.lead_id,
             "客户姓名": row.customer_name,
             "派发单编号": row.assignment_id,
@@ -585,7 +614,7 @@ def _count_export_followups(db: Session, filters: dict[str, Any]) -> int:
     )
 
 
-def _lead_export_row(row: LeadReportRow) -> dict[str, Any]:
+def _lead_export_row(row: LeadReportRow, sequence: int) -> dict[str, Any]:
     lead = row.lead
     assignment = row.assignment
     phone = decrypt_text(lead.phone_encrypted)
@@ -599,6 +628,7 @@ def _lead_export_row(row: LeadReportRow) -> dict[str, Any]:
     )
     franchise_handler_name, franchise_handler_kind = _franchise_handler(row)
     return {
+        "序号": sequence,
         "客资编号": lead.id,
         "客户姓名": lead.customer_name,
         "完整手机号": phone,
@@ -680,7 +710,10 @@ def build_lead_export_workbook(
             WorksheetSpec(
                 name="公海池明细" if public_pool_scope else "客资明细",
                 fieldnames=LEAD_EXPORT_FIELDS,
-                rows=(_lead_export_row(row) for row in report_rows),
+                rows=(
+                    _lead_export_row(row, sequence)
+                    for sequence, row in enumerate(report_rows, start=1)
+                ),
                 rows_per_sheet=LEAD_EXPORT_ROWS_PER_FILE,
                 total_rows=total,
             )

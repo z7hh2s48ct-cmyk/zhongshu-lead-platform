@@ -14,6 +14,7 @@ from ..core.responses import ok, page
 from ..core.security import decrypt_text, mask_phone
 from ..core.v12_enums import VerificationTaskType
 from ..schemas.v12_lead_supply import (
+    LeadLifecycleReasonBody,
     PreDispatchAssignBody,
     PreDispatchDispositionBody,
     PreDispatchSubmitBody,
@@ -24,6 +25,9 @@ from ..services.pre_dispatch_v12 import (
     decide_pre_dispatch_disposition,
     is_pre_dispatch_task_overdue,
     pre_dispatch_verification_info,
+    list_historical_rework_leads,
+    reopen_closed_lead,
+    restore_historical_rework_lead,
     require_pre_dispatch_task_not_overdue,
     start_pre_dispatch_task,
     submit_pre_dispatch_verification,
@@ -47,7 +51,9 @@ def _task_or_raise(db: Session, task_id: str) -> VerificationTask:
             VerificationTask.task_type == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
         )
     )
-    if task is None:
+    if task is None or db.scalar(
+        select(Lead.id).where(Lead.id == task.lead_id, Lead.deleted_at.is_(None))
+    ) is None:
         raise AppError("PRE_DISPATCH_TASK_NOT_FOUND", "前置电销核验任务不存在", 404)
     return task
 
@@ -153,6 +159,96 @@ def _require_telesales(principal: CurrentPrincipal) -> None:
         raise AppError("FORBIDDEN", "仅电销人员可执行前置核验任务", 403)
 
 
+@router.get("/admin/leads/pre-dispatch-rework-history")
+def list_pre_dispatch_rework_history(
+    request: Request,
+    principal=Depends(require_permissions("lead.supplier.review")),
+    db: Session = Depends(get_db),
+    page_no: int = Query(default=1, alias="page", ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+):
+    items, total = list_historical_rework_leads(
+        db,
+        page_no=page_no,
+        page_size=page_size,
+    )
+    return ok(
+        request,
+        page(
+            [
+                {
+                    "id": item["lead"].id,
+                    "customer_name": item["lead"].customer_name,
+                    "status": item["lead"].status,
+                    "pending_reason": item["lead"].pending_reason,
+                    "rework_pending": item["rework_pending"],
+                    "latest_task_id": item["latest_task_id"],
+                }
+                for item in items
+            ],
+            total,
+            page_no,
+            page_size,
+        ),
+    )
+
+
+@router.post("/admin/leads/{lead_id}/pre-dispatch-rework-restore")
+def restore_pre_dispatch_rework_history(
+    lead_id: str,
+    body: LeadLifecycleReasonBody,
+    request: Request,
+    principal=Depends(require_permissions("lead.supplier.review")),
+    db: Session = Depends(get_db),
+):
+    lead = restore_historical_rework_lead(
+        db,
+        lead_id=lead_id,
+        principal=principal,
+        reason=body.reason,
+    )
+    write_audit(
+        db,
+        principal=principal,
+        action="V12_PRE_DISPATCH_REWORK_RESTORE",
+        resource_type="lead",
+        resource_id=lead.id,
+        after={"status": lead.status, "pending_reason": lead.pending_reason},
+        reason=body.reason,
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    return ok(request, {"id": lead.id, "status": lead.status, "pending_reason": lead.pending_reason})
+
+
+@router.post("/admin/leads/{lead_id}/reopen")
+def reopen_closed_lead_endpoint(
+    lead_id: str,
+    body: LeadLifecycleReasonBody,
+    request: Request,
+    principal=Depends(require_permissions("lead.supplier.review")),
+    db: Session = Depends(get_db),
+):
+    lead = reopen_closed_lead(
+        db,
+        lead_id=lead_id,
+        principal=principal,
+        reason=body.reason,
+    )
+    write_audit(
+        db,
+        principal=principal,
+        action="V12_CLOSED_LEAD_REOPEN",
+        resource_type="lead",
+        resource_id=lead.id,
+        after={"status": lead.status, "pending_reason": lead.pending_reason},
+        reason=body.reason,
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    return ok(request, {"id": lead.id, "status": lead.status, "pending_reason": lead.pending_reason})
+
+
 @router.post("/admin/leads/{lead_id}/pre-dispatch-verification")
 def assign_pre_dispatch_verification(
     lead_id: str,
@@ -198,7 +294,10 @@ def list_pre_dispatch_tasks(
 ):
     if not (principal.can("verification.read") or principal.can("verification.task.read") or principal.can("*")):
         raise AppError("FORBIDDEN", "无权查看前置核验任务", 403)
-    filters = [VerificationTask.task_type == VerificationTaskType.PRE_DISPATCH_VERIFY.value]
+    filters = [
+        VerificationTask.task_type == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+        VerificationTask.lead_id.in_(select(Lead.id).where(Lead.deleted_at.is_(None))),
+    ]
     if lead_id:
         filters.append(VerificationTask.lead_id == lead_id)
     if principal.has_any_role("TELESALES"):

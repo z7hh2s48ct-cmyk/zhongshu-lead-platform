@@ -32,6 +32,7 @@ from ..core.models import (
     Region,
     ReturnEvidence,
     ReturnRequest,
+    SupplyTerminationRequest,
     User,
     VerificationSubmission,
     VerificationTask,
@@ -80,7 +81,11 @@ def company_to_dict(company: Company, include_finance: bool = False) -> dict:
         "wechat_bound": bool(company.primary_user_id),
     }
     if include_finance:
-        data["points_balance"] = company.points_account.balance if company.points_account else 0
+        customer_balance = company.points_account.balance if company.points_account else 0
+        supply_balance = company.points_account.supply_balance if company.points_account else 0
+        data["points_balance"] = customer_balance
+        data["customer_points_balance"] = customer_balance
+        data["supply_points_balance"] = supply_balance
     return data
 
 
@@ -522,6 +527,13 @@ def _test_company_purge_scope(db: Session, company_id: str) -> dict[str, list[st
             )
         ).all()
     )
+    termination_ids = list(
+        db.scalars(
+            select(SupplyTerminationRequest.id).where(
+                SupplyTerminationRequest.company_id == company_id
+            )
+        ).all()
+    )
 
     return {
         "lead_ids": lead_ids,
@@ -529,6 +541,7 @@ def _test_company_purge_scope(db: Session, company_id: str) -> dict[str, list[st
         "followup_ids": followup_ids,
         "return_ids": return_ids,
         "reward_ids": reward_ids,
+        "termination_ids": termination_ids,
     }
 
 
@@ -574,17 +587,19 @@ def _lock_purge_business_scope(db: Session, company_id: str) -> dict[str, list[s
         "lead_ids": set(),
         "return_ids": set(),
         "reward_ids": set(),
+        "termination_ids": set(),
     }
     model_by_key = {
         "assignment_ids": Assignment,
         "lead_ids": Lead,
         "return_ids": ReturnRequest,
         "reward_ids": SupplierLeadReward,
+        "termination_ids": SupplyTerminationRequest,
     }
     scope = _test_company_purge_scope(db, company_id)
     for _ in range(3):
         changed = False
-        for key in ("assignment_ids", "lead_ids", "return_ids", "reward_ids"):
+        for key in ("assignment_ids", "lead_ids", "return_ids", "reward_ids", "termination_ids"):
             new_ids = sorted(set(scope[key]) - locked[key])
             if not new_ids:
                 continue
@@ -820,6 +835,7 @@ def preview_test_company_purge(db: Session, company_id: str) -> dict[str, object
             "verification_tasks": len(verification_task_ids),
             "evidence_files": len(evidence_ids),
             "supplier_rewards": len(scope["reward_ids"]),
+            "supply_terminations": len(scope["termination_ids"]),
             "points_ledgers": len(ledger_by_id),
             "points_accounts": len(account_ids),
             "account_requests": len(account_request_ids),
@@ -887,6 +903,7 @@ def _purge_test_company_data(
     followup_ids = scope["followup_ids"]
     return_ids = scope["return_ids"]
     reward_ids = scope["reward_ids"]
+    termination_ids = scope["termination_ids"]
     verification_task_ids: list[str] = []
     if lead_ids or assignment_ids or return_ids:
         verification_task_ids = list(
@@ -1010,7 +1027,7 @@ def _purge_test_company_data(
         account for account in locked_accounts if account.id not in test_account_id_set
     ]
     for account in adjusted_accounts:
-        running = 0
+        running = {"CUSTOMER": 0, "SUPPLY": 0}
         account_ledgers = _lock_rows_for_purge(
             db,
             select(PointsLedger)
@@ -1021,9 +1038,11 @@ def _purge_test_company_data(
         for ledger in account_ledgers:
             if ledger.id in ledger_by_id:
                 continue
-            running += int(ledger.delta)
-            ledger.balance_after = running
-        account.balance = running
+            kind = ledger.point_kind if ledger.point_kind in running else "CUSTOMER"
+            running[kind] += int(ledger.delta)
+            ledger.balance_after = running[kind]
+        account.balance = running["CUSTOMER"]
+        account.supply_balance = running["SUPPLY"]
         account.version += 1
 
     resource_ids = [
@@ -1036,6 +1055,7 @@ def _purge_test_company_data(
         *evidence_ids,
         *verification_task_ids,
         *reward_ids,
+        *termination_ids,
         *ledger_ids,
         *account_ids,
     ]
@@ -1177,6 +1197,13 @@ def _purge_test_company_data(
         )
         db.execute(delete(PointsLedger).where(PointsLedger.id.in_(ledger_ids)))
 
+    if termination_ids:
+        db.execute(
+            delete(SupplyTerminationRequest).where(
+                SupplyTerminationRequest.id.in_(termination_ids)
+            )
+        )
+
     if account_request_ids:
         db.execute(
             delete(CompanyAccountRequest).where(
@@ -1197,6 +1224,7 @@ def _purge_test_company_data(
         "returns": len(return_ids),
         "verification_tasks": len(verification_task_ids),
         "supplier_rewards": len(reward_ids),
+        "supply_terminations": len(termination_ids),
         "points_ledgers": len(ledger_ids),
         "points_accounts": len(account_ids),
         "account_requests": len(account_request_ids),

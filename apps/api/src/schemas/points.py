@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -57,6 +58,7 @@ class ManualAdjustmentBody(BaseModel):
     delta: int
     reason: str = Field(min_length=3, max_length=500)
     idempotency_key: str = Field(min_length=8, max_length=128)
+    point_kind: Literal["CUSTOMER", "SUPPLY"]
 
     @field_validator("reason", mode="before")
     @classmethod

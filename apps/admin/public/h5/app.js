@@ -235,17 +235,18 @@ function rechargeSheet(companyId) {
 
 function adjustmentSheet(companyId) {
   const company = S.fundData.companies.find(item => item.id === companyId);
-  openSheet(`为${company?.name || '加盟商'}人工调账`, `<form class="form" id="adjustment-form"><div class="notice">调整会生成不可变流水。请填写正负积分值及可复核的原因或凭证说明。</div><div class="field"><label for="adjustment-delta">调整积分 *</label><input class="input" id="adjustment-delta" type="number" inputmode="numeric" placeholder="正数增加，负数扣减"></div><div class="field"><label for="adjustment-reason">调账原因及凭证说明 *</label><textarea class="textarea" id="adjustment-reason" minlength="3" maxlength="500"></textarea></div><div class="sheet-actions"><button type="button" class="btn" id="adjustment-cancel">取消</button><button class="btn primary" id="adjustment-submit">确认调账</button></div></form>`, () => {
+  openSheet(`为${company?.name || '加盟商'}人工调账`, `<form class="form" id="adjustment-form"><div class="notice">调整会生成不可变流水。请先选择积分账户，再填写正负积分值及可复核的原因或凭证说明。</div><div class="field"><label for="adjustment-point-kind">积分账户 *</label><select class="select" id="adjustment-point-kind"><option value="CUSTOMER">客资积分</option><option value="SUPPLY">供客积分</option></select></div><div class="field"><label for="adjustment-delta">调整积分 *</label><input class="input" id="adjustment-delta" type="number" inputmode="numeric" placeholder="正数增加，负数扣减"></div><div class="field"><label for="adjustment-reason">调账原因及凭证说明 *</label><textarea class="textarea" id="adjustment-reason" minlength="3" maxlength="500"></textarea></div><div class="sheet-actions"><button type="button" class="btn" id="adjustment-cancel">取消</button><button class="btn primary" id="adjustment-submit">确认调账</button></div></form>`, () => {
     document.querySelector('#adjustment-cancel').onclick = closeSheet;
     const form = document.querySelector('#adjustment-form');
     form.onsubmit = async event => {
       event.preventDefault();
+      const pointKind = document.querySelector('#adjustment-point-kind').value;
       const delta = Number(document.querySelector('#adjustment-delta').value);
       const reason = document.querySelector('#adjustment-reason').value.trim();
       if (!Number.isInteger(delta) || delta === 0 || reason.length < 3) { toast('请填写非零整数积分和至少 3 个字符的说明', true); return; }
       const button = document.querySelector('#adjustment-submit'); button.disabled = true;
       try {
-        await api('/points/adjust', { method: 'POST', body: JSON.stringify({ company_id: companyId, delta, reason, idempotency_key: `h5-adjust-${crypto.randomUUID()}` }) });
+        await api('/points/adjust', { method: 'POST', body: JSON.stringify({ company_id: companyId, point_kind: pointKind, delta, reason, idempotency_key: `h5-adjust-${crypto.randomUUID()}` }) });
       } catch (error) { button.disabled = false; toast(error.message, true); return; }
       toast('积分调账已入账');
       if (form.isConnected) {

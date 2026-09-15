@@ -4,7 +4,7 @@ import csv
 import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from threading import Lock
 from typing import Any, Literal
@@ -53,8 +53,13 @@ from ..core.v12_enums import VerificationTaskType
 from ..schemas.v12_reports import LeadExportRequestBody, LeadReportSearchBody
 from ..services.audit import write_audit
 from ..services.lead_export_v12 import lead_report_to_dicts, list_lead_report_rows
+from ..services.notification_service import visible_notification_condition
 from ..services.return_v12 import return_request_to_dict
 from ..services.storage import create_file_access_token, get_storage
+from ..services.supplier_reward_v12 import (
+    confirmation_sql_expressions,
+    resolve_effective_confirmation,
+)
 
 router = APIRouter(prefix="/v1.2", tags=["v1.2-reports-audit"])
 
@@ -277,7 +282,8 @@ OPERATION_PROCESSED_ACTION_PRIORITY.update(
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value else None
+    normalized = as_utc(value)
+    return normalized.isoformat() if normalized else None
 
 
 def _safe_csv_cell(value: Any) -> str:
@@ -330,6 +336,30 @@ def _period_window(period: str | None) -> tuple[str, datetime, datetime]:
         raise AppError("PERIOD_INVALID", "统计周期仅支持 day/week/month", 422)
     now = datetime.now(timezone.utc)
     return normalized, now - timedelta(days=days_by_period[normalized]), now
+
+
+def _point_flow_period_window(
+    period: str,
+    anchor: date | None,
+) -> tuple[str, date, datetime, datetime]:
+    normalized = period.strip().lower()
+    if normalized not in {"day", "month"}:
+        raise AppError("PERIOD_INVALID", "积分经营统计仅支持 day/month", 422)
+    local_zone = ZoneInfo("Asia/Shanghai")
+    anchor_date = anchor or datetime.now(local_zone).date()
+    if normalized == "day":
+        start_local = datetime.combine(anchor_date, datetime.min.time(), local_zone)
+        end_local = start_local + timedelta(days=1)
+    else:
+        month_start = anchor_date.replace(day=1)
+        next_month = (
+            month_start.replace(year=month_start.year + 1, month=1)
+            if month_start.month == 12
+            else month_start.replace(month=month_start.month + 1)
+        )
+        start_local = datetime.combine(month_start, datetime.min.time(), local_zone)
+        end_local = datetime.combine(next_month, datetime.min.time(), local_zone)
+    return normalized, anchor_date, start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
 def _counts(db: Session, model, filters: list[Any]) -> dict[str, int]:
@@ -1065,23 +1095,28 @@ def own_report(
     company_id = principal.company_id
     normalized_period, period_start, period_end = _period_window(period)
     employee_scope = principal.has_any_role("FRANCHISE_EMPLOYEE") and principal.can("assignment.employee.read")
+    live_lead_ids = select(Lead.id).where(Lead.deleted_at.is_(None))
     if employee_scope:
         assignment_ids = select(Assignment.id).where(
             Assignment.company_id == company_id,
             Assignment.internal_assignee_user_id == principal.user_id,
+            Assignment.lead_id.in_(live_lead_ids),
         )
         lead_f = [
             Lead.supplier_company_id == company_id,
             Lead.submitter_user_id == principal.user_id,
+            Lead.deleted_at.is_(None),
             *_time(Lead.created_at, period_start, period_end),
         ]
         assignment_f = [
             Assignment.company_id == company_id,
             Assignment.internal_assignee_user_id == principal.user_id,
+            Assignment.lead_id.in_(live_lead_ids),
             *_time(Assignment.assigned_at, period_start, period_end),
         ]
         return_f = [
             ReturnRequest.company_id == company_id,
+            ReturnRequest.lead_id.in_(live_lead_ids),
             or_(
                 ReturnRequest.submitted_by == principal.user_id,
                 ReturnRequest.assignment_id.in_(assignment_ids),
@@ -1096,18 +1131,22 @@ def own_report(
         rewards = {"total": 0, "by_status": {}, "points": 0}
     else:
         assignment_ids = select(Assignment.id).where(
-            or_(Assignment.company_id == company_id, Assignment.receiver_company_id == company_id)
+            or_(Assignment.company_id == company_id, Assignment.receiver_company_id == company_id),
+            Assignment.lead_id.in_(live_lead_ids),
         )
         lead_f = [
             Lead.supplier_company_id == company_id,
+            Lead.deleted_at.is_(None),
             *_time(Lead.created_at, period_start, period_end),
         ]
         assignment_f = [
             or_(Assignment.company_id == company_id, Assignment.receiver_company_id == company_id),
+            Assignment.lead_id.in_(live_lead_ids),
             *_time(Assignment.assigned_at, period_start, period_end),
         ]
         return_f = [
             ReturnRequest.company_id == company_id,
+            ReturnRequest.lead_id.in_(live_lead_ids),
             *_time(ReturnRequest.created_at, period_start, period_end),
         ]
         points_f = [
@@ -1117,6 +1156,7 @@ def own_report(
         ]
         reward_f = [
             SupplierLeadReward.supplier_company_id == company_id,
+            SupplierLeadReward.lead_id.in_(live_lead_ids),
             *_time(SupplierLeadReward.created_at, period_start, period_end),
         ]
         rewards = _summary(db, SupplierLeadReward, reward_f)
@@ -1148,10 +1188,12 @@ def own_report(
         "confirmed_invalid": exception_breakdown["confirmed_invalid"],
         "consumed_points": consumed_points,
     }
-    unread = db.scalar(select(func.count(Notification.id)).where(
-        or_(Notification.user_id == principal.user_id, (Notification.user_id.is_(None)) & (Notification.company_id == company_id)),
-        Notification.read_at.is_(None),
-    )) or 0
+    unread = db.scalar(
+        select(func.count(Notification.id)).where(
+            visible_notification_condition(principal),
+            Notification.read_at.is_(None),
+        )
+    ) or 0
     points = {"consumed_points": consumed_points}
     return ok(request, {
         "company_id": company_id,
@@ -1169,6 +1211,192 @@ def own_report(
         "supplier_rewards": rewards,
         "unread_notifications": int(unread),
     })
+
+
+@router.get("/reports/point-flows")
+def point_flow_report(
+    request: Request,
+    principal=Depends(require_permissions("report.v12.read")),
+    db: Session = Depends(get_db),
+    period: str = Query(default="day"),
+    anchor: date | None = Query(default=None),
+    page_no: int = Query(default=1, alias="page", ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+):
+    if not (
+        principal.can("*")
+        or principal.can("points.read")
+        or principal.can("dashboard.finance.read")
+        or principal.can("reward.read")
+    ):
+        raise AppError("FORBIDDEN", "无权查看积分经营统计", 403)
+    period_kind, anchor_date, period_start, period_end = _point_flow_period_window(
+        period,
+        anchor,
+    )
+    reward = aliased(SupplierLeadReward, name="point_flow_reward")
+    return_request = aliased(ReturnRequest, name="point_flow_return")
+    supplier = aliased(Company, name="point_flow_supplier")
+    receiver = aliased(Company, name="point_flow_receiver")
+    confirmation = confirmation_sql_expressions(
+        dialect_name=db.get_bind().dialect.name,
+    )
+    confirmed_at = confirmation.effective_at
+    filters = [
+        Assignment.claimed_at.is_not(None),
+        confirmed_at.is_not(None),
+        confirmed_at >= period_start,
+        confirmed_at < period_end,
+        confirmed_at <= datetime.now(timezone.utc),
+        or_(Lead.deleted_at.is_(None), confirmed_at <= Lead.deleted_at),
+    ]
+    receiver_points = func.coalesce(Assignment.claim_points, Assignment.points_price, 0)
+    receiver_refund = case(
+        (
+            and_(
+                return_request.status == "APPROVED",
+                return_request.refund_points.is_not(None),
+            ),
+            return_request.refund_points,
+        ),
+        else_=0,
+    )
+    earned_reward = and_(
+        reward.id.is_not(None),
+        or_(
+            reward.status.in_(("SETTLED", "REVERSED")),
+            reward.settled_at.is_not(None),
+        ),
+    )
+    supplier_points = case((earned_reward, reward.reward_points), else_=0)
+    supplier_reversal = case(
+        (reward.status == "REVERSED", reward.reward_points),
+        else_=0,
+    )
+    platform_points = (
+        receiver_points - receiver_refund - supplier_points + supplier_reversal
+    )
+    totals = db.execute(
+        select(
+            func.count(Assignment.id).label("transaction_confirmed_count"),
+            func.coalesce(func.sum(receiver_points), 0).label("receiver_points"),
+            func.coalesce(func.sum(receiver_refund), 0).label("receiver_refunds"),
+            func.coalesce(func.sum(supplier_points), 0).label("supplier_points"),
+            func.coalesce(func.sum(supplier_reversal), 0).label(
+                "supplier_reversals"
+            ),
+            func.coalesce(func.sum(platform_points), 0).label("platform_points"),
+        )
+        .select_from(Assignment)
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .outerjoin(reward, reward.assignment_id == Assignment.id)
+        .outerjoin(return_request, return_request.assignment_id == Assignment.id)
+        .where(*filters)
+    ).one()
+    new_lead_count = int(
+        db.scalar(
+            select(func.count(Lead.id)).where(
+                Lead.source_kind.is_not(None),
+                Lead.created_at >= period_start,
+                Lead.created_at < period_end,
+            )
+        )
+        or 0
+    )
+    rows = db.execute(
+        select(
+            reward.id.label("reward_id"),
+            Lead.id.label("lead_id"),
+            Assignment.id.label("assignment_id"),
+            case(
+                (reward.id.is_(None), "NOT_APPLICABLE"),
+                else_=reward.status,
+            ).label("settlement_status"),
+            confirmed_at.label("transaction_confirmed_at"),
+            reward.settled_at.label("reward_settled_at"),
+            reward.reversed_at.label("supplier_reward_reversed_at"),
+            receiver_points.label("receiver_points_consumed"),
+            receiver_refund.label("receiver_points_refunded"),
+            return_request.reviewed_at.label("receiver_refunded_at"),
+            supplier_points.label("supplier_reward_points"),
+            supplier_reversal.label("supplier_reward_reversed_points"),
+            platform_points.label("platform_net_points"),
+            Lead.customer_name,
+            supplier.name.label("supplier_company_name"),
+            receiver.name.label("receiver_company_name"),
+        )
+        .select_from(Assignment)
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .outerjoin(reward, reward.assignment_id == Assignment.id)
+        .outerjoin(return_request, return_request.assignment_id == Assignment.id)
+        .outerjoin(supplier, supplier.id == Lead.supplier_company_id)
+        .outerjoin(
+            receiver,
+            receiver.id == func.coalesce(Assignment.receiver_company_id, Assignment.company_id),
+        )
+        .where(*filters)
+        .order_by(confirmed_at.desc(), Assignment.id.desc())
+        .offset((page_no - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    items = [
+        {
+            "sequence": (page_no - 1) * page_size + index,
+            "reward_id": row.reward_id,
+            "lead_id": row.lead_id,
+            "lead_code": f"KZ-{row.lead_id.replace('-', '')[-8:].upper()}",
+            "assignment_id": row.assignment_id,
+            "customer_name": row.customer_name,
+            "supplier_company_name": row.supplier_company_name,
+            "receiver_company_name": row.receiver_company_name,
+            "receiver_points_consumed": int(row.receiver_points_consumed),
+            "receiver_points_refunded": int(row.receiver_points_refunded),
+            "receiver_refunded_at": _iso(row.receiver_refunded_at)
+            if int(row.receiver_points_refunded)
+            else None,
+            "supplier_reward_points": int(row.supplier_reward_points),
+            "supplier_reward_reversed_points": int(
+                row.supplier_reward_reversed_points
+            ),
+            "supplier_reward_reversed_at": _iso(
+                row.supplier_reward_reversed_at
+            ),
+            "platform_net_points": int(row.platform_net_points),
+            "settlement_status": row.settlement_status,
+            "transaction_confirmed_at": _iso(row.transaction_confirmed_at),
+            "reward_settled_at": _iso(row.reward_settled_at),
+        }
+        for index, row in enumerate(rows, start=1)
+    ]
+    period_label = (
+        anchor_date.isoformat()
+        if period_kind == "day"
+        else anchor_date.strftime("%Y-%m")
+    )
+    data = page(items, int(totals.transaction_confirmed_count), page_no, page_size)
+    data.update(
+        {
+            "period": {
+                "kind": period_kind,
+                "anchor": anchor_date.isoformat(),
+                "label": period_label,
+                "from": period_start.isoformat(),
+                "to": period_end.isoformat(),
+            },
+            "summary": {
+                "new_lead_count": new_lead_count,
+                "transaction_confirmed_count": int(totals.transaction_confirmed_count),
+                "receiver_points_consumed": int(totals.receiver_points),
+                "receiver_points_refunded": int(totals.receiver_refunds),
+                "supplier_reward_points": int(totals.supplier_points),
+                "supplier_reward_reversed_points": int(
+                    totals.supplier_reversals
+                ),
+                "platform_net_points": int(totals.platform_points),
+            },
+        }
+    )
+    return ok(request, data)
 
 
 def _lead_export_task_dict(task: LeadExportTask) -> dict[str, Any]:
@@ -1362,6 +1590,7 @@ def lead_report_list(
                 db,
                 rows,
                 include_full_phone=principal.can("*") or principal.can("lead.phone.read"),
+                sequence_start=(page_no - 1) * page_size + 1,
             ),
             total,
             page_no,
@@ -1393,6 +1622,7 @@ def search_lead_report(
                 db,
                 rows,
                 include_full_phone=principal.can("*") or principal.can("lead.phone.read"),
+                sequence_start=(body.page - 1) * body.page_size + 1,
             ),
             total,
             body.page,
@@ -1874,7 +2104,8 @@ def _trace(
         else []
     )
     auto_confirmed_at_by_assignment = {
-        item.assignment_id: item.occurred_at
+        item.assignment_id: (item.payload or {}).get("effective_at")
+        or _iso(item.occurred_at)
         for item in assignment_events
         if item.event_type == "V12_ASSIGNMENT_AUTO_CONFIRMED"
     }
@@ -1903,6 +2134,18 @@ def _trace(
     notification_ids = {str(item.payload.get("notification_id")) for item in outboxes if item.payload.get("notification_id")}
     notifications = db.scalars(select(Notification).where(Notification.id.in_(notification_ids)).order_by(Notification.created_at)).all() if notification_ids else []
     resolved_lead = db.get(Lead, lead_id) if lead_id else None
+    confirmation_as_of = datetime.now(timezone.utc)
+    deleted_at = as_utc(resolved_lead.deleted_at) if resolved_lead else None
+    if deleted_at is not None and deleted_at < confirmation_as_of:
+        confirmation_as_of = deleted_at
+    confirmations = {
+        item.id: resolve_effective_confirmation(
+            db,
+            item,
+            as_of=confirmation_as_of,
+        )
+        for item in assignments
+    }
     user_ids = {
         value
         for value in (
@@ -2016,6 +2259,7 @@ def _trace(
             else None,
             "phone_masked": mask_phone(decrypt_text(resolved_lead.phone_encrypted)),
             "status": resolved_lead.status,
+            "current_assignment_id": resolved_lead.current_assignment_id,
             "source_kind": resolved_lead.source_kind,
             "source_channel": resolved_lead.source_channel,
             "review_status": resolved_lead.review_status,
@@ -2062,7 +2306,11 @@ def _trace(
                 "claim_points": item.claim_points,
                 "assigned_at": _iso(item.assigned_at),
                 "claimed_at": _iso(item.claimed_at),
-                "auto_confirmed_at": _iso(auto_confirmed_at_by_assignment.get(item.id)),
+                "auto_confirmed_at": auto_confirmed_at_by_assignment.get(item.id),
+                "transaction_confirmed_at": _iso(
+                    confirmations[item.id].effective_at
+                ),
+                "transaction_confirmation_policy": confirmations[item.id].policy,
                 "assigned_by_name": _display_name(users.get(item.assigned_by)),
                 "internal_assignee_name": _display_name(
                     users.get(item.internal_assignee_user_id)

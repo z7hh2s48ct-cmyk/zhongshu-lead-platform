@@ -147,6 +147,15 @@ class LeadDeleteBody(BaseModel):
         return normalized
 
 
+class LeadLifecycleReasonBody(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_lifecycle_reason(cls, value: str) -> str:
+        return value.strip()
+
+
 class SupplierReviewBody(BaseModel):
     decision: str = Field(min_length=1, max_length=32)
     note: str | None = Field(default=None, max_length=1000)

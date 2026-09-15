@@ -42,6 +42,8 @@ ROLE_PERMISSION_MATRIX: dict[str, tuple[str, list[str]]] = {
             "audit.read",
             "report.v12.read",
             "calendar.read",
+            "supply.termination.read",
+            "supply.termination.review",
         ],
     ),
     "TELESALES": (
@@ -69,6 +71,7 @@ ROLE_PERMISSION_MATRIX: dict[str, tuple[str, list[str]]] = {
             "return.own.manage",
             "points.own.read",
             "notification.own.read",
+            "supply.termination.own.manage",
         ],
     ),
     "FRANCHISE_EMPLOYEE": (
@@ -81,6 +84,7 @@ ROLE_PERMISSION_MATRIX: dict[str, tuple[str, list[str]]] = {
             "followup.own.manage",
             "return.own.manage",
             "notification.own.read",
+            "supply.termination.own.read",
         ],
     ),
 }
@@ -99,6 +103,8 @@ SENSITIVE_PERMISSION_CODES = frozenset(
         "audit.read",
         "calendar.manage",
         "calendar.import",
+        "supply.termination.pay",
+        "supply.termination.reopen",
     }
 )
 

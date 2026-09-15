@@ -18,6 +18,7 @@ from ..core.models import (
     PointsAccount,
     PointsLedger,
     PointsPackage,
+    SupplyTerminationRequest,
 )
 from ..core.time import as_utc
 from .lead_points_v12 import LeadPointsSettings, operation_claim_points_for_lead
@@ -42,12 +43,16 @@ def get_or_create_account(db: Session, company_id: str) -> PointsAccount:
 def points_available_for_dispatch(db: Session, company_id: str) -> tuple[int, int, int]:
     account = get_or_create_account(db, company_id)
     reserved = db.scalar(
-        select(func.coalesce(func.sum(Assignment.points_price), 0)).where(
+        select(func.coalesce(func.sum(Assignment.points_price), 0))
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .where(
             Assignment.company_id == company_id,
             Assignment.status == AssignmentStatus.PENDING_CLAIM,
+            Lead.deleted_at.is_(None),
         )
     ) or 0
-    return int(account.balance), int(reserved), int(account.balance - reserved)
+    available = max(0, int(account.balance - reserved - account.frozen_customer_points))
+    return int(account.balance), int(reserved), available
 
 
 def _effective_package_stmt(now: datetime):
@@ -81,6 +86,8 @@ def account_summary(db: Session, company_id: str) -> dict[str, Any]:
         "company_name": company.name,
         "level_code": company.level_code,
         "balance": balance,
+        "customer_balance": balance,
+        "supply_balance": int(get_or_create_account(db, company_id).supply_balance),
         "pending_claim_points": reserved,
         "available_for_dispatch": available,
         "low_points_threshold": threshold,
@@ -147,6 +154,36 @@ def _points_idempotent_ledger(db: Session, company_id: str, idempotency_key: str
     )
 
 
+def _validate_idempotent_ledger(
+    existing: PointsLedger,
+    *,
+    delta: int,
+    ledger_type: str,
+    business_type: str,
+    business_id: str,
+    point_kind: str,
+    external_reference: str | None,
+    related_ledger_id: str | None,
+) -> PointsLedger:
+    expected = (
+        int(delta), str(ledger_type), business_type, business_id,
+        point_kind, external_reference, related_ledger_id,
+    )
+    actual = (
+        int(existing.delta), existing.ledger_type, existing.business_type,
+        existing.business_id, existing.point_kind, existing.external_reference,
+        existing.related_ledger_id,
+    )
+    if actual != expected:
+        raise AppError(
+            "POINTS_IDEMPOTENCY_CONFLICT",
+            "幂等键已被另一笔积分业务使用",
+            409,
+            {"ledger_id": existing.id},
+        )
+    return existing
+
+
 def _serialize_points_account(db: Session, company_id: str) -> PointsAccount:
     """Acquire the account write serialization boundary before changing balance."""
 
@@ -178,6 +215,12 @@ def _serialize_points_account(db: Session, company_id: str) -> PointsAccount:
     return account
 
 
+def lock_points_account(db: Session, company_id: str) -> PointsAccount:
+    """Expose the wallet lock for multi-step financial workflows."""
+
+    return _serialize_points_account(db, company_id)
+
+
 def change_points(
     db: Session,
     *,
@@ -191,14 +234,60 @@ def change_points(
     external_reference: str | None = None,
     related_ledger_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    point_kind: str = "CUSTOMER",
+    allow_frozen: bool = False,
+    allow_negative: bool = False,
 ) -> PointsLedger:
     if delta == 0:
         raise AppError("POINTS_DELTA_ZERO", "积分变动不能为0", 422)
+    normalized_kind = point_kind.strip().upper()
+    if normalized_kind not in {"CUSTOMER", "SUPPLY"}:
+        raise AppError("POINT_KIND_INVALID", "积分账户类型无效", 422)
+    normalized_ledger_type = (
+        ledger_type.value if isinstance(ledger_type, PointsLedgerType) else str(ledger_type).strip().upper()
+    )
+    required_kind = {
+        PointsLedgerType.REWARD.value: "SUPPLY",
+        PointsLedgerType.RECHARGE.value: "CUSTOMER",
+        PointsLedgerType.CLAIM.value: "CUSTOMER",
+        PointsLedgerType.RETURN.value: "CUSTOMER",
+    }.get(normalized_ledger_type)
+    if required_kind and normalized_kind != required_kind:
+        raise AppError(
+            "POINT_KIND_BUSINESS_MISMATCH",
+            "积分流水类型与积分账户不一致",
+            422,
+            {"ledger_type": normalized_ledger_type, "point_kind": normalized_kind},
+        )
+    if normalized_ledger_type == PointsLedgerType.REVERSAL.value:
+        original = db.get(PointsLedger, related_ledger_id) if related_ledger_id else None
+        if original is None or original.point_kind != normalized_kind:
+            raise AppError(
+                "POINT_KIND_BUSINESS_MISMATCH",
+                "冲正流水必须关联同一积分账户的原流水",
+                422,
+                {"ledger_type": normalized_ledger_type, "point_kind": normalized_kind},
+            )
+    if allow_negative and normalized_ledger_type != PointsLedgerType.REVERSAL.value:
+        raise AppError(
+            "POINTS_NEGATIVE_BALANCE_NOT_ALLOWED",
+            "仅异常冲正允许形成负积分余额",
+            422,
+        )
 
     # Fast path avoids unnecessary locking for normal retries.
     existing = _points_idempotent_ledger(db, company_id, idempotency_key)
     if existing:
-        return existing
+        return _validate_idempotent_ledger(
+            existing,
+            delta=delta,
+            ledger_type=normalized_ledger_type,
+            business_type=business_type,
+            business_id=business_id,
+            point_kind=normalized_kind,
+            external_reference=external_reference,
+            related_ledger_id=related_ledger_id,
+        )
 
     account = _serialize_points_account(db, company_id)
 
@@ -206,17 +295,65 @@ def change_points(
     # idempotency key while this transaction waited for the account write lock.
     existing = _points_idempotent_ledger(db, company_id, idempotency_key)
     if existing:
-        return existing
+        return _validate_idempotent_ledger(
+            existing,
+            delta=delta,
+            ledger_type=normalized_ledger_type,
+            business_type=business_type,
+            business_id=business_id,
+            point_kind=normalized_kind,
+            external_reference=external_reference,
+            related_ledger_id=related_ledger_id,
+        )
 
-    new_balance = int(account.balance) + int(delta)
-    if delta < 0 and new_balance < 0:
-        raise AppError("POINTS_INSUFFICIENT", "积分不足", 409, {"balance": account.balance, "required": abs(delta)})
-    account.balance = new_balance
+    if account.points_split_status != "READY":
+        raise AppError(
+            "POINTS_SPLIT_RECONCILIATION_REQUIRED",
+            "历史积分分账存在异常，完成对账前不能变更积分",
+            409,
+            {"points_split_status": account.points_split_status},
+        )
+
+    balance_attr = "balance" if normalized_kind == "CUSTOMER" else "supply_balance"
+    frozen_attr = "frozen_customer_points" if normalized_kind == "CUSTOMER" else "frozen_supply_points"
+    current_balance = int(getattr(account, balance_attr))
+    frozen_points = int(getattr(account, frozen_attr))
+    active_supply_settlement = False
+    if normalized_kind == "SUPPLY" and not allow_frozen:
+        active_supply_settlement = db.scalar(
+            select(SupplyTerminationRequest.id)
+            .where(
+                SupplyTerminationRequest.company_id == company_id,
+                SupplyTerminationRequest.status.in_(
+                    ("APPROVED_PENDING_PAYMENT", "PAID_PENDING_WRITE_OFF", "PAYMENT_FAILED")
+                ),
+            )
+            .limit(1)
+        ) is not None
+    if normalized_kind == "SUPPLY" and not allow_frozen and (frozen_points > 0 or active_supply_settlement):
+        raise AppError(
+            "POINTS_FROZEN_FOR_TERMINATION",
+            "终止客资合作结算中的供客积分已冻结",
+            409,
+            {"balance": current_balance, "frozen_points": frozen_points},
+        )
+    new_balance = current_balance + int(delta)
+    if delta < 0 and new_balance < 0 and not allow_negative:
+        raise AppError("POINTS_INSUFFICIENT", "积分不足", 409, {"balance": current_balance, "required": abs(delta)})
+    if delta < 0 and not allow_frozen and not allow_negative and new_balance < frozen_points:
+        raise AppError(
+            "POINTS_FROZEN_FOR_TERMINATION",
+            "终止客资合作结算中的积分已冻结",
+            409,
+            {"balance": current_balance, "frozen_points": frozen_points},
+        )
+    setattr(account, balance_attr, new_balance)
     account.version += 1
     ledger = PointsLedger(
         account_id=account.id,
         company_id=company_id,
-        ledger_type=ledger_type,
+        ledger_type=normalized_ledger_type,
+        point_kind=normalized_kind,
         delta=delta,
         balance_after=new_balance,
         business_type=business_type,
@@ -309,6 +446,7 @@ def reverse_ledger(db: Session, original: PointsLedger, *, reason: str, idempote
         related_ledger_id=original.id,
         created_by=created_by,
         metadata={"reason": reason},
+        point_kind=original.point_kind,
     )
 
 
@@ -367,13 +505,17 @@ def reconcile_points_account(
     db: Session,
     company_id: str,
     *,
+    point_kind: str = "CUSTOMER",
     start_at: datetime | None = None,
     end_at: datetime | None = None,
 ) -> dict[str, Any]:
+    normalized_kind = point_kind.strip().upper()
+    if normalized_kind not in {"CUSTOMER", "SUPPLY"}:
+        raise AppError("POINT_KIND_INVALID", "积分账户类型无效", 422)
     account = get_or_create_account(db, company_id)
     ledgers = db.scalars(
         select(PointsLedger)
-        .where(PointsLedger.company_id == company_id)
+        .where(PointsLedger.company_id == company_id, PointsLedger.point_kind == normalized_kind)
         .order_by(PointsLedger.created_at.asc(), PointsLedger.id.asc())
     ).all()
     normalized_start = as_utc(start_at)
@@ -403,10 +545,12 @@ def reconcile_points_account(
         closing_balance = opening_balance
     expected_closing = opening_balance + period_delta
     current_scope = end_at is None
-    snapshot_balance = int(account.balance) if current_scope else closing_balance
+    account_balance = account.balance if normalized_kind == "CUSTOMER" else account.supply_balance
+    snapshot_balance = int(account_balance) if current_scope else closing_balance
     difference = snapshot_balance - expected_closing
     return {
         "company_id": company_id,
+        "point_kind": normalized_kind,
         "start_at": start_at.isoformat() if start_at else None,
         "end_at": end_at.isoformat() if end_at else None,
         "opening_balance": opening_balance,
@@ -426,6 +570,7 @@ def ledger_to_dict(ledger: PointsLedger) -> dict[str, Any]:
         "id": ledger.id,
         "company_id": ledger.company_id,
         "type": ledger.ledger_type,
+        "point_kind": ledger.point_kind,
         "delta": ledger.delta,
         "balance_after": ledger.balance_after,
         "business_type": ledger.business_type,
