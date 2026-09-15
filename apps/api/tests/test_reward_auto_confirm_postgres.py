@@ -364,7 +364,7 @@ def test_batch_skips_busy_assignment_while_manual_deal_waits_on_same_supplier_ac
     postgres_factory,
     monkeypatch,
 ):
-    deadline = datetime(2026, 9, 13, 4, 0, tzinfo=timezone.utc)
+    deadline = datetime.now(timezone.utc) + timedelta(days=1)
     with postgres_factory() as db:
         db.autoflush = False
         setup_a = _workflow_setup(db, lead_status="FOLLOWING", suffix="-A")
@@ -475,15 +475,22 @@ def test_batch_skips_busy_assignment_while_manual_deal_waits_on_same_supplier_ac
             )
         ).all()
         assert {reward.status for reward in rewards} == {"SETTLED"}
-        assert (
-            db.scalar(
-                select(func.count(PointsLedger.id)).where(
-                    PointsLedger.company_id == shared_supplier_id,
-                    PointsLedger.business_type == "V12_SUPPLIER_REWARD",
-                )
+        ledgers = db.scalars(
+            select(PointsLedger).where(
+                PointsLedger.company_id == shared_supplier_id,
+                PointsLedger.business_type == "V12_SUPPLIER_REWARD",
             )
-            == 2
-        )
+        ).all()
+        assert len(ledgers) == 2
+        assert {
+            ledger.metadata_json["assignment_id"]: ledger.metadata_json[
+                "settlement_policy"
+            ]
+            for ledger in ledgers
+        } == {
+            case_a["assignment_id"]: "CLAIM_48H",
+            case_b["assignment_id"]: "MANUAL_CONFIRMED",
+        }
         assert (
             db.scalar(
                 select(func.count(FollowUp.id)).where(
@@ -504,17 +511,17 @@ def test_batch_skips_busy_assignment_while_manual_deal_waits_on_same_supplier_ac
             )
             == 2
         )
-        assert (
-            db.scalar(
-                select(func.count(AssignmentEvent.id)).where(
+        automatic_assignment_ids = set(
+            db.scalars(
+                select(AssignmentEvent.assignment_id).where(
                     AssignmentEvent.event_type == "V12_ASSIGNMENT_AUTO_CONFIRMED",
                     AssignmentEvent.assignment_id.in_(
                         [case_a["assignment_id"], case_b["assignment_id"]]
                     ),
                 )
-            )
-            == 1
+            ).all()
         )
+        assert automatic_assignment_ids == {case_a["assignment_id"]}
 
 
 def test_concurrent_return_approvals_refund_and_reverse_early_reward_once(
