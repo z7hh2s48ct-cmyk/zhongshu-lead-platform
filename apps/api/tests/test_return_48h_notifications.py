@@ -87,6 +87,25 @@ def test_followup_reminder_has_exact_recipient_and_notification_binding(db):
     assert len(db.scalars(select(NotificationOutbox)).all()) == 2
 
 
+def test_deleted_lead_is_skipped_by_assignment_and_followup_jobs(db):
+    pending, _, _, pending_now = seed_assignment(db, expired=True)
+    following, _, _, follow_now = seed_assignment(db, claimed=True)
+    pending_lead = db.get(Lead, pending.lead_id)
+    following_lead = db.get(Lead, following.lead_id)
+    pending_lead.deleted_at = pending_now
+    following_lead.deleted_at = follow_now
+    db.flush()
+
+    assert run_assignment_timeouts_v12(db, now=pending_now) == {
+        "reminded": 0,
+        "expired": 0,
+    }
+    assert run_followup_overdue(db, now=follow_now) == {"overdue": 0, "notified": 0}
+    assert pending.status == "PENDING_CLAIM"
+    assert following.status == "CLAIMED"
+    assert db.scalars(select(NotificationOutbox)).all() == []
+
+
 def test_legacy_followup_events_resolve_by_own_link_not_latest_scene(db, monkeypatch):
     import apps.api.src.services.outbox_worker as worker
     assignment, owner, _, _ = seed_assignment(db, claimed=True)

@@ -220,23 +220,39 @@ def test_returned_receiver_is_excluded_until_operation_records_an_exception(api_
     with factory() as db:
         lead = db.get(Lead, lead_id)
         operation = db.scalar(select(User).where(User.username == "operation"))
-        assert lead is not None and operation is not None
+        account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == company_id))
+        assert lead is not None and operation is not None and account is not None
+        old_assignment = Assignment(
+            lead_id=lead.id,
+            company_id=company_id,
+            receiver_company_id=company_id,
+            status=AssignmentStatus.RETURNED.value,
+            points_price=100,
+            claim_points=100,
+            price_version=1,
+            lead_snapshot={},
+            assigned_by=operation.id,
+            assigned_at=datetime.now(timezone.utc),
+            claimed_at=datetime.now(timezone.utc),
+            released_at=datetime.now(timezone.utc),
+            release_reason="V12_RETURN_APPROVED",
+            idempotency_key="returned-receiver-history",
+        )
+        db.add(old_assignment)
+        db.flush()
+        account.balance = 4900
         db.add(
-            Assignment(
-                lead_id=lead.id,
+            PointsLedger(
+                account_id=account.id,
                 company_id=company_id,
-                receiver_company_id=company_id,
-                status=AssignmentStatus.RETURNED.value,
-                points_price=100,
-                claim_points=100,
-                price_version=1,
-                lead_snapshot={},
-                assigned_by=operation.id,
-                assigned_at=datetime.now(timezone.utc),
-                claimed_at=datetime.now(timezone.utc),
-                released_at=datetime.now(timezone.utc),
-                release_reason="V12_RETURN_APPROVED",
-                idempotency_key="returned-receiver-history",
+                delta=-100,
+                balance_after=4900,
+                ledger_type="CLAIM",
+                business_type="V12_ASSIGNMENT_CLAIM",
+                business_id=old_assignment.id,
+                idempotency_key=f"v12-claim:{old_assignment.id}",
+                created_by=employee_id,
+                metadata_json={"lead_id": lead.id, "points_price": 100},
             )
         )
         db.commit()
@@ -275,6 +291,16 @@ def test_returned_receiver_is_excluded_until_operation_records_an_exception(api_
     )
     assert override.status_code == 200, override.text
     assignment_id = override.json()["data"]["id"]
+
+    client.post("/api/v1/auth/logout")
+    _login(client, "franchise_employee_demo", "Employee123!")
+    claimed = client.post(f"/api/v1/v1.2/assignments/{assignment_id}/claim")
+    assert claimed.status_code == 200, claimed.text
+    claimed_assignment = claimed.json()["data"]["assignment"]
+    claimed_at = datetime.fromisoformat(claimed_assignment["claimed_at"])
+    appeal_deadline_at = datetime.fromisoformat(claimed_assignment["appeal_deadline_at"])
+    assert appeal_deadline_at - claimed_at == timedelta(hours=48)
+
     with factory() as db:
         audit = db.scalar(
             select(AuditLog).where(
@@ -285,6 +311,18 @@ def test_returned_receiver_is_excluded_until_operation_records_an_exception(api_
         assert audit is not None
         assert audit.after_json["return_receiver_override"] is True
         assert audit.metadata_json["reason"] == "运营复核后确认原公司可继续承接"
+        account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == company_id))
+        assert account is not None and account.balance == 4800
+        ledgers = db.scalars(
+            select(PointsLedger).where(
+                PointsLedger.company_id == company_id,
+                PointsLedger.ledger_type == "CLAIM",
+            )
+        ).all()
+        assert {ledger.business_id for ledger in ledgers} >= {
+            assignment_id,
+            old_assignment.id,
+        }
 
 
 def test_concurrent_manual_dispatch_replay_has_one_business_side_effect(api_client) -> None:

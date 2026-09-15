@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.errors import AppError
-from ..core.models import VerificationTask, VerificationTemplate
+from ..core.models import Lead, VerificationTask, VerificationTemplate
 from ..core.responses import ok, page
 from ..schemas.verification import (
     VerificationAssignBody,
@@ -24,6 +24,7 @@ from ..services.verification_service import (
     reclaim_task,
     submit_verification,
     task_to_dict,
+    require_live_verification_lead,
 )
 
 router = APIRouter(prefix="/verification", tags=["verification"])
@@ -67,8 +68,15 @@ def list_tasks(
     stmt = select(VerificationTask)
     count_stmt = select(func.count(VerificationTask.id))
     if mine or principal.has_any_role("TELESALES"):
-        stmt = stmt.where(VerificationTask.assignee_user_id == principal.user_id)
-        count_stmt = count_stmt.where(VerificationTask.assignee_user_id == principal.user_id)
+        live_lead_ids = select(Lead.id).where(Lead.deleted_at.is_(None))
+        stmt = stmt.where(
+            VerificationTask.assignee_user_id == principal.user_id,
+            VerificationTask.lead_id.in_(live_lead_ids),
+        )
+        count_stmt = count_stmt.where(
+            VerificationTask.assignee_user_id == principal.user_id,
+            VerificationTask.lead_id.in_(live_lead_ids),
+        )
     if status:
         stmt = stmt.where(VerificationTask.status == status)
         count_stmt = count_stmt.where(VerificationTask.status == status)
@@ -84,6 +92,8 @@ def get_task(task_id: str, request: Request, principal: CurrentPrincipal, db: Se
         raise AppError("VERIFICATION_TASK_NOT_FOUND", "核验任务不存在", 404)
     if principal.has_any_role("TELESALES") and task.assignee_user_id != principal.user_id:
         raise AppError("FORBIDDEN", "无权查看该任务", 403)
+    if principal.has_any_role("TELESALES"):
+        require_live_verification_lead(db, task)
     return ok(request, task_to_dict(db, task, principal, include_phone=True))
 
 
@@ -133,6 +143,7 @@ def dial(task_id: str, request: Request, principal=Depends(require_permissions("
     task = db.get(VerificationTask, task_id)
     if not task or task.assignee_user_id != principal.user_id:
         raise AppError("FORBIDDEN", "无权拨打该客资电话", 403)
+    require_live_verification_lead(db, task)
     payload = task_to_dict(db, task, principal, include_phone=True)
     phone = payload["lead"]["phone"]
     write_audit(db, principal=principal, action="LEAD_PHONE_DIAL_CLICK", resource_type="lead", resource_id=task.lead_id, metadata={"task_id": task.id}, request_id=request.state.request_id)

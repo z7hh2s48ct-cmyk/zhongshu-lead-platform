@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core import models_v12 as _models_v12  # noqa: F401
@@ -12,7 +12,7 @@ from ..core.auth import Principal
 from ..core.config import get_settings
 from ..core.enums import VerificationTaskStatus
 from ..core.errors import AppError
-from ..core.models import Lead, Role, User, VerificationSubmission, VerificationTask
+from ..core.models import AuditLog, Lead, Role, User, VerificationSubmission, VerificationTask
 from ..core.security import decrypt_text, normalize_phone
 from ..core.state_machine_v12 import assert_lead_transition
 from ..core.time import as_utc
@@ -44,6 +44,132 @@ class PreDispatchAssignmentResult:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _require_operation(principal: Principal) -> None:
+    if not principal.has_any_role("OPERATION", "SUPER_ADMIN"):
+        raise AppError("FORBIDDEN", "仅运营人员可执行该客资操作", 403)
+
+
+def reopen_closed_lead(
+    db: Session,
+    *,
+    lead_id: str,
+    principal: Principal,
+    reason: str,
+) -> Lead:
+    """Return a closed lead to dispatch readiness without mutating prior rounds."""
+
+    _require_operation(principal)
+    normalized_reason = reason.strip()
+    if len(normalized_reason) < 2:
+        raise AppError("LEAD_REOPEN_REASON_REQUIRED", "重新启用原因至少 2 个字符", 422)
+    lead = _lead_or_raise(db, lead_id, lock=True)
+    if lead.status != LeadV12Status.CLOSED.value:
+        raise AppError("LEAD_REOPEN_STATE_INVALID", "只有已关闭客资可以重新启用", 409)
+    assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
+    lead.status = LeadV12Status.READY_DISPATCH.value
+    lead.current_assignment_id = None
+    lead.pending_reason = "REOPENED_FOR_REDISPATCH"
+    lead.review_status = "APPROVED"
+    lead.review_note = normalized_reason
+    lead.reviewed_at = _now()
+    lead.snapshot_version += 1
+    db.flush()
+    return lead
+
+
+def _historical_rework_audit_filter():
+    return (
+        AuditLog.action == "V12_PRE_DISPATCH_DISPOSITION",
+        AuditLog.resource_type == "lead",
+        AuditLog.resource_id.is_not(None),
+        or_(
+            AuditLog.after_json["pending_reason"].as_string()
+            == "PRE_DISPATCH_REWORK_REQUIRED",
+            AuditLog.after_json["lead_snapshot"]["pending_reason"].as_string()
+            == "PRE_DISPATCH_REWORK_REQUIRED",
+        ),
+    )
+
+
+def _historical_rework_ids_query():
+    audited = select(AuditLog.resource_id.label("lead_id")).where(
+        *_historical_rework_audit_filter()
+    )
+    current = select(Lead.id.label("lead_id")).where(
+        Lead.pending_reason == "PRE_DISPATCH_REWORK_REQUIRED"
+    )
+    return audited.union(current).subquery("historical_rework_lead_ids")
+
+
+def list_historical_rework_leads(
+    db: Session,
+    *,
+    page_no: int,
+    page_size: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Page every lead ever returned for operation rework, even after marker drift."""
+
+    history_ids = _historical_rework_ids_query()
+    base = (
+        select(Lead)
+        .join(history_ids, history_ids.c.lead_id == Lead.id)
+        .where(Lead.deleted_at.is_(None))
+    )
+    total = int(db.scalar(select(func.count()).select_from(base.subquery())) or 0)
+    leads = list(
+        db.scalars(
+            base.order_by(Lead.created_at.desc(), Lead.id.desc())
+            .offset((page_no - 1) * page_size)
+            .limit(page_size)
+        ).all()
+    )
+    if not leads:
+        return [], total
+    latest_tasks = latest_submitted_pre_dispatch_task_ids(
+        db, [lead.id for lead in leads]
+    )
+    items = [
+        {
+            "lead": lead,
+            "latest_task_id": latest_tasks.get(lead.id),
+            "rework_pending": lead.pending_reason
+            == "PRE_DISPATCH_REWORK_REQUIRED",
+        }
+        for lead in leads
+    ]
+    return items, total
+
+
+def restore_historical_rework_lead(
+    db: Session,
+    *,
+    lead_id: str,
+    principal: Principal,
+    reason: str,
+) -> Lead:
+    _require_operation(principal)
+    if len(reason.strip()) < 2:
+        raise AppError("PRE_DISPATCH_REWORK_REASON_REQUIRED", "恢复原因至少 2 个字符", 422)
+    if not db.scalar(
+        select(AuditLog.id)
+        .where(*_historical_rework_audit_filter(), AuditLog.resource_id == lead_id)
+        .limit(1)
+    ):
+        raise AppError("PRE_DISPATCH_REWORK_HISTORY_NOT_FOUND", "未找到该客资的历史待补充记录", 404)
+    lead = _lead_or_raise(db, lead_id, lock=True)
+    if lead.status != LeadV12Status.DRAFT.value:
+        raise AppError(
+            "PRE_DISPATCH_REWORK_RESTORE_STATE_INVALID",
+            "只有仍处于草稿阶段的历史客资可以恢复到待运营补充",
+            409,
+        )
+    lead.pending_reason = "PRE_DISPATCH_REWORK_REQUIRED"
+    lead.review_note = reason.strip()
+    lead.snapshot_version += 1
+    db.flush()
+    return lead
 
 
 def _due_at(now: datetime) -> datetime:
@@ -193,7 +319,7 @@ def _lead_or_raise(db: Session, lead_id: str, *, lock: bool = False) -> Lead:
     if lock:
         stmt = stmt.with_for_update().execution_options(populate_existing=True)
     lead = db.scalar(stmt)
-    if lead is None:
+    if lead is None or lead.deleted_at is not None:
         raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     return lead
 

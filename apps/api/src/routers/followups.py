@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.errors import AppError
-from ..core.models import Assignment, FollowUp
+from ..core.models import Assignment, FollowUp, Lead
 from ..core.responses import ok
 from ..schemas.followups import FollowUpBody
 from ..services.audit import write_audit
@@ -24,6 +24,9 @@ def list_assignment_followups(assignment_id: str, request: Request, principal: C
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发订单不存在", 404)
     if principal.has_any_role("FRANCHISE_OWNER", "FRANCHISE_EMPLOYEE"):
         require_company_assignment_access(principal, assignment)
+        lead = db.get(Lead, assignment.lead_id)
+        if lead is None or lead.deleted_at is not None:
+            raise AppError("ASSIGNMENT_NOT_FOUND", "派发订单不存在", 404)
     elif not (principal.can("assignment.read") or principal.can("*")):
         raise AppError("FORBIDDEN", "无权查看跟进记录", 403)
     items = db.scalars(select(FollowUp).where(FollowUp.assignment_id == assignment_id).order_by(FollowUp.created_at.desc())).all()

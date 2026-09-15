@@ -5,7 +5,18 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..core.auth import Principal
 from ..core.models import Notification, NotificationOutbox
+
+
+def visible_notification_condition(principal: Principal):
+    condition = Notification.user_id == principal.user_id
+    if principal.has_any_role("FRANCHISE_OWNER") and principal.company_id:
+        condition = condition | (
+            Notification.user_id.is_(None)
+            & (Notification.company_id == principal.company_id)
+        )
+    return condition & (Notification.status != "CANCELLED")
 
 
 def enqueue_outbox(

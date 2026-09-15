@@ -10,7 +10,9 @@ from apps.api.src.core.enums import AssignmentStatus, PointsLedgerType
 from apps.api.src.core.errors import AppError
 from apps.api.src.core.models import (
     Assignment,
+    AssignmentEvent,
     Company,
+    FollowUp,
     Lead,
     PointsAccount,
     PointsLedger,
@@ -355,6 +357,25 @@ def test_due_settlement_freezes_if_active_appeal_exists(db) -> None:
     assert reward.ledger_id is None
 
 
+def test_deleted_lead_reward_is_not_selected_or_settled(db) -> None:
+    supplier, _, user, lead, _, reward = _reward_setup(db)
+    lead.deleted_at = datetime.now(timezone.utc)
+    db.flush()
+
+    batch = run_due_supplier_reward_settlement(db, limit=100, settled_by=user.id)
+
+    assert batch["scanned"] == 0
+    assert reward.status == RewardStatus.OBSERVING.value
+    assert reward.ledger_id is None
+    account = db.scalar(
+        select(PointsAccount).where(PointsAccount.company_id == supplier.id)
+    )
+    assert account is None or account.balance == 0
+    with pytest.raises(AppError) as exc_info:
+        settle_supplier_reward(db, reward_id=reward.id, settled_by=user.id)
+    assert exc_info.value.code == "REWARD_LEAD_DELETED"
+
+
 def test_rejected_overdue_appeal_settles_immediately_on_commit(db) -> None:
     supplier, _, user, lead, assignment, reward = _reward_setup(
         db,
@@ -369,7 +390,7 @@ def test_rejected_overdue_appeal_settles_immediately_on_commit(db) -> None:
         description="已驳回申诉",
         status=ReturnV12Status.REJECTED.value,
         submitted_by=user.id,
-        submitted_at=datetime.now(timezone.utc) - timedelta(days=1),
+        submitted_at=assignment.claimed_at + timedelta(hours=40),
         reviewed_at=datetime.now(timezone.utc),
         due_at=datetime.now(timezone.utc) - timedelta(minutes=1),
     )
@@ -382,6 +403,50 @@ def test_rejected_overdue_appeal_settles_immediately_on_commit(db) -> None:
     assert reward.ledger_id is not None
     account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == supplier.id))
     assert account is not None and account.balance == 30
+    event = db.scalar(
+        select(AssignmentEvent).where(
+            AssignmentEvent.assignment_id == assignment.id,
+            AssignmentEvent.event_type == "V12_ASSIGNMENT_AUTO_CONFIRMED",
+        )
+    )
+    assert event is not None
+    assert event.payload["reason"] == "RETURN_REJECTED"
+    assert event.payload["effective_at"] == request.reviewed_at.isoformat()
+    assert reward.reward_due_at == request.reviewed_at
+
+
+def test_late_manual_deal_keeps_earlier_48h_confirmation_time(db) -> None:
+    now = datetime.now(timezone.utc)
+    _, _, user, _, assignment, reward = _reward_setup(
+        db,
+        due_at=now - timedelta(hours=2),
+    )
+    expected_confirmation = assignment.claimed_at + timedelta(hours=48)
+    db.add(
+        FollowUp(
+            assignment_id=assignment.id,
+            company_id=assignment.company_id,
+            status="DEAL",
+            note="调度延迟后才人工补记",
+            created_by=user.id,
+            created_at=now,
+        )
+    )
+    db.flush()
+
+    result = settle_supplier_reward(db, reward_id=reward.id, as_of=now)
+
+    assert result.ledger is not None
+    assert reward.reward_due_at == expected_confirmation
+    event = db.scalar(
+        select(AssignmentEvent).where(
+            AssignmentEvent.assignment_id == assignment.id,
+            AssignmentEvent.event_type == "V12_ASSIGNMENT_AUTO_CONFIRMED",
+        )
+    )
+    assert event is not None
+    assert event.payload["reason"] == "NO_RETURN_WITHIN_48H"
+    assert event.payload["effective_at"] == expected_confirmation.isoformat()
 
 
 def test_exceptional_reversal_is_idempotent_and_can_create_debt(db) -> None:

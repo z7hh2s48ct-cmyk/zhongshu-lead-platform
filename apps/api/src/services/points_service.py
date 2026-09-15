@@ -42,9 +42,12 @@ def get_or_create_account(db: Session, company_id: str) -> PointsAccount:
 def points_available_for_dispatch(db: Session, company_id: str) -> tuple[int, int, int]:
     account = get_or_create_account(db, company_id)
     reserved = db.scalar(
-        select(func.coalesce(func.sum(Assignment.points_price), 0)).where(
+        select(func.coalesce(func.sum(Assignment.points_price), 0))
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .where(
             Assignment.company_id == company_id,
             Assignment.status == AssignmentStatus.PENDING_CLAIM,
+            Lead.deleted_at.is_(None),
         )
     ) or 0
     return int(account.balance), int(reserved), int(account.balance - reserved)

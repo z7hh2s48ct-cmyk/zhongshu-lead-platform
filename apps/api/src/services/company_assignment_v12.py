@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..core.auth import Principal
 from ..core.enums import AssignmentStatus
 from ..core.errors import AppError
-from ..core.models import Assignment, AssignmentEvent, Company, Role, User
+from ..core.models import Assignment, AssignmentEvent, Company, Lead, Role, User
 
 
 _ACTIVE_INTERNAL_ASSIGNMENT_STATUSES = {
@@ -116,8 +116,15 @@ def _owner_assignment_or_raise(
 ) -> Assignment:
     if not principal.has_any_role("FRANCHISE_OWNER") or not principal.company_id:
         raise AppError("COMPANY_ASSIGNMENT_OWNER_REQUIRED", "仅加盟商负责人可分配公司内部客资", 403)
-    assignment = db.scalar(select(Assignment).where(Assignment.id == assignment_id).with_for_update())
+    assignment = db.scalar(
+        select(Assignment)
+        .where(Assignment.id == assignment_id)
+        .with_for_update()
+    )
     if assignment is None:
+        raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
+    lead = db.get(Lead, assignment.lead_id)
+    if lead is not None and lead.deleted_at is not None:
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
     if assignment.company_id != principal.company_id:
         raise AppError("FORBIDDEN", "无权分配其他加盟商的客资", 403)
@@ -227,10 +234,12 @@ def assign_internal_employee(
 def has_active_internal_assignments(db: Session, *, company_id: str, user_id: str) -> bool:
     return db.scalar(
         select(Assignment.id)
+        .outerjoin(Lead, Lead.id == Assignment.lead_id)
         .where(
             Assignment.company_id == company_id,
             Assignment.internal_assignee_user_id == user_id,
             Assignment.status.in_(_EMPLOYEE_BLOCKING_ASSIGNMENT_STATUSES),
+            or_(Lead.id.is_(None), Lead.deleted_at.is_(None)),
         )
         .limit(1)
     ) is not None

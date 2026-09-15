@@ -11,11 +11,12 @@ from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.enums import EvidenceType
 from ..core.errors import AppError
-from ..core.models import Assignment, ReturnEvidence, ReturnRequest
+from ..core.models import Assignment, Lead, ReturnEvidence, ReturnRequest
 from ..core.responses import ok, page
 from ..schemas.returns import ReturnDraftBody, ReturnReviewBody
 from ..services.audit import write_audit
 from ..services.evidence_file_validation import validate_evidence_file
+from ..services.lead_deletion_v12 import require_lead_not_deleted
 from ..services.return_service import add_evidence, create_or_update_return, return_to_dict, review_return, submit_return
 from ..services.storage import create_file_access_token, decode_file_access_token, get_storage
 
@@ -49,6 +50,7 @@ async def upload_evidence(
     item = db.get(ReturnRequest, return_id)
     if not item or item.company_id != principal.company_id:
         raise AppError("RETURN_NOT_FOUND", "退回申请不存在", 404)
+    require_lead_not_deleted(db.get(Lead, item.lead_id))
     if evidence_type not in {EvidenceType.CHAT_SCREENSHOT, EvidenceType.CALL_RECORDING}:
         raise AppError("EVIDENCE_TYPE_INVALID", "证据类型无效", 422)
     content = await file.read()
@@ -97,8 +99,15 @@ def list_returns(
     stmt = select(ReturnRequest)
     count_stmt = select(func.count(ReturnRequest.id))
     if principal.has_any_role("FRANCHISE_OWNER"):
-        stmt = stmt.where(ReturnRequest.company_id == principal.company_id)
-        count_stmt = count_stmt.where(ReturnRequest.company_id == principal.company_id)
+        live_leads = select(Lead.id).where(Lead.deleted_at.is_(None))
+        stmt = stmt.where(
+            ReturnRequest.company_id == principal.company_id,
+            ReturnRequest.lead_id.in_(live_leads),
+        )
+        count_stmt = count_stmt.where(
+            ReturnRequest.company_id == principal.company_id,
+            ReturnRequest.lead_id.in_(live_leads),
+        )
     elif not (principal.can("return.read") or principal.can("*")):
         raise AppError("FORBIDDEN", "无权查看退回申请", 403)
     elif company_id:
@@ -119,7 +128,11 @@ def get_return(return_id: str, request: Request, principal: CurrentPrincipal, db
         raise AppError("RETURN_NOT_FOUND", "退回申请不存在", 404)
     if principal.has_any_role("FRANCHISE_OWNER") and item.company_id != principal.company_id:
         raise AppError("FORBIDDEN", "无权查看退回申请", 403)
-    if not principal.has_any_role("FRANCHISE_OWNER") and not (principal.can("return.read") or principal.can("return.evidence.read") or principal.can("*")):
+    if principal.has_any_role("FRANCHISE_OWNER"):
+        lead = db.get(Lead, item.lead_id)
+        if lead is None or lead.deleted_at is not None:
+            raise AppError("RETURN_NOT_FOUND", "退回申请不存在", 404)
+    elif not (principal.can("return.read") or principal.can("return.evidence.read") or principal.can("*")):
         raise AppError("FORBIDDEN", "无权查看退回申请", 403)
     data = return_to_dict(db, item, include_evidence=True)
     for evidence in data.get("evidences", []):
@@ -149,7 +162,11 @@ def download_evidence(evidence_id: str, token: str, request: Request, principal:
     return_request = db.get(ReturnRequest, evidence.return_request_id)
     if principal.has_any_role("FRANCHISE_OWNER") and return_request and return_request.company_id != principal.company_id:
         raise AppError("FORBIDDEN", "无权访问证据文件", 403)
-    if not principal.has_any_role("FRANCHISE_OWNER") and not (principal.can("return.evidence.read") or principal.can("*")):
+    if principal.has_any_role("FRANCHISE_OWNER"):
+        lead = db.get(Lead, return_request.lead_id) if return_request else None
+        if lead is None or lead.deleted_at is not None:
+            raise AppError("FILE_NOT_FOUND", "证据文件不存在", 404)
+    elif not (principal.can("return.evidence.read") or principal.can("*")):
         raise AppError("FORBIDDEN", "无权访问证据文件", 403)
     content = get_storage().read(evidence.object_key)
     write_audit(db, principal=principal, action="RETURN_EVIDENCE_READ", resource_type="return_evidence", resource_id=evidence.id, company_id=return_request.company_id if return_request else None, request_id=request.state.request_id)

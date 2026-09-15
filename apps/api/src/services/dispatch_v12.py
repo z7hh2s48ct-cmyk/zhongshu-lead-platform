@@ -348,9 +348,12 @@ def _points_snapshot(
     account = db.scalar(stmt)
     balance = int(account.balance) if account is not None else 0
     reserved = db.scalar(
-        select(func.coalesce(func.sum(Assignment.points_price), 0)).where(
+        select(func.coalesce(func.sum(Assignment.points_price), 0))
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .where(
             Assignment.company_id == company_id,
             Assignment.status == AssignmentStatus.PENDING_CLAIM.value,
+            Lead.deleted_at.is_(None),
         )
     ) or 0
     return balance, int(reserved), balance - int(reserved)
@@ -549,7 +552,11 @@ def list_candidates(
             Assignment.company_id,
             func.coalesce(func.sum(Assignment.points_price), 0).label("points_reserved"),
         )
-        .where(Assignment.status == AssignmentStatus.PENDING_CLAIM.value)
+        .join(Lead, Lead.id == Assignment.lead_id)
+        .where(
+            Assignment.status == AssignmentStatus.PENDING_CLAIM.value,
+            Lead.deleted_at.is_(None),
+        )
         .group_by(Assignment.company_id)
         .subquery()
     )

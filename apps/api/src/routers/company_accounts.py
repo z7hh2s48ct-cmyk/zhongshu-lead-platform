@@ -9,6 +9,7 @@ from ..core.responses import ok
 from ..schemas.company_accounts import (
     CompanyAccountCreateBody,
     CompanyAccountPasswordBody,
+    CompanyOwnerCredentialBody,
     CompanyAccountRequestCreateBody,
     CompanyAccountRequestDecisionBody,
     CompanyAccountReasonBody,
@@ -30,6 +31,7 @@ from ..services.company_account_management import (
     require_superadmin_reason,
     reset_company_account_password,
     set_company_account_status,
+    provision_owner_credentials,
 )
 
 
@@ -397,3 +399,39 @@ def reset_company_account_password_endpoint(
     _no_store(response)
     record["initial_password"] = generated_password
     return ok(request, record, "加盟商账号密码已重置")
+
+
+@router.post("/{user_id}/provision-owner-credentials")
+def provision_owner_credentials_endpoint(
+    company_id: str,
+    user_id: str,
+    body: CompanyOwnerCredentialBody,
+    request: Request,
+    response: Response,
+    principal: Principal = Depends(require_permissions("company.account.manage")),
+    db: Session = Depends(get_db),
+):
+    reason = require_superadmin_reason(principal, body.reason)
+    user, initial_password = provision_owner_credentials(
+        db,
+        company_id=company_id,
+        user_id=user_id,
+        username=body.username,
+        password=body.password,
+    )
+    record = company_account_to_dict(user)
+    write_audit(
+        db,
+        principal=principal,
+        action="COMPANY_OWNER_CREDENTIALS_PROVISION",
+        resource_type="company_account",
+        resource_id=user.id,
+        company_id=company_id,
+        after={"username": user.username, "session_version": user.session_version},
+        metadata=_audit_metadata(principal, reason),
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    _no_store(response)
+    record["initial_password"] = initial_password
+    return ok(request, record, "负责人登录账号已补齐")

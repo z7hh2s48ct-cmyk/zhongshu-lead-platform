@@ -132,7 +132,7 @@ def _get_lead(db: Session, lead_id: str, *, lock: bool = False) -> Lead:
     if lock:
         stmt = stmt.with_for_update().execution_options(populate_existing=True)
     item = db.scalar(stmt)
-    if item is None:
+    if item is None or item.deleted_at is not None:
         raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     return item
 
@@ -168,11 +168,13 @@ def expire_unsubmitted_return_drafts(
         db.scalars(
             select(ReturnRequest.id)
             .join(Assignment, Assignment.id == ReturnRequest.assignment_id)
+            .join(Lead, Lead.id == ReturnRequest.lead_id)
             .where(
                 ReturnRequest.status == ReturnV12Status.DRAFT.value,
                 ReturnRequest.submitted_at.is_(None),
                 Assignment.claimed_at.is_not(None),
                 Assignment.claimed_at <= now - timedelta(hours=48),
+                Lead.deleted_at.is_(None),
             )
             .order_by(Assignment.claimed_at.asc(), ReturnRequest.id.asc())
             .limit(batch_size)
@@ -219,6 +221,37 @@ def _lock_return_context(db: Session, return_id: str) -> tuple[Assignment, Lead,
     if request.assignment_id != assignment.id or request.lead_id != lead.id:
         raise AppError("RETURN_ASSIGNMENT_CONFLICT", "退回申请与当前派发单不一致", 409)
     return assignment, lead, request
+
+
+def _lock_return_verification_context(
+    db: Session,
+    task_id: str,
+) -> tuple[Assignment, Lead, ReturnRequest, VerificationTask]:
+    reference = db.get(VerificationTask, task_id)
+    if (
+        reference is None
+        or reference.task_type != VerificationTaskType.RETURN_VERIFY.value
+        or not reference.return_request_id
+    ):
+        raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    assignment, lead, request = _lock_return_context(
+        db,
+        reference.return_request_id,
+    )
+    task = db.scalar(
+        select(VerificationTask)
+        .where(VerificationTask.id == task_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        task is None
+        or task.return_request_id != request.id
+        or task.assignment_id != assignment.id
+        or task.lead_id != lead.id
+    ):
+        raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    return assignment, lead, request, task
 
 
 def create_or_update_return_draft(
@@ -403,19 +436,14 @@ def prepare_return_verification_evidence_upload(
     task_id: str,
     principal: Principal,
 ) -> tuple[VerificationTask, ReturnRequest]:
-    task = db.scalar(
-        select(VerificationTask).where(VerificationTask.id == task_id).with_for_update()
-    )
-    if task is None or task.task_type != VerificationTaskType.RETURN_VERIFY.value:
-        raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    _, _, request, task = _lock_return_verification_context(db, task_id)
     _require_return_task_not_overdue(task)
     if (
         task.status != VerificationTaskStatus.IN_PROGRESS.value
         or task.assignee_user_id != principal.user_id
     ):
         raise AppError("RETURN_VERIFY_TASK_NOT_OWNED", "仅进行中的本人任务可上传核验证据", 409)
-    request = db.get(ReturnRequest, task.return_request_id) if task.return_request_id else None
-    if request is None or request.status != ReturnV12Status.VERIFYING.value:
+    if request.status != ReturnV12Status.VERIFYING.value:
         raise AppError("RETURN_NOT_VERIFYING", "退回申请当前不在电销核验阶段", 409)
     return task, request
 
@@ -699,9 +727,7 @@ def assign_return_verification_task(
     assigned_by: str,
     reason: str,
 ) -> ReturnVerificationAssignmentResult:
-    task = db.scalar(select(VerificationTask).where(VerificationTask.id == task_id).with_for_update())
-    if task is None or task.task_type != VerificationTaskType.RETURN_VERIFY.value:
-        raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    _, _, _, task = _lock_return_verification_context(db, task_id)
     if task.status not in {
         VerificationTaskStatus.PENDING.value,
         VerificationTaskStatus.ASSIGNED.value,
@@ -738,9 +764,7 @@ def claim_return_verification_task(
     task_id: str,
     principal: Principal,
 ) -> VerificationTask:
-    task = db.scalar(select(VerificationTask).where(VerificationTask.id == task_id).with_for_update())
-    if task is None or task.task_type != VerificationTaskType.RETURN_VERIFY.value:
-        raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
+    _, _, _, task = _lock_return_verification_context(db, task_id)
     _require_return_task_not_overdue(task)
     if task.status == VerificationTaskStatus.IN_PROGRESS.value and task.assignee_user_id == principal.user_id:
         return task
@@ -967,6 +991,15 @@ def _final_review_return(
             )
         )
         db.flush()
+        if reward and reward.status == RewardStatus.OBSERVING.value:
+            from .supplier_reward_v12 import settle_supplier_reward
+
+            settle_supplier_reward(
+                db,
+                reward_id=reward.id,
+                as_of=now,
+                settled_by=principal.user_id,
+            )
         return ReturnFinalReviewResult(request=request, refund_ledger=None)
 
     if reward and reward.status == RewardStatus.SETTLED.value:

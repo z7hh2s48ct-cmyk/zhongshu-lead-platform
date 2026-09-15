@@ -276,6 +276,14 @@ def test_operation_deletes_own_draft_but_phone_remains_reserved(api_client) -> N
         assert lead is not None
         assert lead.deleted_at is not None
         assert lead.delete_reason == "客户要求停止处理"
+        audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "V12_OPERATION_LEAD_DELETE",
+                AuditLog.resource_id == lead_id,
+            )
+        )
+        assert audit is not None
+        assert audit.metadata_json["reason"] == "客户要求停止处理"
 
 
 def test_franchise_employee_uploads_and_only_sees_own_leads(api_client) -> None:

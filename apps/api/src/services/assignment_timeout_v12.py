@@ -66,6 +66,7 @@ def run_assignment_timeouts_v12(
         .join(Lead, Lead.id == Assignment.lead_id)
         .where(
             Assignment.status == AssignmentStatus.PENDING_CLAIM.value,
+            Lead.deleted_at.is_(None),
             Lead.status == LeadV12Status.DISPATCHED.value,
             Lead.current_assignment_id == Assignment.id,
             or_(Lead.pending_reason.is_(None), Lead.pending_reason != CORRECTION_REVIEW_REASON),
@@ -99,6 +100,7 @@ def run_assignment_timeouts_v12(
         )
         if (
             lead is None
+            or lead.deleted_at is not None
             or lead.current_assignment_id != assignment.id
             or lead.status != LeadV12Status.DISPATCHED.value
         ):

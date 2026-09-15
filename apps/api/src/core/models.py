@@ -625,7 +625,10 @@ class SystemConfig(Base, TimestampMixin):
 
 class AuditLog(Base):
     __tablename__ = "audit_logs"
-    __table_args__ = (Index("ix_audit_actor_created", "actor_user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_audit_actor_created", "actor_user_id", "created_at"),
+        Index("ix_audit_action_resource_type", "action", "resource_type"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
     request_id: Mapped[str | None] = mapped_column(String(64), index=True)

@@ -86,8 +86,15 @@ def assignments(
     stmt = select(Assignment)
     count_stmt = select(func.count(Assignment.id))
     if principal.has_any_role("FRANCHISE_OWNER"):
-        stmt = stmt.where(Assignment.company_id == principal.company_id)
-        count_stmt = count_stmt.where(Assignment.company_id == principal.company_id)
+        live_leads = select(Lead.id).where(Lead.deleted_at.is_(None))
+        stmt = stmt.where(
+            Assignment.company_id == principal.company_id,
+            Assignment.lead_id.in_(live_leads),
+        )
+        count_stmt = count_stmt.where(
+            Assignment.company_id == principal.company_id,
+            Assignment.lead_id.in_(live_leads),
+        )
     elif not (principal.can("assignment.read") or principal.can("*")):
         raise AppError("FORBIDDEN", "无权查看派发订单", 403)
     elif company_id:
@@ -108,6 +115,9 @@ def assignment_detail(assignment_id: str, request: Request, principal: CurrentPr
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发订单不存在", 404)
     if principal.has_any_role("FRANCHISE_OWNER", "FRANCHISE_EMPLOYEE"):
         require_company_assignment_access(principal, assignment)
+        lead = db.get(Lead, assignment.lead_id)
+        if lead is None or lead.deleted_at is not None:
+            raise AppError("ASSIGNMENT_NOT_FOUND", "派发订单不存在", 404)
     events = db.scalars(select(AssignmentEvent).where(AssignmentEvent.assignment_id == assignment.id).order_by(AssignmentEvent.occurred_at)).all()
     data = assignment_to_dict(assignment)
     data["timeline"] = [{"type": x.event_type, "payload": x.payload, "occurred_at": x.occurred_at.isoformat()} for x in events]

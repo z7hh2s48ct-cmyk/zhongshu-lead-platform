@@ -31,6 +31,41 @@ def _require_legacy_verification_task(task: VerificationTask) -> None:
         )
 
 
+def require_live_verification_lead(db: Session, task: VerificationTask) -> Lead:
+    lead = db.get(Lead, task.lead_id)
+    if lead is None or lead.deleted_at is not None:
+        raise AppError("VERIFICATION_TASK_NOT_FOUND", "核验任务不存在", 404)
+    return lead
+
+
+def _lock_live_legacy_verification_context(
+    db: Session, task: VerificationTask
+) -> tuple[Lead, VerificationTask]:
+    reference = db.execute(
+        select(VerificationTask.lead_id).where(VerificationTask.id == task.id)
+    ).one_or_none()
+    if reference is None:
+        raise AppError("VERIFICATION_TASK_NOT_FOUND", "核验任务不存在", 404)
+    lead = db.scalar(
+        select(Lead)
+        .where(Lead.id == reference.lead_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if lead is None or lead.deleted_at is not None:
+        raise AppError("VERIFICATION_TASK_NOT_FOUND", "核验任务不存在", 404)
+    locked_task = db.scalar(
+        select(VerificationTask)
+        .where(VerificationTask.id == task.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if locked_task is None or locked_task.lead_id != lead.id:
+        raise AppError("VERIFICATION_TASK_NOT_FOUND", "核验任务不存在", 404)
+    _require_legacy_verification_task(locked_task)
+    return lead, locked_task
+
+
 def latest_published_template(db: Session, code: str) -> VerificationTemplate:
     template = db.scalar(
         select(VerificationTemplate)
@@ -70,10 +105,23 @@ def create_tasks(
         raise AppError("VERIFICATION_TELESALES_REQUIRED", "核验任务只能派发给启用中的电销人员", 422)
     if assignee.status != "ACTIVE":
         raise AppError("VERIFICATION_TELESALES_DISABLED", "不能向已停用的电销人员派发任务", 409)
+    unique_lead_ids = list(dict.fromkeys(lead_ids))
+    locked_leads = db.scalars(
+        select(Lead)
+        .where(Lead.id.in_(unique_lead_ids))
+        .order_by(Lead.id.asc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).all()
+    leads_by_id = {lead.id: lead for lead in locked_leads}
     created: list[VerificationTask] = []
-    for lead_id in lead_ids:
-        lead = db.get(Lead, lead_id)
-        if not lead or lead.status not in {LeadStatus.IMPORTED, LeadStatus.VERIFYING}:
+    for lead_id in unique_lead_ids:
+        lead = leads_by_id.get(lead_id)
+        if (
+            not lead
+            or lead.deleted_at is not None
+            or lead.status not in {LeadStatus.IMPORTED, LeadStatus.VERIFYING}
+        ):
             continue
         existing = db.scalar(
             select(VerificationTask).where(
@@ -106,7 +154,7 @@ def create_tasks(
 
 
 def assign_task(db: Session, task: VerificationTask, assignee_user_id: str, assigned_by: str) -> VerificationTask:
-    _require_legacy_verification_task(task)
+    _lead, task = _lock_live_legacy_verification_context(db, task)
     if task.status not in {VerificationTaskStatus.PENDING, VerificationTaskStatus.ASSIGNED}:
         raise AppError("VERIFICATION_TASK_NOT_ASSIGNABLE", "任务当前不可分配", 409)
     assignee = db.scalar(select(User).where(User.id == assignee_user_id))
@@ -123,7 +171,7 @@ def assign_task(db: Session, task: VerificationTask, assignee_user_id: str, assi
 
 
 def reclaim_task(db: Session, task: VerificationTask) -> VerificationTask:
-    _require_legacy_verification_task(task)
+    _lead, task = _lock_live_legacy_verification_context(db, task)
     if task.status not in {VerificationTaskStatus.PENDING, VerificationTaskStatus.ASSIGNED}:
         raise AppError("VERIFICATION_TASK_NOT_RECLAIMABLE", "任务当前不可回收", 409)
     task.assignee_user_id = None
@@ -135,7 +183,7 @@ def reclaim_task(db: Session, task: VerificationTask) -> VerificationTask:
 
 
 def claim_task(db: Session, task: VerificationTask, principal: Principal) -> VerificationTask:
-    _require_legacy_verification_task(task)
+    _lead, task = _lock_live_legacy_verification_context(db, task)
     if task.status not in {VerificationTaskStatus.PENDING, VerificationTaskStatus.ASSIGNED}:
         if task.assignee_user_id == principal.user_id and task.status == VerificationTaskStatus.IN_PROGRESS:
             return task
@@ -179,12 +227,9 @@ def task_to_dict(db: Session, task: VerificationTask, principal: Principal, *, i
 
 
 def submit_verification(db: Session, task: VerificationTask, principal: Principal, payload: dict[str, Any]) -> VerificationSubmission:
-    _require_legacy_verification_task(task)
+    lead, task = _lock_live_legacy_verification_context(db, task)
     if task.status != VerificationTaskStatus.IN_PROGRESS or task.assignee_user_id != principal.user_id:
         raise AppError("VERIFICATION_TASK_NOT_OWNED", "任务不属于当前人员或状态已变化", 409)
-    lead = db.get(Lead, task.lead_id)
-    if not lead:
-        raise AppError("LEAD_NOT_FOUND", "客资不存在", 404)
     result = payload["result"]
     invalid_reason = payload.get("invalid_reason")
     if result == VerificationResult.INVALID and not invalid_reason:

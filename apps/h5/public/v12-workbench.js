@@ -76,7 +76,7 @@ function closeSheet(owner=null,intent=null){if((owner&&!owner.isConnected)||(int
 function openSheet(title,html,bind,intent=null){if(intent===null)beginSheetIntent();else if(intent!==sheetIntent)return false;zsSetSafeHtml(sheet, `<div class="wb-overlay"><section class="wb-sheet"><div class="wb-sheet-head"><h2>${esc(title)}</h2><button class="wb-btn" id="sheet-close">关闭</button></div>${html}</section></div>`);document.querySelector('#sheet-close').onclick=()=>closeSheet();bind?.();return true}
 function nav(){return franchiseTabs().map(([view,iconName,labelText])=>{const active=S.view===view||(view==='followups'&&S.view==='returns')||(view==='profile'&&S.view==='notifications');return `<button class="wb-nav ${active?'active':''}" data-nav="${view}"><span>${icon(iconName)}</span><span>${labelText}</span></button>`}).join('')}
 async function logout(){try{await api('/auth/logout',{method:'POST'});location.replace('/h5/')}catch(error){toast(`退出失败：${error.message}`,true)}}
-function shell(body){const tabs=franchiseTabs(),hasMessages=canView('notifications'),badgeCount=Number(S.unreadNotifications||0);zsSetSafeHtml(app, `<div class="workbench-shell"><header class="wb-header"><div class="wb-brand"><img class="wb-mark" src="./logo.png" alt="合家美宅"><div><strong>合家美宅</strong><small>客资管理平台</small></div></div><div class="wb-header-actions">${hasMessages?`<button class="wb-icon-btn wb-message-entry" data-go="notifications" aria-label="消息中心${badgeCount?`，${badgeCount} 条未读`:''}">${icon('bell')}${badgeCount?`<b class="wb-message-badge">${badgeCount>99?'99+':badgeCount}</b>`:''}</button>`:''}</div></header><main class="wb-main">${body}</main><nav class="wb-bottom" style="--wb-tabs:${tabs.length};grid-template-columns:repeat(${tabs.length},minmax(0,1fr))">${nav()}</nav></div>`);document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>go(b.dataset.nav));document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go,b.dataset.id||''));document.querySelectorAll('[data-scroll]').forEach(b=>b.onclick=()=>document.getElementById(b.dataset.scroll)?.scrollIntoView({behavior:'smooth',block:'start'}));document.querySelectorAll('[data-logout]').forEach(b=>b.onclick=logout)}
+function shell(body){const tabs=franchiseTabs(),hasMessages=canView('notifications'),badgeCount=Number(S.unreadNotifications||0);zsSetSafeHtml(app, `<div class="workbench-shell"><header class="wb-header"><div class="wb-brand"><img class="wb-mark" src="./logo.png" alt="合家美宅"><div><strong>合家美宅</strong><small>客资管理平台</small></div></div><div class="wb-header-actions">${hasMessages?`<button class="wb-icon-btn wb-message-entry" data-go="notifications" aria-label="消息中心${badgeCount?`，${badgeCount} 条未读`:''}">${icon('bell')}${badgeCount?`<b class="wb-message-badge">${badgeCount}</b>`:''}</button>`:''}</div></header><main class="wb-main">${body}</main><nav class="wb-bottom" style="--wb-tabs:${tabs.length};grid-template-columns:repeat(${tabs.length},minmax(0,1fr))">${nav()}</nav></div>`);document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>go(b.dataset.nav));document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go,b.dataset.id||''));document.querySelectorAll('[data-scroll]').forEach(b=>b.onclick=()=>document.getElementById(b.dataset.scroll)?.scrollIntoView({behavior:'smooth',block:'start'}));document.querySelectorAll('[data-logout]').forEach(b=>b.onclick=logout)}
 function go(view,id=''){if(!canView(view)){toast('当前账号暂未开通该栏目');view=defaultWorkbenchView();id=''}S.view=view;S.id=id;S.page=1;const u=new URL(location.href);u.searchParams.set('view',view);id?u.searchParams.set('id',id):u.searchParams.delete('id');history.replaceState(null,'',u);render()}
 function item(title,status,body,actions='',statusLabel){return `<article class="wb-item"><div class="wb-item-top"><div><h3>${esc(title)}</h3>${body}</div>${badge(status,statusLabel)}</div>${actions?`<div class="wb-actions">${actions}</div>`:''}</article>`}
 function metricCard(labelText,value,{view='',id='',scroll='',main=false}={}){const destination=view?`data-go="${esc(view)}"${id?` data-id="${esc(id)}"`:''}`:scroll?`data-scroll="${esc(scroll)}"`:'';return `<button type="button" class="wb-kpi${main?' main':''}" ${destination} aria-label="${esc(labelText)}：${esc(value??0)}，查看详情"><b>${esc(value??0)}</b><span>${esc(labelText)}</span><i aria-hidden="true">${icon('chevron-right')}</i></button>`}
@@ -192,6 +192,18 @@ async function loadSupplyDistricts(cityCode){
   const city=cities.find(item=>item.code===cityCode);
   supplyState.districts=(city?.districts||[]).map(district=>({...district,province_name:city.province_name,city_name:city.name,option_name:`${city.province_name} · ${city.name} · ${district.name}`}));
   return supplyState.districts;
+}
+
+async function searchSupplyDistricts(keyword){
+  const normalized=String(keyword||'').trim();
+  if(!normalized)return [];
+  const matches=await api(`/master-data/regions/search?keyword=${encodeURIComponent(normalized)}&limit=30`);
+  return (matches||[]).filter(item=>item.level==='DISTRICT').map(item=>{
+    const path=item.path||[];
+    const province=path.find(node=>node.level==='PROVINCE');
+    const city=path.find(node=>node.level==='CITY');
+    return {...item,province_name:province?.name||'',city_name:city?.name||'',city_code:city?.code||'',path_codes:item.path_codes||path.map(node=>node.code),option_name:item.path_label||path.map(node=>node.name).join(' · ')};
+  });
 }
 
 async function loadSupplyTownships(districtCode){
@@ -354,7 +366,16 @@ async function openSupplyForm(item=null,intent=beginSheetIntent()){
     filterSupplyRegionOptions(citySelect,supplyState.cities,'','暂不确定，提交后由电销补充');
     filterSupplyRegionOptions(districtSelect,supplyState.districts,'','暂不确定 / 全市范围');
     document.querySelector('#supply-city-search').oninput=event=>filterSupplyRegionOptions(citySelect,supplyState.cities,event.target.value,'暂不确定，提交后由电销补充');
-    districtSearch.oninput=event=>filterSupplyRegionOptions(districtSelect,supplyState.districts,event.target.value,'暂不确定 / 全市范围');
+    let districtSearchIntent=0;
+    districtSearch.oninput=async event=>{
+      const keyword=event.target.value.trim(),intent=++districtSearchIntent;
+      try{
+        const districts=keyword?await searchSupplyDistricts(keyword):await loadSupplyDistricts(citySelect.value);
+        if(intent!==districtSearchIntent||!districtSearch.isConnected)return;
+        supplyState.districts=districts;
+        filterSupplyRegionOptions(districtSelect,districts,'','暂不确定 / 全市范围');
+      }catch(error){if(intent===districtSearchIntent)document.querySelector('#supply-district-empty').textContent=error.message||'地区搜索失败，请稍后重试';}
+    };
     citySelect.onchange=async event=>{
       const districts=await loadSupplyDistricts(event.target.value);
       if(!citySelect.isConnected)return;
@@ -367,6 +388,11 @@ async function openSupplyForm(item=null,intent=beginSheetIntent()){
     };
     districtSelect.onchange=async event=>{
       const districtCode=event.target.value;
+      const selectedDistrict=supplyState.districts.find(item=>item.code===districtCode);
+      if(selectedDistrict?.city_code){
+        filterSupplyRegionOptions(citySelect,supplyState.cities,'','暂不确定，提交后由电销补充');
+        citySelect.value=selectedDistrict.city_code;
+      }
       const townships=await loadSupplyTownships(districtCode);
       if(!districtSelect.isConnected||districtSelect.value!==districtCode)return;
       zsSetSafeHtml(townshipSelect,`<option value="">可选，精确到乡镇/街道</option>${townships.map(row=>`<option value="${esc(row.code)}">${esc(row.name)}</option>`).join('')}`);
@@ -411,7 +437,7 @@ async function leads(){
   const supplierCapability=(capabilities||[]).find(item=>item.capability_code==='LEAD_SUPPLIER');
   const canUpload=Boolean(supplierCapability?.active&&supplierCapability?.review_status==='APPROVED');
   const rows=page.items||[];
-  const list=rows.map(lead=>item(lead.customer_name==='未填写'?'未填写姓名':lead.customer_name||'未填写姓名',lead.status,`<p>${esc(lead.phone_masked||'手机号待补充')} · ${esc(lead.city||'地区待补充')} ${esc(lead.district||'')}</p>${supplyProgress(lead)?`<p>${esc(supplyProgress(lead))}</p>`:''}`,supplyLeadActions(lead))).join('');
+  const list=rows.map((lead,index)=>item(`序号 ${rowSequence(page,index)} · ${lead.customer_name==='未填写'?'未填写姓名':lead.customer_name||'未填写姓名'}`,lead.status,`<p>${esc(lead.phone_masked||'手机号待补充')} · ${esc(lead.city||'地区待补充')} ${esc(lead.district||'')}</p>${supplyProgress(lead)?`<p>${esc(supplyProgress(lead))}</p>`:''}`,supplyLeadActions(lead))).join('');
   const capabilityAction=canUpload?'<button class="wb-btn primary" id="supply-create">上传客资</button>':'';
   const statusFilter=`<label class="wb-filter-field">进度<select class="wb-select" id="supply-status"><option value="">全部</option>${SUPPLY_STATUSES.map(value=>`<option value="${value}" ${status===value?'selected':''}>${esc(readableLabel(value))}</option>`).join('')}</select></label>`;
   const totalPages=Math.max(1,Math.ceil(Number(page.total||0)/20));
@@ -454,35 +480,36 @@ function workbenchPager(pages){
   if(totalPages<=1)return '';
   return `<div class="wb-pager"><button class="wb-btn" id="records-prev" ${S.page<=1?'disabled':''}>上一页</button><span class="wb-muted">第 ${S.page} / ${totalPages} 页</span><button class="wb-btn" id="records-next" ${S.page>=totalPages?'disabled':''}>下一页</button></div>`;
 }
+const rowSequence=(pageData,index)=>((Number(pageData?.page||S.page||1)-1)*Number(pageData?.page_size||20))+index+1;
 function bindWorkbenchPager(load){
   let loading=false;
   const move=async delta=>{if(loading)return;loading=true;S.page+=delta;try{await load()}catch(error){S.page-=delta;toast(error.message,true)}finally{loading=false}};
   document.querySelector('#records-prev')?.addEventListener('click',()=>move(-1));
   document.querySelector('#records-next')?.addEventListener('click',()=>move(1));
 }
-function assignmentEffectiveRecognition(assignment,followStatus){if(assignment.status==='RETURNED')return '退回审核通过 · 已判无效';if(assignment.status==='RETURN_PENDING')return '退回审核中';if(assignment.auto_confirmed_at)return `超时自动有效 · ${fmt(assignment.auto_confirmed_at)}`;if(followStatus==='DEAL')return '电话确认有效';return assignment.claimed_at?'等待领取满48小时':'待领取'}
+function assignmentEffectiveRecognition(assignment){if(assignment.status==='RETURNED')return '退回审核通过 · 已判无效';if(assignment.status==='RETURN_PENDING')return '退回审核中';if(assignment.transaction_confirmed_at){const reason={MANUAL_CONFIRMED:'人工确认有效',CLAIM_48H:'领取满48小时自动有效',RETURN_REJECTED:'退回驳回后确认有效'}[assignment.transaction_confirmation_policy]||'已确认有效';return `${reason} · ${fmt(assignment.transaction_confirmed_at)}`}return assignment.claimed_at?'等待领取满48小时':'待领取'}
 async function assignments(){
   const companyId=S.me?.company_id;
   const followMode=S.view==='followups';
   const canManageInternal=followMode&&isFranchiseOwner()&&can('assignment.own.read')&&Boolean(companyId);
   const statuses=followMode?['CLAIMED','FOLLOWING','RETURN_PENDING','COMPLETED']:['PENDING_CLAIM'];
-  const [pages,directory]=await Promise.all([
-    Promise.all(statuses.map(status=>api(`/v1.2/assignments?status=${status}&page=${S.page}&page_size=20`))),
+  const [page,directory]=await Promise.all([
+    api(`/v1.2/assignments?status=${encodeURIComponent(statuses.join(','))}&page=${S.page}&page_size=20`),
     canManageInternal?api(`/companies/${encodeURIComponent(companyId)}/account-directory`):Promise.resolve([]),
   ]);
-  const rows=pages.flatMap(page=>page.items||[]);
+  const rows=page.items||[];
   const employeeName=userId=>(directory||[]).find(user=>user.id===userId)?.display_name||'';
   const canCollaborate=status=>['CLAIMED','FOLLOWING','RETURN_PENDING'].includes(status);
-  const list=rows.map(x=>{
+  const list=rows.map((x,index)=>{
     const currentAssignee=employeeName(x.internal_assignee_user_id);
     const collaboration=canManageInternal&&canCollaborate(x.status)?`<p>内部处理：${esc(currentAssignee||'负责人自己跟进')}</p>`:'';
     const manage=canManageInternal&&canCollaborate(x.status)?`<button class="wb-btn" data-internal-assignment="${x.id}">分配员工</button>`:'';
     const receiveConfirmation=x.receive_confirmation_status==='CONFIRMED'?'已确认':'待确认';
     const currentFollow=x.current_follow_status?readableLabel(x.current_follow_status):'暂无';
-    return item(x.customer_name||x.lead?.customer_name||'客户',x.status,`<p>${esc(x.phone||x.phone_masked||'领取后查看')} · ${esc(x.city||x.lead?.city||'')}</p><p>接收确认：${esc(receiveConfirmation)} · 有效认定：${esc(assignmentEffectiveRecognition(x,x.current_follow_status))}</p><p>当前跟进：${esc(currentFollow)} · 客资积分 ${x.points_price||0}</p><p>${x.status==='PENDING_CLAIM'?deadlineNotice(x.expires_at,'领取截止'):deadlineNotice(x.appeal_deadline_at,'退回截止')}</p>${collaboration}`,`<button class="wb-btn" data-assignment="${x.id}">详情</button>${x.status==='PENDING_CLAIM'&&canClaimAssignment()?`<button class="wb-btn primary" data-claim="${x.id}" ${deadlineButtonAttributes(x.expires_at)}>领取</button><button class="wb-btn danger" data-refuse="${x.id}" ${deadlineButtonAttributes(x.expires_at)}>拒绝领取</button>`:''}${manage}`);
+    return item(`序号 ${rowSequence(page,index)} · ${x.customer_name||x.lead?.customer_name||'客户'}`,x.status,`<p>${esc(x.phone||x.phone_masked||'领取后查看')} · ${esc(x.city||x.lead?.city||'')}</p><p>接收确认：${esc(receiveConfirmation)} · 有效认定：${esc(assignmentEffectiveRecognition(x,x.current_follow_status))}</p><p>当前跟进：${esc(currentFollow)} · 客资积分 ${x.points_price||0}</p><p>${x.status==='PENDING_CLAIM'?deadlineNotice(x.expires_at,'领取截止'):deadlineNotice(x.appeal_deadline_at,'退回截止')}</p>${collaboration}`,`<button class="wb-btn" data-assignment="${x.id}">详情</button>${x.status==='PENDING_CLAIM'&&canClaimAssignment()?`<button class="wb-btn primary" data-claim="${x.id}" ${deadlineButtonAttributes(x.expires_at)}>领取</button><button class="wb-btn danger" data-refuse="${x.id}" ${deadlineButtonAttributes(x.expires_at)}>拒绝领取</button>`:''}${manage}`);
   }).join('');
   const title=followMode?'跟进':'接收';
-  shell(`<section class="wb-page-head"><h1>${title}</h1></section><div class="wb-list">${list||`<div class="wb-empty">暂无${title==='接收'?'待领取':'待跟进'}客资</div>`}</div>${workbenchPager(pages)}`);
+  shell(`<section class="wb-page-head"><h1>${title}</h1></section><div class="wb-list">${list||`<div class="wb-empty">暂无${title==='接收'?'待领取':'待跟进'}客资</div>`}</div>${workbenchPager([page])}`);
   bindWorkbenchPager(assignments);
   document.querySelectorAll('[data-assignment]').forEach(b=>b.onclick=()=>assignmentDetail(b.dataset.assignment));
   document.querySelectorAll('[data-claim]').forEach(b=>b.onclick=()=>claim(b.dataset.claim,b));
@@ -668,7 +695,7 @@ async function businessReport(){
   document.querySelector('#business-report-period')?.addEventListener('change',event=>go('reports',event.target.value));
 }
 function returnStatusLabel(status){return status==='DRAFT'?'待提交':status==='REJECTED'?'退回未通过':readableLabel(status)}
-async function returns(){const d=await api(`/v1.2/returns?page=${S.page}&page_size=20`);const list=(d.items||[]).map(x=>item(`${esc(x.customer_name||'待确认客户')} · ${readableLabel(x.reason_code,'其他原因')}`,x.status,`<p>${esc(x.phone_masked||'手机号待补充')} · ${esc([x.city,x.district].filter(Boolean).join(' / ')||'地区待补充')}</p><p>提交时间 ${x.submitted_at?fmt(x.submitted_at):'尚未提交'}</p><p>派发编号 ${esc(x.assignment_code||recordCode(x.assignment_id,'PF'))}</p>`,`<button class="wb-btn" data-return="${x.id}">查看进度</button>`,returnStatusLabel(x.status))).join('');shell(`<section class="wb-page-head"><h1>退回记录</h1><button class="wb-btn" data-go="profile">返回我的</button></section><div class="wb-list">${list||'<div class="wb-empty">暂无退回记录</div>'}</div>${workbenchPager([d])}`);bindWorkbenchPager(returns);document.querySelectorAll('[data-return]').forEach(b=>b.onclick=()=>returnDetail(b.dataset.return));if(S.id){const id=S.id;S.id='';returnDetail(id)}}
+async function returns(){const d=await api(`/v1.2/returns?page=${S.page}&page_size=20`);const list=(d.items||[]).map((x,index)=>item(`序号 ${rowSequence(d,index)} · ${esc(x.customer_name||'待确认客户')} · ${readableLabel(x.reason_code,'其他原因')}`,x.status,`<p>${esc(x.phone_masked||'手机号待补充')} · ${esc([x.city,x.district].filter(Boolean).join(' / ')||'地区待补充')}</p><p>提交时间 ${x.submitted_at?fmt(x.submitted_at):'尚未提交'}</p><p>派发编号 ${esc(x.assignment_code||recordCode(x.assignment_id,'PF'))}</p>`,`<button class="wb-btn" data-return="${x.id}">查看进度</button>`,returnStatusLabel(x.status))).join('');shell(`<section class="wb-page-head"><h1>退回记录</h1><button class="wb-btn" data-go="profile">返回我的</button></section><div class="wb-list">${list||'<div class="wb-empty">暂无退回记录</div>'}</div>${workbenchPager([d])}`);bindWorkbenchPager(returns);document.querySelectorAll('[data-return]').forEach(b=>b.onclick=()=>returnDetail(b.dataset.return));if(S.id){const id=S.id;S.id='';returnDetail(id)}}
 async function returnDetail(id){
   const intent=beginSheetIntent();
   const x=await api(`/v1.2/returns/${id}`),verification=x.verification||{};
@@ -685,9 +712,10 @@ async function rewards(){
   const status=REWARD_FILTERS.has(S.id)?S.id:'';
   const d=await api(`/v1.2/supplier-rewards?page=${S.page}&page_size=20${status?`&status=${encodeURIComponent(status)}`:''}`);
   const sum=d.summary||{};
-  const list=(d.items||[]).map(x=>item(`${x.reward_points} 供客积分`,x.status,`<p>当前进度：${esc(readableLabel(x.status))}</p><p>预计结算：${fmt(x.reward_due_at)}</p>`,`<button class="wb-btn" data-reward="${x.id}">查看说明</button>`)).join('');
+  const list=(d.items||[]).map((x,index)=>item(`序号 ${rowSequence(d,index)} · ${x.customer_name||'未填写客户'}`,x.status,`<p>${esc(x.lead_code||recordCode(x.lead_id,'KZ'))} · ${x.reward_points} 供客积分</p><p>接收方：${esc(x.receiver_company_name||'未记录')}</p><p>当前进度：${esc(readableLabel(x.status))} · 预计结算：${fmt(x.reward_due_at)}</p>`,`<button class="wb-btn" data-reward="${x.id}">查看说明</button>`)).join('');
   const filterNotice=status?`<div class="wb-filter"><span class="wb-status warn">当前筛选：${esc(readableLabel(status))}</span><button class="wb-btn" data-go="rewards">查看全部</button></div>`:'';
-  shell(`<section class="wb-hero"><h1>供客积分</h1><div class="wb-kpis">${metricCard('奖励笔数',sum.total_count||0,{view:'rewards'})}${metricCard('已结算积分',sum.settled_points||0,{view:'rewards',id:'SETTLED'})}${metricCard('确认中积分',sum.observing_points||0,{view:'rewards',id:'OBSERVING'})}${metricCard('暂缓积分',sum.frozen_points||0,{view:'rewards',id:'FROZEN'})}</div></section>${filterNotice}<div class="wb-list">${list||'<div class="wb-empty">暂无对应奖励记录。</div>'}</div>`);
+  shell(`<section class="wb-hero"><h1>供客积分</h1><div class="wb-kpis">${metricCard('奖励笔数',sum.total_count||0,{view:'rewards'})}${metricCard('已结算积分',sum.settled_points||0,{view:'rewards',id:'SETTLED'})}${metricCard('确认中积分',sum.observing_points||0,{view:'rewards',id:'OBSERVING'})}${metricCard('暂缓积分',sum.frozen_points||0,{view:'rewards',id:'FROZEN'})}</div></section>${filterNotice}<div class="wb-list">${list||'<div class="wb-empty">暂无对应奖励记录。</div>'}</div>${workbenchPager([d])}`);
+  bindWorkbenchPager(rewards);
   document.querySelectorAll('[data-reward]').forEach(b=>b.onclick=()=>rewardDetail(b.dataset.reward));
   if(S.id&&!status){const id=S.id;S.id='';rewardDetail(id)}
 }
@@ -695,9 +723,9 @@ async function rewardDetail(id){
   const intent=beginSheetIntent();
   const x=await api(`/v1.2/supplier-rewards/${id}`),rule=x.rule_snapshot||{};
   const amountRule=rule.calculation_mode==='FIXED'?['固定供客积分',`${rule.fixed_points??x.reward_points} 积分/条`]:['原比例规则',`${(Number(rule.ratio_bps??x.reward_ratio_bps??0)/100).toFixed(2).replace(/\.00$/,'')}%`];
-  openSheet('供客积分详情',`<div class="wb-detail-grid">${[['当前进度',readableLabel(x.status)],['供客积分',x.reward_points],['对应客资积分',x.claim_points],amountRule,['有效确认',fmt(x.observed_at)],['结算条件时间',fmt(x.reward_due_at)],['实际到账',fmt(x.settled_at)]].map(([name,value])=>`<div class="wb-detail"><small>${esc(name)}</small><b>${esc(value??'--')}</b></div>`).join('')}</div><div class="wb-card"><h3>结算说明</h3><p class="wb-muted">${esc(rewardExplanation(x))}</p></div><div class="wb-notice">人工电话确认有效时及时结算；未提前确认的，领取后连续 48 小时未正式申请退回则自动结算入账。已入账奖励在退回审核通过时自动冲回，驳回则保持已入账。</div>`,null,intent);
+  openSheet('供客积分详情',`<div class="wb-detail-grid">${[['对应客资',`${x.customer_name||'未填写'} · ${x.lead_code||recordCode(x.lead_id,'KZ')}`],['当前进度',readableLabel(x.status)],['供客积分',x.reward_points],['对应客资积分',x.claim_points],['接收加盟商',x.receiver_company_name],amountRule,['开始观察',fmt(x.observed_at)],['交易确认条件时间',fmt(x.reward_due_at)],['实际到账',fmt(x.settled_at)]].map(([name,value])=>`<div class="wb-detail"><small>${esc(name)}</small><b>${esc(value??'--')}</b></div>`).join('')}</div><div class="wb-card"><h3>结算说明</h3><p class="wb-muted">${esc(rewardExplanation(x))}</p></div><div class="wb-notice">人工电话确认有效时及时结算；未提前确认的，领取后连续 48 小时未正式申请退回则自动结算入账。已入账奖励在退回审核通过时自动冲回，驳回则保持已入账。</div><div class="wb-actions"><button class="wb-btn" data-reward-lead="${esc(x.lead_id)}">查看对应客资</button></div>`,()=>document.querySelector('[data-reward-lead]')?.addEventListener('click',()=>{closeSheet();go('leads',x.lead_id)}),intent);
 }
-async function notifications(){const d=await api(`/notifications?page=${S.page}&page_size=30`);S.unreadNotifications=Number(d.unread_total||0);const list=(d.items||[]).map(x=>`<article class="wb-item wb-notification ${x.read_at?'':'unread'}" data-msg="${x.id}" data-unread="${x.read_at?'false':'true'}" data-link="${esc(x.deep_link||'')}"><div class="wb-item-top"><div><h3>${esc(x.title)}</h3><p>${esc(x.body)}</p><p>${fmt(x.created_at)}</p></div>${badge(x.read_at?'READ':'UNREAD')}</div></article>`).join('');shell(`<section class="wb-page-head"><h1>消息</h1><button class="wb-btn" data-go="profile">返回我的</button></section><div class="wb-list">${list||'<div class="wb-empty">暂无消息</div>'}</div>`);document.querySelector('[data-go="profile"]')?.addEventListener('click',()=>go('profile'));document.querySelectorAll('[data-msg]').forEach(x=>x.onclick=async()=>{const wasUnread=x.dataset.unread==='true';try{await api(`/notifications/${x.dataset.msg}/read`,{method:'POST'});if(wasUnread)S.unreadNotifications=Math.max(0,S.unreadNotifications-1)}catch(error){toast(error.message,true);return}const deepLink=safeDeepLink(x.dataset.link);if(deepLink)location.href=deepLink;else render()})}
+async function notifications(){const d=await api(`/notifications?page=${S.page}&page_size=30`);S.unreadNotifications=Number(d.unread_total||0);const list=(d.items||[]).map(x=>`<article class="wb-item wb-notification ${x.read_at?'':'unread'}" data-msg="${x.id}" data-unread="${x.read_at?'false':'true'}" data-link="${esc(x.deep_link||'')}"><div class="wb-item-top"><div><h3>${esc(x.title)}</h3><p>${esc(x.body)}</p><p>${fmt(x.created_at)}</p></div>${badge(x.read_at?'READ':'UNREAD')}</div></article>`).join('');shell(`<section class="wb-page-head"><h1>消息</h1><div class="wb-actions">${S.unreadNotifications?`<button class="wb-btn" id="messages-read-all">全部已读（${S.unreadNotifications}）</button>`:''}<button class="wb-btn" data-go="profile">返回我的</button></div></section><div class="wb-list">${list||'<div class="wb-empty">暂无消息</div>'}</div>`);document.querySelector('[data-go="profile"]')?.addEventListener('click',()=>go('profile'));document.querySelector('#messages-read-all')?.addEventListener('click',async event=>{const button=event.currentTarget;button.disabled=true;try{await api('/notifications/read-all',{method:'POST'});S.unreadNotifications=0;toast('全部消息已标为已读');notifications()}catch(error){button.disabled=false;toast(error.message,true)}});document.querySelectorAll('[data-msg]').forEach(x=>x.onclick=async()=>{const wasUnread=x.dataset.unread==='true';try{await api(`/notifications/${x.dataset.msg}/read`,{method:'POST'});if(wasUnread)S.unreadNotifications=Math.max(0,S.unreadNotifications-1)}catch(error){toast(error.message,true);return}const deepLink=safeDeepLink(x.dataset.link);if(deepLink)location.href=deepLink;else render()})}
 function renderLogin(message=''){
   zsSetSafeHtml(app, `<main class="wb-main"><section class="wb-hero"><h1>登录后继续</h1></section><section class="wb-card"><form class="wb-form" id="franchise-login-form">${message?`<div class="wb-notice">${esc(message)}</div>`:''}<div class="wb-field"><label for="franchise-username">登录账号</label><input class="wb-input" id="franchise-username" autocomplete="username" required></div><div class="wb-field"><label for="franchise-password">登录密码</label><input class="wb-input" id="franchise-password" type="password" autocomplete="current-password" required></div><button class="wb-btn primary" id="franchise-login-submit" type="submit">登录工作台</button></form></section></main>`);
   document.querySelector('#franchise-login-form').onsubmit=async event=>{

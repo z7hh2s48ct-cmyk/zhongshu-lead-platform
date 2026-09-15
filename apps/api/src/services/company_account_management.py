@@ -9,7 +9,7 @@ from ..core.auth import Principal
 from ..core.errors import AppError
 from ..core.models import Company, CompanyAccountRequest, Role, User
 from ..core.role_contract import has_exactly_one_active_business_role
-from ..core.security import hash_password, validate_internal_password
+from ..core.security import decrypt_text, hash_password, normalize_phone, validate_internal_password
 from .auth_service import create_internal_user
 from .internal_user_management import generate_initial_password
 
@@ -92,6 +92,7 @@ def company_account_to_dict(user: User) -> dict[str, object]:
         "role_code": role_codes[0] if len(role_codes) == 1 else None,
         "status": user.status,
         "wechat_bound": user.wechat_identity is not None,
+        "credentials_ready": bool(user.username and user.password_hash),
         "session_version": user.session_version,
         "created_at": user.created_at.isoformat(),
     }
@@ -447,6 +448,46 @@ def reset_company_account_password(
     user.session_version += 1
     db.flush()
     return user, previous_session_version
+
+
+def provision_owner_credentials(
+    db: Session,
+    *,
+    company_id: str,
+    user_id: str,
+    username: str | None,
+    password: str | None,
+) -> tuple[User, str]:
+    """Give a historical WeChat-only primary owner a deliverable login."""
+
+    company = _company_or_raise(db, company_id, lock=True)
+    user = _load_company_account(db, company_id, user_id, lock=True)
+    if company.primary_user_id != user.id or _account_role_codes(user) != ("FRANCHISE_OWNER",):
+        raise AppError("COMPANY_PRIMARY_OWNER_REQUIRED", "只能补齐当前加盟商负责人的登录账号", 409)
+    if user.username and user.password_hash:
+        raise AppError("COMPANY_OWNER_CREDENTIALS_EXIST", "负责人已经具备登录账号和密码", 409)
+
+    resolved_username = (username or user.username or "").strip()
+    if not resolved_username:
+        resolved_username = normalize_phone(decrypt_text(company.contact_phone_encrypted) or "")
+    if len(resolved_username) < 2:
+        raise AppError("COMPANY_OWNER_USERNAME_REQUIRED", "无法从负责人手机号生成账号，请填写登录账号", 422)
+    duplicate = db.scalar(
+        select(User.id).where(User.username == resolved_username, User.id != user.id).limit(1)
+    )
+    if duplicate:
+        raise AppError("USERNAME_EXISTS", "登录账号已存在", 409)
+
+    initial_password = password or generate_initial_password(resolved_username)
+    try:
+        validate_internal_password(initial_password)
+    except ValueError as exc:
+        raise AppError("PASSWORD_POLICY_INVALID", str(exc), 400) from exc
+    user.username = resolved_username
+    user.password_hash = hash_password(initial_password)
+    user.session_version += 1
+    db.flush()
+    return user, initial_password
 
 
 def initial_password_for_company_account(username: str, password: str | None) -> str:

@@ -49,7 +49,7 @@ def test_operation_manages_company_accounts_without_receiving_personal_assignmen
     company_page = _data(client.get("/api/v1/companies?page=1&page_size=20", headers=operation))
     managed_company = next(item for item in company_page["items"] if item["id"] == company_id)
     assert managed_company["name"] == "账号管理验收加盟商"
-    assert "points_balance" not in managed_company
+    assert managed_company["points_balance"] == 0
     assert managed_company["assignment_summary"] == {"total": 0, "by_status": {}}
     assert "internal_assignee_user_id" not in str(managed_company["assignment_summary"])
 

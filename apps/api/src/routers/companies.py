@@ -63,7 +63,11 @@ def list_companies(
         count_stmt = count_stmt.where(Company.status == status)
     total = db.scalar(count_stmt) or 0
     items = db.scalars(stmt.order_by(Company.created_at.desc()).offset((page_no - 1) * page_size).limit(page_size)).all()
-    include_finance = principal.can("points.read") or principal.can("*")
+    include_finance = (
+        principal.can("points.read")
+        or principal.can("company.account.manage")
+        or principal.can("*")
+    )
     include_assignment_summary = principal.can("assignment.read") or principal.can("*")
     summaries: dict[str, dict[str, object]] = {}
     provided_summaries: dict[str, dict[str, object]] = {}

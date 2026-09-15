@@ -285,11 +285,13 @@ def test_township_lookup_keeps_the_latest_district_selection() -> None:
     )
     outcome = run_js(
         """
-const supplyState={townships:[{code:'original'}]};
+const supplyState={townships:[{code:'original'}],districts:[],cities:[]};
 const districtSelect={value:'A',isConnected:true};
+const citySelect={value:''};
 const townshipSelect={innerHTML:''};
 const esc=value=>String(value??'');
 const zsSetSafeHtml=(node,html)=>{node.innerHTML=html};
+const filterSupplyRegionOptions=()=>{};
 const pending=new Map();
 const api=path=>new Promise(resolve=>pending.set(path,resolve));
 """

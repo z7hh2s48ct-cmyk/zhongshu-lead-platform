@@ -55,6 +55,7 @@ class ReturnV12Status(StrEnum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
 
 
 class ReturnReasonCode(StrEnum):

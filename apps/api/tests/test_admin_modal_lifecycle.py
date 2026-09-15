@@ -88,7 +88,8 @@ def test_render_from_browser_navigation_invalidates_pending_detail() -> None:
 const S={view:'companies'};
 const shell=()=>{};
 const overview=async()=>{},review=overview,supplements=overview,telesales=overview,
- dispatch=overview,companies=overview,returns=overview,finance=overview,audit=overview,
+ closedLeads=overview,dispatch=overview,companies=overview,economics=overview,
+ returns=overview,finance=overview,audit=overview,
  fullTrace=overview,settings=overview,internalUsers=overview,calendar=overview,account=overview;
 const request=reviewDetail('old');
 await render();

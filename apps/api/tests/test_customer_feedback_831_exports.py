@@ -143,11 +143,13 @@ def test_full_lead_export_contains_business_dispatch_and_current_followup_fields
         assert archive_path.suffix == ".xlsx"
         assert set(read_xlsx(archive_path)) == {"客资明细", "跟进记录"}
         rows = _read_lead_rows(archive_path)
+        followup_rows = read_xlsx(archive_path)["跟进记录"]
     finally:
         archive_path.unlink(missing_ok=True)
 
     assert count == 1
     row = rows[0]
+    assert row["序号"] == "1"
     assert row["客户需求"] == "需要两层自建房设计"
     assert row["咨询类别"] == "SELF_BUILD"
     assert row["预算下限"] == "500000"
@@ -159,6 +161,7 @@ def test_full_lead_export_contains_business_dispatch_and_current_followup_fields
     assert row["最新跟进人"] == "加盟商小王"
     assert "获客成本" not in row
     assert "积分" not in "".join(row)
+    assert followup_rows[0]["序号"] == "1"
 
 
 def test_public_pool_export_reuses_membership_and_current_filters(db) -> None:

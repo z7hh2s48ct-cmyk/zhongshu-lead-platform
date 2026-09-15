@@ -35,7 +35,7 @@ from ..schemas.v12_lead_supply import (
     SupplierReviewBody,
     TestLeadDeleteBody,
 )
-from ..services.lead_deletion_v12 import delete_own_lead, preview_lead_deletion, require_lead_not_deleted
+from ..services.lead_deletion_v12 import delete_operation_lead, preview_lead_deletion, require_lead_not_deleted
 from ..services.audit import write_audit
 from ..services.company_profile_v12 import (
     list_capabilities,
@@ -1025,14 +1025,14 @@ def preview_operation_lead_deletion(
 
 
 @router.delete("/operation/leads/{lead_id}")
-def delete_operation_lead(
+def delete_operation_lead_endpoint(
     lead_id: str,
     body: LeadDeleteBody,
     request: Request,
     principal=Depends(require_permissions("lead.own.delete")),
     db: Session = Depends(get_db),
 ):
-    result = delete_own_lead(
+    result = delete_operation_lead(
         db,
         lead_id=lead_id,
         principal=principal,

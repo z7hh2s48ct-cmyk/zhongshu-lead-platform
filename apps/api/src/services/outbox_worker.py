@@ -9,10 +9,13 @@ from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
 from ..core.models import (
+    Assignment,
     Company,
     InviteToken,
+    Lead,
     Notification,
     NotificationOutbox,
+    ReturnRequest,
     SystemConfig,
     WechatIdentity,
 )
@@ -134,6 +137,35 @@ def process_outbox(db: Session, limit: int = 100, *, commit_batches: bool = Fals
 
 
 def _send(db: Session, client: WechatOfficialAccountClient, outbox: NotificationOutbox) -> dict[str, Any]:
+    business_ids = outbox.payload.get("business_ids") or {}
+    lead_id = business_ids.get("lead_id")
+    if not lead_id and outbox.aggregate_type == "lead":
+        lead_id = outbox.aggregate_id
+    if not lead_id:
+        assignment_id = business_ids.get("assignment_id")
+        if not assignment_id and outbox.aggregate_type == "assignment":
+            assignment_id = outbox.aggregate_id
+        assignment = db.get(Assignment, str(assignment_id)) if assignment_id else None
+        lead_id = assignment.lead_id if assignment else None
+    if not lead_id:
+        return_id = business_ids.get("return_id") or business_ids.get("return_request_id")
+        if not return_id and outbox.aggregate_type in {"return", "returns", "return_request"}:
+            return_id = outbox.aggregate_id
+        return_request = db.get(ReturnRequest, str(return_id)) if return_id else None
+        lead_id = return_request.lead_id if return_request else None
+    lead = db.get(Lead, str(lead_id)) if lead_id else None
+    if lead is not None and lead.deleted_at is not None:
+        notification_id = outbox.payload.get("notification_id")
+        notification = db.get(Notification, str(notification_id)) if notification_id else None
+        if notification is not None:
+            notification.status = "CANCELLED"
+            notification.read_at = notification.read_at or datetime.now(timezone.utc)
+        return {
+            "success": False,
+            "cancelled": True,
+            "error_code": "LEAD_DELETED",
+            "error_message": "客资已删除，通知已取消",
+        }
     # P2-03：邀请事件发生在负责人绑定微信之前——create_company_invite 拒绝已
     # 绑定公司，所以不存在可解析的主账号；走渠道投递分支而非通用收件人解析。
     if outbox.event_type == "INVITE_CREATED":

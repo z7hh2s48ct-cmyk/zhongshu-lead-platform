@@ -79,6 +79,9 @@ def test_followup_pages_allow_every_record_in_each_status_to_be_opened() -> None
     outcome = run_js("""
 const S={page:1,view:'followups',me:{company_id:'company-1'}};
 const counts={CLAIMED:21,FOLLOWING:41,RETURN_PENDING:0,COMPLETED:1};
+const allRecords=Object.entries(counts).flatMap(([status,total])=>Array.from({length:total},(_,i)=>({
+ id:`${status}-${i+1}`,customer_name:`${status}-${i+1}`,status
+})));
 const visible=[];const next={addEventListener:(_,fn)=>{next.click=fn}};
 const document={querySelectorAll:()=>[],querySelector:()=>next};
 const isFranchiseOwner=()=>false,can=()=>false,canClaimAssignment=()=>false;
@@ -86,14 +89,15 @@ const esc=x=>String(x??''),readableLabel=x=>x,fmt=x=>x;
 const deadlineNotice=()=>'',deadlineButtonAttributes=()=>'';
 const toast=()=>{},shell=()=>{},item=(title)=>{visible.push(title);return title};
 const api=async url=>{const q=new URL(url,'https://example.test').searchParams;
- const status=q.get('status'),page=Number(q.get('page')),total=counts[status];
- return {total,items:Array.from({length:Math.max(0,Math.min(20,total-(page-1)*20))},(_,i)=>({
-  id:`${status}-${(page-1)*20+i+1}`,customer_name:`${status}-${(page-1)*20+i+1}`,status
- }))}};
+ const page=Number(q.get('page')),pageSize=Number(q.get('page_size'));
+ return {page,page_size:pageSize,total:allRecords.length,
+  items:allRecords.slice((page-1)*pageSize,page*pageSize)};
+};
 """ + functions + """
-await assignments();await next.click();await next.click();
+await assignments();await next.click();await next.click();await next.click();
 console.log(JSON.stringify({count:visible.length,unique:new Set(visible).size,
- hasTwentyFirst:visible.includes('CLAIMED-21'),hasLast:visible.includes('FOLLOWING-41'),
- completed:visible.includes('COMPLETED-1'),page:S.page}));
+ hasTwentyFirst:visible.some(title=>title.endsWith(' · CLAIMED-21')),
+ hasLast:visible.some(title=>title.endsWith(' · FOLLOWING-41')),
+ completed:visible.some(title=>title.endsWith(' · COMPLETED-1')),page:S.page}));
 """)
-    assert outcome == {"count": 63, "unique": 63, "hasTwentyFirst": True, "hasLast": True, "completed": True, "page": 3}
+    assert outcome == {"count": 63, "unique": 63, "hasTwentyFirst": True, "hasLast": True, "completed": True, "page": 4}

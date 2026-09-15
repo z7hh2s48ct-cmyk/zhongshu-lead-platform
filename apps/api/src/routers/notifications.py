@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..core.auth import CurrentPrincipal, require_permissions
@@ -14,19 +14,10 @@ from ..core.responses import ok, page
 from ..core.security import scrub_credentials
 from ..integrations.wechat import WechatOfficialAccountClient
 from ..services.audit import write_audit
+from ..services.notification_service import visible_notification_condition
 from ..services.outbox_worker import process_outbox
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
-
-
-def _visible_notification_condition(principal: CurrentPrincipal):
-    condition = Notification.user_id == principal.user_id
-    if principal.has_any_role("FRANCHISE_OWNER") and principal.company_id:
-        condition = condition | (
-            Notification.user_id.is_(None)
-            & (Notification.company_id == principal.company_id)
-        )
-    return condition
 
 
 @router.get("/gate0")
@@ -43,7 +34,7 @@ def list_notifications(
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ):
-    visible = _visible_notification_condition(principal)
+    visible = visible_notification_condition(principal)
     stmt = select(Notification).where(visible)
     count_stmt = select(func.count(Notification.id)).where(visible)
     unread_total = db.scalar(
@@ -62,6 +53,31 @@ def list_notifications(
     return ok(request, data)
 
 
+@router.post("/read-all")
+def mark_all_read(
+    request: Request,
+    principal: CurrentPrincipal,
+    db: Session = Depends(get_db),
+):
+    visible = visible_notification_condition(principal)
+    result = db.execute(
+        update(Notification)
+        .where(visible, Notification.read_at.is_(None))
+        .values(read_at=datetime.now(timezone.utc))
+    )
+    marked_count = int(result.rowcount or 0)
+    write_audit(
+        db,
+        principal=principal,
+        action="NOTIFICATION_MARK_ALL_READ",
+        resource_type="notification",
+        after={"marked_count": marked_count},
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    return ok(request, {"marked_count": marked_count, "unread_total": 0})
+
+
 @router.post("/{notification_id}/read")
 def mark_read(notification_id: str, request: Request, principal: CurrentPrincipal, db: Session = Depends(get_db)):
     item = db.get(Notification, notification_id)
@@ -71,7 +87,7 @@ def mark_read(notification_id: str, request: Request, principal: CurrentPrincipa
         and principal.has_any_role("FRANCHISE_OWNER")
         and item.company_id == principal.company_id
     )
-    if not item or (
+    if not item or item.status == "CANCELLED" or (
         item.user_id != principal.user_id and not is_legacy_company_message
     ) or (item.company_id and item.company_id != principal.company_id):
         raise AppError("NOTIFICATION_NOT_FOUND", "消息不存在", 404)
