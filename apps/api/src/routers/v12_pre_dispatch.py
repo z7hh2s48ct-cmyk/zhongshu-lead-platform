@@ -17,6 +17,7 @@ from ..schemas.v12_lead_supply import (
     LeadLifecycleReasonBody,
     PreDispatchAssignBody,
     PreDispatchDispositionBody,
+    PreDispatchRequeueBody,
     PreDispatchSubmitBody,
 )
 from ..services.audit import write_audit
@@ -25,10 +26,10 @@ from ..services.pre_dispatch_v12 import (
     decide_pre_dispatch_disposition,
     is_pre_dispatch_task_overdue,
     pre_dispatch_verification_info,
+    requeue_unreachable_pre_dispatch,
     list_historical_rework_leads,
     reopen_closed_lead,
     restore_historical_rework_lead,
-    require_pre_dispatch_task_not_overdue,
     start_pre_dispatch_task,
     submit_pre_dispatch_verification,
 )
@@ -81,7 +82,7 @@ def _task_to_dict(
         and task.assignee_user_id == principal.user_id
         and principal.can("lead.phone.read")
         and (
-            (task.status == VerificationTaskStatus.IN_PROGRESS.value and not is_overdue)
+            task.status == VerificationTaskStatus.IN_PROGRESS.value
             or task.submitted_at is not None
         )
     )
@@ -95,7 +96,7 @@ def _task_to_dict(
         VerificationTaskStatus.ASSIGNED.value,
         VerificationTaskStatus.IN_PROGRESS.value,
     }:
-        next_owner = "OPERATION" if is_overdue else "TELESALES"
+        next_owner = "TELESALES"
     elif task.status == VerificationTaskStatus.SUBMITTED.value:
         next_owner = "OPERATION"
     result = {
@@ -111,6 +112,9 @@ def _task_to_dict(
         "submitted_at": task.submitted_at.isoformat() if task.submitted_at else None,
         "contact_result": task.contact_result,
         "conclusion": task.verification_conclusion,
+        "requires_qualified_verification": bool(
+            lead and str(lead.pending_reason or "").startswith("PRE_DISPATCH_REVERIFY_")
+        ),
         "lead": {
             "source_kind": lead.source_kind if lead else None,
             "customer_name": lead.customer_name if lead else None,
@@ -412,7 +416,6 @@ def dial_pre_dispatch_verification(
     task = _task_or_raise(db, task_id)
     if task.assignee_user_id != principal.user_id or task.status != VerificationTaskStatus.IN_PROGRESS.value:
         raise AppError("PRE_DISPATCH_TASK_NOT_OWNED", "仅进行中的本人任务可拨号", 409)
-    require_pre_dispatch_task_not_overdue(task)
     payload = _task_to_dict(db, task, principal, include_phone=True)
     phone = payload["lead"]["phone"]
     if not phone:
@@ -460,6 +463,54 @@ def submit_pre_dispatch_task(
     )
     db.commit()
     return ok(request, {"submission_id": submission.id, "result": submission.result}, "核验结论已提交运营处置")
+
+
+@router.post("/admin/leads/{lead_id}/pre-dispatch-verification/requeue")
+def requeue_pre_dispatch_verification(
+    lead_id: str,
+    body: PreDispatchRequeueBody,
+    request: Request,
+    principal=Depends(require_permissions("lead.supplier.review")),
+    db: Session = Depends(get_db),
+):
+    result = requeue_unreachable_pre_dispatch(
+        db,
+        lead_id=lead_id,
+        principal=principal,
+        reason=body.reason,
+    )
+    if not result.idempotent:
+        write_audit(
+            db,
+            principal=principal,
+            action="V12_PRE_DISPATCH_VERIFY_REQUEUE",
+            resource_type="verification_task",
+            resource_id=result.task.id,
+            before={"task_id": result.previous_task_id, "status": "SUBMITTED"},
+            after={
+                "task_id": result.task.id,
+                "lead_id": result.task.lead_id,
+                "status": result.task.status,
+                "previous_task_id": result.previous_task_id,
+            },
+            reason=body.reason,
+            request_id=request.state.request_id,
+        )
+        db.commit()
+    return ok(
+        request,
+        {
+            "task": {
+                "id": result.task.id,
+                "status": result.task.status,
+                "assignee_user_id": result.task.assignee_user_id,
+                "due_at": result.task.due_at.isoformat() if result.task.due_at else None,
+            },
+            "previous_task_id": result.previous_task_id,
+            "idempotent": result.idempotent,
+        },
+        "客资已重新进入前置核验队列",
+    )
 
 
 @router.post("/admin/leads/{lead_id}/pre-dispatch-disposition")

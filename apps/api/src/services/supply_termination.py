@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.errors import AppError
@@ -55,10 +55,11 @@ def _now(value: datetime | None = None) -> datetime:
 
 
 def _lock_company(db: Session, company_id: str) -> Company:
+    # Serialize business changes without blocking points-ledger FK checks.
     company = db.scalar(
         select(Company)
         .where(Company.id == company_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     if company is None:
@@ -92,7 +93,7 @@ def require_supply_write_enabled(db: Session, company_id: str | None) -> Company
     company = db.scalar(
         select(Company)
         .where(Company.id == company_id)
-        .with_for_update()
+        .with_for_update(key_share=True)
         .execution_options(populate_existing=True)
     )
     if company is None or company.status != "ACTIVE":
@@ -157,7 +158,9 @@ def termination_blockers(db: Session, company_id: str) -> list[dict[str, Any]]:
         SupplierLeadReward.supplier_company_id == company_id,
         SupplierLeadReward.status == RewardStatus.SETTLED.value,
         Assignment.claimed_at.is_not(None),
-        Assignment.claimed_at > _now() - timedelta(hours=48),
+        or_(Assignment.appeal_paused_at.is_not(None),
+            and_(Assignment.appeal_resumed_at.is_not(None), Assignment.appeal_deadline_at > _now()),
+            and_(Assignment.appeal_resumed_at.is_(None), Assignment.claimed_at > _now() - timedelta(hours=48))),
     ).order_by(SupplierLeadReward.id).limit(21)).all())
     early_count = int(db.scalar(select(func.count(SupplierLeadReward.id)).join(
         Assignment, Assignment.id == SupplierLeadReward.assignment_id
@@ -165,7 +168,9 @@ def termination_blockers(db: Session, company_id: str) -> list[dict[str, Any]]:
         SupplierLeadReward.supplier_company_id == company_id,
         SupplierLeadReward.status == RewardStatus.SETTLED.value,
         Assignment.claimed_at.is_not(None),
-        Assignment.claimed_at > _now() - timedelta(hours=48),
+        or_(Assignment.appeal_paused_at.is_not(None),
+            and_(Assignment.appeal_resumed_at.is_not(None), Assignment.appeal_deadline_at > _now()),
+            and_(Assignment.appeal_resumed_at.is_(None), Assignment.claimed_at > _now() - timedelta(hours=48))),
     )) or 0)
     if early_count:
         blockers.append({"code": "EARLY_REWARD_RETURN_WINDOW", "count": early_count, "record_ids": early_ids[:20], "truncated": early_count > 20, "message": "提前确认的奖励仍在48小时退回窗口内"})

@@ -18,7 +18,9 @@ from apps.api.tests.test_return_concurrency_postgres import (
 
 def _is_company_lock(statement: str) -> bool:
     normalized = " ".join(statement.upper().split())
-    return "FROM COMPANIES" in normalized and "FOR UPDATE" in normalized
+    return "FROM COMPANIES" in normalized and (
+        "FOR UPDATE" in normalized or "FOR NO KEY UPDATE" in normalized
+    )
 
 
 def test_supply_write_committed_before_termination_is_reported_as_blocker(

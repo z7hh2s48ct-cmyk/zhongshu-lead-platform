@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from urllib.parse import quote
 
@@ -19,6 +20,7 @@ from ..schemas.v12_returns import (
     ReturnDirectInvalidBody,
     ReturnDraftV12Body,
     ReturnFinalReviewBody,
+    ReturnRegionRedispatchBody,
     ReturnVerificationAssignBody,
     ReturnVerificationSubmitBody,
 )
@@ -30,6 +32,7 @@ from ..services.return_v12 import (
     assign_return_verification_task,
     claim_return_verification_task,
     create_or_update_return_draft,
+    correct_region_and_redispatch,
     direct_invalid_return,
     final_review_return,
     prepare_return_evidence_upload,
@@ -37,8 +40,8 @@ from ..services.return_v12 import (
     return_request_list_to_dict,
     return_request_to_dict,
     return_verification_task_list_to_dict,
+    return_verification_round_snapshots,
     return_verification_task_to_dict,
-    require_return_verification_task_not_overdue,
     submit_return_request,
     submit_return_verification,
 )
@@ -46,6 +49,7 @@ from ..services.company_assignment_v12 import require_return_request_access
 from ..services.storage import create_file_access_token, decode_file_access_token, get_storage
 
 router = APIRouter(prefix="/v1.2", tags=["v1.2-return-verification"])
+logger = logging.getLogger("zhongshu.v12_returns")
 
 _OPEN_RETURN_TASK_STATUSES = (
     VerificationTaskStatus.PENDING.value,
@@ -71,31 +75,28 @@ AUDIO_MIME = {
 }
 
 
-def _can_read_return(db: Session, principal, item: ReturnRequest) -> bool:
+def _can_read_return(db: Session, principal, item: ReturnRequest, *, evidence_id: str | None = None) -> bool:
     if principal.can("*") or principal.can("return.read") or principal.can("return.evidence.read"):
         return True
     lead = db.get(Lead, item.lead_id)
     if lead is None or lead.deleted_at is not None:
         return False
     if principal.has_any_role("TELESALES") and principal.can("verification.task.read"):
-        assigned_task = db.scalar(
-            select(VerificationTask.id).where(
+        assigned_tasks = db.scalars(
+            select(VerificationTask).where(
                 VerificationTask.return_request_id == item.id,
                 VerificationTask.assignee_user_id == principal.user_id,
-                VerificationTask.submitted_at.is_not(None),
+                or_(VerificationTask.submitted_at.is_not(None),
+                    VerificationTask.status.in_((VerificationTaskStatus.ASSIGNED.value,
+                                                 VerificationTaskStatus.IN_PROGRESS.value))),
             )
-        )
-        if assigned_task:
+        ).all()
+        if any(task.id == item.verification_task_id for task in assigned_tasks):
             return True
-        active_task = db.scalar(
-            select(VerificationTask.id).where(
-                VerificationTask.return_request_id == item.id,
-                VerificationTask.assignee_user_id == principal.user_id,
-                VerificationTask.status == VerificationTaskStatus.IN_PROGRESS.value,
-            )
-        )
-        if active_task:
-            return True
+        if evidence_id and assigned_tasks:
+            snapshots = return_verification_round_snapshots(db, {item.assignment_id})
+            return any(evidence_id in snapshots.get(task.id, {}).get("evidence_ids", [])
+                for task in assigned_tasks if task.submitted_at is not None)
     if not principal.can("return.own.manage"):
         return False
     assignment = db.get(Assignment, item.assignment_id)
@@ -393,9 +394,34 @@ def download_return_evidence_v12(
     if evidence is None:
         raise AppError("FILE_NOT_FOUND", "证据文件不存在", 404)
     item = db.get(ReturnRequest, evidence.return_request_id)
-    if item is None or not _can_read_return(db, principal, item):
+    if item is None or not _can_read_return(db, principal, item, evidence_id=evidence_id):
         raise AppError("FORBIDDEN", "无权访问证据文件", 403)
-    content = get_storage().read(evidence.object_key)
+    try:
+        content = get_storage().read(evidence.object_key)
+    except AppError as exc:
+        if exc.code != "FILE_NOT_FOUND":
+            raise
+        logger.warning(
+            "return evidence object missing evidence_id=%s return_request_id=%s",
+            evidence.id,
+            item.id,
+        )
+        raise AppError(
+            "EVIDENCE_FILE_MISSING",
+            "证据文件已丢失，请联系管理员",
+            404,
+        ) from exc
+    except Exception as exc:
+        logger.exception(
+            "return evidence read failed evidence_id=%s return_request_id=%s",
+            evidence.id,
+            item.id,
+        )
+        raise AppError(
+            "EVIDENCE_STORAGE_READ_FAILED",
+            "证据文件暂时无法读取，请稍后重试",
+            503,
+        ) from exc
     write_audit(
         db,
         principal=principal,
@@ -615,7 +641,6 @@ def dial_return_verification(
         or task.status != VerificationTaskStatus.IN_PROGRESS.value
     ):
         raise AppError("FORBIDDEN", "无权拨打该退回核验电话", 403)
-    require_return_verification_task_not_overdue(task)
     data = return_verification_task_to_dict(db, task, principal, include_phone=True)
     phone = data["lead"]["phone"]
     write_audit(
@@ -697,6 +722,8 @@ def upload_return_verification_evidence(
             "mime_type": evidence.mime_type,
             "file_size": evidence.file_size,
             "duration_seconds": evidence.duration_seconds,
+            "uploaded_by": evidence.uploaded_by,
+            "uploaded_by_name": principal.display_name,
             "created_at": evidence.created_at.isoformat(),
             "access_token": create_file_access_token(evidence.id, principal.user_id),
         },
@@ -774,6 +801,32 @@ def directly_confirm_return_invalid(
         return_request_to_dict(db, result.request, include_evidence=True),
         "已由运营确认客资无效",
     )
+
+
+@router.post("/returns/{return_id}/correct-region-and-redispatch")
+def correct_return_region(
+    return_id: str,
+    body: ReturnRegionRedispatchBody,
+    request: Request,
+    principal=Depends(require_permissions("return.review")),
+    db: Session = Depends(get_db),
+):
+    result = correct_region_and_redispatch(db, return_id=return_id, principal=principal,
+        province_code=body.province_code, city_code=body.city_code,
+        district_code=body.district_code, reason=body.reason)
+    lead = db.get(Lead, result.request.lead_id)
+    write_audit(db, principal=principal, action="V12_RETURN_REGION_CORRECTED",
+        resource_type="return_request", resource_id=result.request.id,
+        company_id=result.request.company_id,
+        after={"lead_id": lead.id, "region_code": body.district_code,
+            "refund_ledger_id": result.refund_ledger.id, "idempotent": result.idempotent},
+        reason=body.reason, request_id=request.state.request_id)
+    db.commit()
+    data = return_request_to_dict(db, result.request, include_evidence=True)
+    data["lead_region"] = {"province": lead.province, "city": lead.city,
+        "district": lead.district, "region_code": lead.region_code}
+    data["idempotent"] = result.idempotent
+    return ok(request, data, "原领取积分已退还，区域已修改，客资可重新分配")
 
 
 @router.post("/returns/{return_id}/final-review")

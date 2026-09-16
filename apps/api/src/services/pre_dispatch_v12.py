@@ -19,6 +19,7 @@ from ..core.time import as_utc
 from ..core.v12_enums import LeadSourceKind, LeadV12Status, VerificationTaskType
 from .dispatch_v12 import approved_lead_pool_target
 from .lead_correction_guard import require_correction_review_resolved
+from .supply_termination import require_supply_write_enabled
 from .verification_service import latest_published_template
 
 
@@ -29,6 +30,25 @@ _ACTIVE_TASK_STATUSES = {
 }
 _CONCLUSIONS = {"QUALIFIED", "INFO_INCOMPLETE", "UNVERIFIABLE", "INVALID", "DUPLICATE"}
 _DISPOSITIONS = {"APPROVE_POOL", "RETURN_REWORK", "DUPLICATE", "CLOSE"}
+_REQUEUE_CONTACT_RESULTS = {
+    "NO_ANSWER",
+    "NOT_ANSWERED",
+    "MISSED_CALL",
+    "UNREACHABLE",
+    "REFUSED",
+    "REJECTED_CALL",
+    "CALL_REJECTED",
+    "无人接听",
+    "未接",
+    "未接听",
+    "拒接",
+    "拒绝接听",
+}
+_REQUEUE_LEAD_STATUSES = {
+    LeadV12Status.PENDING_OPERATION_DISPOSITION.value,
+    LeadV12Status.CLOSED.value,
+    LeadV12Status.INVALID.value,
+}
 _OPERATION_DRAFT_SOURCE_KINDS = {
     LeadSourceKind.PLATFORM_MANUAL.value,
     LeadSourceKind.FEISHU_IMPORT.value,
@@ -40,6 +60,13 @@ class PreDispatchAssignmentResult:
     task: VerificationTask
     before: dict[str, Any] | None
     after: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class PreDispatchRequeueResult:
+    task: VerificationTask
+    previous_task_id: str
+    idempotent: bool
 
 
 def _now() -> datetime:
@@ -67,6 +94,30 @@ def reopen_closed_lead(
     lead = _lead_or_raise(db, lead_id, lock=True)
     if lead.status != LeadV12Status.CLOSED.value:
         raise AppError("LEAD_REOPEN_STATE_INVALID", "只有已关闭客资可以重新启用", 409)
+    latest_task = db.scalar(
+        select(VerificationTask)
+        .where(
+            VerificationTask.lead_id == lead.id,
+            VerificationTask.task_type
+            == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+        )
+        .order_by(VerificationTask.created_at.desc(), VerificationTask.id.desc())
+        .limit(1)
+    )
+    if (
+        latest_task is not None
+        and latest_task.status
+        in {
+            VerificationTaskStatus.SUBMITTED.value,
+            VerificationTaskStatus.RELEASED.value,
+        }
+        and is_pre_dispatch_task_requeueable(latest_task)
+    ):
+        raise AppError(
+            "PRE_DISPATCH_REVERIFY_REQUIRED",
+            "未接、拒接或无法核验的客资必须先重新进入电销核验",
+            409,
+        )
     assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
     lead.status = LeadV12Status.READY_DISPATCH.value
     lead.current_assignment_id = None
@@ -183,14 +234,14 @@ def is_pre_dispatch_task_overdue(task: VerificationTask) -> bool:
     return due_at is not None and due_at <= _now()
 
 
-def _require_not_overdue(task: VerificationTask) -> None:
-    if is_pre_dispatch_task_overdue(task):
-        raise AppError("PRE_DISPATCH_TASK_OVERDUE", "前置电销核验任务已超时，请联系运营人员改派", 409)
-
-
-def require_pre_dispatch_task_not_overdue(task: VerificationTask) -> None:
-    """Keep every executable pre-dispatch action behind the same deadline rule."""
-    _require_not_overdue(task)
+def is_pre_dispatch_task_requeueable(task: VerificationTask | None) -> bool:
+    if task is None:
+        return False
+    contact_result = (task.contact_result or "").strip().upper()
+    return (
+        task.verification_conclusion == "UNVERIFIABLE"
+        or contact_result in _REQUEUE_CONTACT_RESULTS
+    )
 
 
 def latest_submitted_pre_dispatch_task_ids(
@@ -479,10 +530,8 @@ def assign_pre_dispatch_task(
     now = _now()
     if active is not None:
         before = _assignment_snapshot(active)
-        if active.assignee_user_id == assignee_user_id and not is_pre_dispatch_task_overdue(active):
+        if active.assignee_user_id == assignee_user_id:
             return PreDispatchAssignmentResult(task=active, before=before, after=before)
-        if active.status == VerificationTaskStatus.IN_PROGRESS.value and not is_pre_dispatch_task_overdue(active):
-            raise AppError("PRE_DISPATCH_TASK_IN_PROGRESS", "核验已开始，不能直接改派", 409)
         active.assignee_user_id = assignee_user_id
         active.assigned_by = assigned_by
         active.assigned_at = now
@@ -526,7 +575,6 @@ def assign_pre_dispatch_task(
 def start_pre_dispatch_task(db: Session, *, task_id: str, principal: Principal) -> VerificationTask:
     lead, task = _lead_then_task_for_update(db, task_id)
     require_correction_review_resolved(lead)
-    _require_not_overdue(task)
     if task.status == VerificationTaskStatus.IN_PROGRESS.value and task.assignee_user_id == principal.user_id:
         return task
     if task.status != VerificationTaskStatus.ASSIGNED.value or task.assignee_user_id is None:
@@ -564,7 +612,6 @@ def submit_pre_dispatch_verification(
         )
         if submission is not None:
             return submission
-    _require_not_overdue(task)
     if task.status != VerificationTaskStatus.IN_PROGRESS.value or task.assignee_user_id != principal.user_id:
         raise AppError("PRE_DISPATCH_TASK_NOT_OWNED", "任务不属于当前电销人员或尚未开始", 409)
     require_correction_review_resolved(lead)
@@ -577,7 +624,11 @@ def submit_pre_dispatch_verification(
     task.lock_version += 1
     assert_lead_transition(lead.status, LeadV12Status.PENDING_OPERATION_DISPOSITION)
     lead.status = LeadV12Status.PENDING_OPERATION_DISPOSITION.value
-    lead.pending_reason = f"PRE_DISPATCH_{normalized_conclusion}"
+    # A callback/re-entered lead must actually pass the new telesales round.
+    # Preserve its marker through submission; ordinary first-round operational
+    # discretion for incomplete information remains unchanged.
+    prefix = "PRE_DISPATCH_REVERIFY" if lead.pending_reason == "PRE_DISPATCH_REVERIFY_REQUIRED" else "PRE_DISPATCH"
+    lead.pending_reason = f"{prefix}_{normalized_conclusion}"
     submission = VerificationSubmission(
         task_id=task.id,
         lead_id=lead.id,
@@ -590,6 +641,129 @@ def submit_pre_dispatch_verification(
     db.add(submission)
     db.flush()
     return submission
+
+
+def requeue_unreachable_pre_dispatch(
+    db: Session,
+    *,
+    lead_id: str,
+    principal: Principal,
+    reason: str,
+) -> PreDispatchRequeueResult:
+    """Queue a fresh verification round while preserving the submitted round."""
+
+    _require_operation(principal)
+    normalized_reason = reason.strip()
+    if len(normalized_reason) < 2:
+        raise AppError("PRE_DISPATCH_REQUEUE_REASON_REQUIRED", "重新核验原因至少 2 个字符", 422)
+    candidate = _lead_or_raise(db, lead_id)
+    is_idempotent_retry = (
+        candidate.status == LeadV12Status.PENDING_TELESALES_VERIFY.value
+        and candidate.pending_reason == "PRE_DISPATCH_REVERIFY_REQUIRED"
+    )
+    if candidate.status not in _REQUEUE_LEAD_STATUSES and not is_idempotent_retry:
+        raise AppError(
+            "PRE_DISPATCH_REQUEUE_STATE_INVALID",
+            "只有待运营处置、已关闭或无效的未接通客资可以重新进入核验队列",
+            409,
+        )
+    supplier_company_id = candidate.supplier_company_id
+    if supplier_company_id:
+        require_supply_write_enabled(db, supplier_company_id)
+    lead = _lead_or_raise(db, lead_id, lock=True)
+    if lead.supplier_company_id != supplier_company_id:
+        raise AppError(
+            "PRE_DISPATCH_REQUEUE_CONCURRENT_CHANGE",
+            "客资供资方已变更，请刷新后重试",
+            409,
+        )
+    if lead.current_assignment_id is not None:
+        raise AppError(
+            "PRE_DISPATCH_REQUEUE_ASSIGNMENT_EXISTS",
+            "客资已有派发记录，不能重新进入前置核验队列",
+            409,
+        )
+    active = db.scalar(
+        select(VerificationTask)
+        .where(
+            VerificationTask.lead_id == lead.id,
+            VerificationTask.task_type == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+            VerificationTask.status.in_(_ACTIVE_TASK_STATUSES),
+        )
+        .order_by(VerificationTask.created_at.desc(), VerificationTask.id.desc())
+        .with_for_update()
+    )
+    if (
+        lead.status == LeadV12Status.PENDING_TELESALES_VERIFY.value
+        and lead.pending_reason == "PRE_DISPATCH_REVERIFY_REQUIRED"
+        and active is not None
+    ):
+        previous_task_id = db.scalar(
+            select(VerificationTask.id)
+            .where(
+                VerificationTask.lead_id == lead.id,
+                VerificationTask.task_type == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+                VerificationTask.status == VerificationTaskStatus.RELEASED.value,
+                VerificationTask.submitted_at.is_not(None),
+            )
+            .order_by(VerificationTask.submitted_at.desc(), VerificationTask.id.desc())
+            .limit(1)
+        )
+        return PreDispatchRequeueResult(
+            task=active,
+            previous_task_id=previous_task_id or active.id,
+            idempotent=True,
+        )
+    if lead.status not in _REQUEUE_LEAD_STATUSES:
+        raise AppError(
+            "PRE_DISPATCH_REQUEUE_STATE_INVALID",
+            "只有待运营处置、已关闭或无效的未接通客资可以重新进入核验队列",
+            409,
+        )
+    previous = db.scalar(
+        select(VerificationTask)
+        .where(
+            VerificationTask.lead_id == lead.id,
+            VerificationTask.task_type == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+        )
+        .order_by(VerificationTask.created_at.desc(), VerificationTask.id.desc())
+        .with_for_update()
+    )
+    if previous is None or previous.status not in {
+        VerificationTaskStatus.SUBMITTED.value,
+        VerificationTaskStatus.RELEASED.value,
+    }:
+        raise AppError("PRE_DISPATCH_CONCLUSION_REQUIRED", "未找到可重新核验的电销结论", 409)
+    if not is_pre_dispatch_task_requeueable(previous):
+        raise AppError(
+            "PRE_DISPATCH_REQUEUE_CONCLUSION_INVALID",
+            "仅无人接听、未接、拒接或无法核验的客资可以重新进入核验队列",
+            409,
+        )
+    if previous.status == VerificationTaskStatus.SUBMITTED.value:
+        previous.status = VerificationTaskStatus.RELEASED.value
+        previous.lock_version += 1
+    assert_lead_transition(lead.status, LeadV12Status.PENDING_TELESALES_VERIFY)
+    lead.status = LeadV12Status.PENDING_TELESALES_VERIFY.value
+    lead.review_status = "PENDING"
+    lead.pending_reason = "PRE_DISPATCH_REVERIFY_REQUIRED"
+    lead.review_note = normalized_reason
+    lead.reviewed_at = None
+    lead.snapshot_version += 1
+    task = VerificationTask(
+        lead_id=lead.id,
+        template_id=previous.template_id,
+        template_version=previous.template_version,
+        task_type=VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+        status=VerificationTaskStatus.PENDING.value,
+    )
+    db.add(task)
+    db.flush()
+    return PreDispatchRequeueResult(
+        task=task,
+        previous_task_id=previous.id,
+        idempotent=False,
+    )
 
 
 def decide_pre_dispatch_disposition(
@@ -623,6 +797,9 @@ def decide_pre_dispatch_disposition(
     if task is None or not task.verification_conclusion:
         raise AppError("PRE_DISPATCH_CONCLUSION_REQUIRED", "电销提交事实结论后才能运营处置", 409)
     if normalized_decision == "APPROVE_POOL":
+        if (str(lead.pending_reason or "").startswith("PRE_DISPATCH_REVERIFY_")
+            and task.verification_conclusion != "QUALIFIED"):
+            raise AppError("PRE_DISPATCH_NOT_QUALIFIED", "重新核验通过后才能进入派发池", 409)
         target = approved_lead_pool_target(db, lead)
         lead.review_status = "APPROVED"
         lead.pending_reason = (

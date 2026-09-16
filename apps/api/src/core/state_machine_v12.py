@@ -44,6 +44,7 @@ LEAD_TRANSITIONS: Mapping[LeadV12Status, Set[LeadV12Status]] = {
     LeadV12Status.PENDING_OPERATION_DISPOSITION: {
         LeadV12Status.PUBLIC_POOL,
         LeadV12Status.READY_DISPATCH,
+        LeadV12Status.PENDING_TELESALES_VERIFY,
         LeadV12Status.DRAFT,
         LeadV12Status.INVALID,
         LeadV12Status.DUPLICATE,
@@ -59,9 +60,15 @@ LEAD_TRANSITIONS: Mapping[LeadV12Status, Set[LeadV12Status]] = {
     LeadV12Status.CLAIMED: {LeadV12Status.FOLLOWING, LeadV12Status.READY_DISPATCH, LeadV12Status.CLOSED},
     LeadV12Status.FOLLOWING: {LeadV12Status.COMPLETED, LeadV12Status.READY_DISPATCH, LeadV12Status.CLOSED},
     LeadV12Status.COMPLETED: {LeadV12Status.CLOSED},
-    LeadV12Status.INVALID: {LeadV12Status.CLOSED},
+    LeadV12Status.INVALID: {
+        LeadV12Status.CLOSED,
+        LeadV12Status.PENDING_TELESALES_VERIFY,
+    },
     LeadV12Status.DUPLICATE: {LeadV12Status.READY_DISPATCH, LeadV12Status.CLOSED},
-    LeadV12Status.CLOSED: {LeadV12Status.READY_DISPATCH},
+    LeadV12Status.CLOSED: {
+        LeadV12Status.READY_DISPATCH,
+        LeadV12Status.PENDING_TELESALES_VERIFY,
+    },
 }
 
 RETURN_TRANSITIONS: Mapping[ReturnV12Status, Set[ReturnV12Status]] = {

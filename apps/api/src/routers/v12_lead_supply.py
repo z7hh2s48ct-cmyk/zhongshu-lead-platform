@@ -68,6 +68,7 @@ from ..services.lead_supply_v12 import (
     get_lead_or_404,
     lead_supply_list_to_dict,
     lead_supply_to_dict,
+    list_platform_leads as list_platform_leads_service,
     list_supplier_leads,
     preview_test_lead_delete,
     recheck_platform_lead_correction,
@@ -993,25 +994,20 @@ def list_platform_leads(
     principal=Depends(require_permissions("lead.manual.manage")),
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
+    region: str | None = Query(default=None, max_length=64),
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
-    stmt = select(Lead).where(
-        Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value,
-        Lead.deleted_at.is_(None),
+    items, total = list_platform_leads_service(
+        db,
+        status=status,
+        region=region,
+        page_no=page_no,
+        page_size=page_size,
     )
-    count_stmt = select(func.count(Lead.id)).where(
-        Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value,
-        Lead.deleted_at.is_(None),
-    )
-    if status:
-        stmt = stmt.where(Lead.status == status)
-        count_stmt = count_stmt.where(Lead.status == status)
-    total = db.scalar(count_stmt) or 0
-    items = db.scalars(stmt.order_by(Lead.created_at.desc()).offset((page_no - 1) * page_size).limit(page_size)).all()
     return ok(
         request,
-        page(lead_supply_list_to_dict(db, list(items), principal), total, page_no, page_size),
+        page(lead_supply_list_to_dict(db, items, principal), total, page_no, page_size),
     )
 
 

@@ -171,6 +171,9 @@ def _assignment_dict(
         if assignment.released_at
         else None,
         "release_reason": assignment.release_reason,
+        "appeal_paused_at": assignment.appeal_paused_at.isoformat() if assignment.appeal_paused_at else None,
+        "appeal_remaining_seconds": assignment.appeal_remaining_seconds,
+        "appeal_resumed_at": assignment.appeal_resumed_at.isoformat() if assignment.appeal_resumed_at else None,
         "appeal_deadline_at": assignment.appeal_deadline_at.isoformat()
         if assignment.appeal_deadline_at
         else None,
@@ -213,6 +216,9 @@ def _assignment_detail_projection(
             Assignment.released_at,
             Assignment.release_reason,
             Assignment.appeal_deadline_at,
+            Assignment.appeal_paused_at,
+            Assignment.appeal_remaining_seconds,
+            Assignment.appeal_resumed_at,
             Assignment.reward_due_at,
             Assignment.first_followup_due_at,
             Assignment.internal_assignee_user_id,
@@ -285,6 +291,9 @@ def _projected_assignment_dict(row, *, reveal_phone: bool = False) -> dict:
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
         "released_at": row.released_at.isoformat() if row.released_at else None,
         "release_reason": row.release_reason,
+        "appeal_paused_at": row.appeal_paused_at.isoformat() if row.appeal_paused_at else None,
+        "appeal_remaining_seconds": row.appeal_remaining_seconds,
+        "appeal_resumed_at": row.appeal_resumed_at.isoformat() if row.appeal_resumed_at else None,
         "appeal_deadline_at": row.appeal_deadline_at.isoformat()
         if row.appeal_deadline_at
         else None,

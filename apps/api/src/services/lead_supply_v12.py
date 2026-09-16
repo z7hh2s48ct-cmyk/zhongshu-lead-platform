@@ -36,6 +36,7 @@ from ..core.v12_enums import (
     LeadV12Status,
     ReturnV12Status,
     RewardStatus,
+    VerificationTaskType,
 )
 from .company_profile_v12 import require_lead_capability
 from .phone_uniqueness import require_unique_lead_phone
@@ -52,7 +53,11 @@ from .lead_correction_guard import (
 )
 from .notification_service import create_station_message, enqueue_outbox
 from .points_service import change_points
-from .pre_dispatch_v12 import queue_pre_dispatch_task, restart_pre_dispatch_after_correction
+from .pre_dispatch_v12 import (
+    is_pre_dispatch_task_requeueable,
+    queue_pre_dispatch_task,
+    restart_pre_dispatch_after_correction,
+)
 
 
 EDITABLE_FIELDS = {
@@ -1546,6 +1551,43 @@ def list_supplier_leads(
     return items, total
 
 
+def list_platform_leads(
+    db: Session,
+    *,
+    status: str | None,
+    region: str | None,
+    page_no: int,
+    page_size: int,
+) -> tuple[list[Lead], int]:
+    filters = [
+        Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value,
+        Lead.deleted_at.is_(None),
+    ]
+    if status:
+        filters.append(Lead.status == status.strip().upper())
+    region_keyword = region.strip() if region else ""
+    if region_keyword:
+        filters.append(
+            or_(
+                Lead.province.contains(region_keyword, autoescape=True),
+                Lead.city.contains(region_keyword, autoescape=True),
+                Lead.district.contains(region_keyword, autoescape=True),
+                Lead.region_code.contains(region_keyword, autoescape=True),
+            )
+        )
+    total = int(db.scalar(select(func.count(Lead.id)).where(*filters)) or 0)
+    items = list(
+        db.scalars(
+            select(Lead)
+            .where(*filters)
+            .order_by(Lead.created_at.desc(), Lead.id.desc())
+            .offset((page_no - 1) * page_size)
+            .limit(page_size)
+        ).all()
+    )
+    return items, total
+
+
 def latest_dedup_event(db: Session, lead_id: str) -> LeadDedupEvent | None:
     return db.scalar(
         select(LeadDedupEvent)
@@ -1571,6 +1613,8 @@ def lead_supply_to_dict(
     current_assignment: dict[str, Any] | None = None,
     assignment_history: list[dict[str, Any]] | None = None,
     followup_history: list[dict[str, Any]] | None = None,
+    latest_pre_dispatch_task: VerificationTask | None = None,
+    supplier_cooperation_status: str | None = None,
 ) -> dict[str, Any]:
     phone = decrypt_text(lead.phone_encrypted)
     can_view_phone = bool(
@@ -1645,6 +1689,33 @@ def lead_supply_to_dict(
         "reviewed_at": lead.reviewed_at.isoformat() if lead.reviewed_at else None,
         "created_at": lead.created_at.isoformat(),
         "updated_at": lead.updated_at.isoformat(),
+        "latest_pre_dispatch_task_id": (
+            latest_pre_dispatch_task.id if latest_pre_dispatch_task else None
+        ),
+        "latest_pre_dispatch_contact_result": (
+            latest_pre_dispatch_task.contact_result
+            if latest_pre_dispatch_task
+            else None
+        ),
+        "latest_pre_dispatch_conclusion": (
+            latest_pre_dispatch_task.verification_conclusion
+            if latest_pre_dispatch_task
+            else None
+        ),
+        "can_requeue_pre_dispatch": bool(
+            lead.status
+            in {
+                LeadV12Status.PENDING_OPERATION_DISPOSITION.value,
+                LeadV12Status.CLOSED.value,
+                LeadV12Status.INVALID.value,
+            }
+            and lead.current_assignment_id is None
+            and is_pre_dispatch_task_requeueable(latest_pre_dispatch_task)
+            and (
+                lead.supplier_company_id is None
+                or supplier_cooperation_status == "ACTIVE"
+            )
+        ),
     }
     if assignment_history is not None:
         result["assignment_history"] = assignment_history
@@ -1712,13 +1783,25 @@ def lead_supply_list_to_dict(
     supplier_company_ids = {
         lead.supplier_company_id for lead in leads if lead.supplier_company_id
     }
-    supplier_company_names = dict(
+    supplier_company_rows = (
         db.execute(
-            select(Company.id, Company.name).where(
-                Company.id.in_(supplier_company_ids)
-            )
+            select(
+                Company.id,
+                Company.name,
+                Company.supplier_cooperation_status,
+            ).where(Company.id.in_(supplier_company_ids))
         ).all()
-    ) if supplier_company_ids else {}
+        if supplier_company_ids
+        else []
+    )
+    supplier_company_names = {
+        company_id: company_name
+        for company_id, company_name, _ in supplier_company_rows
+    }
+    supplier_cooperation_statuses = {
+        company_id: cooperation_status
+        for company_id, _, cooperation_status in supplier_company_rows
+    }
     region_codes = {lead.region_code for lead in leads if lead.region_code}
     regions_by_code = {
         region.code: region
@@ -1750,6 +1833,39 @@ def lead_supply_list_to_dict(
             )
             for assignment, company_name, assigned_by_name in current_rows
         }
+
+    lead_ids = [lead.id for lead in leads]
+    latest_pre_dispatch_tasks: dict[str, VerificationTask] = {}
+    if lead_ids:
+        ranked_tasks = (
+            select(
+                VerificationTask.id.label("task_id"),
+                func.row_number()
+                .over(
+                    partition_by=VerificationTask.lead_id,
+                    order_by=(
+                        VerificationTask.created_at.desc(),
+                        VerificationTask.id.desc(),
+                    ),
+                )
+                .label("position"),
+            )
+            .where(
+                VerificationTask.lead_id.in_(lead_ids),
+                VerificationTask.task_type
+                == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+            )
+            .subquery()
+        )
+        task_rows = db.scalars(
+            select(VerificationTask)
+            .join(
+                ranked_tasks,
+                ranked_tasks.c.task_id == VerificationTask.id,
+            )
+            .where(ranked_tasks.c.position == 1)
+        ).all()
+        latest_pre_dispatch_tasks = {task.lead_id: task for task in task_rows}
 
     histories: dict[str, list[dict[str, Any]]] = {}
     followups: dict[str, list[dict[str, Any]]] = {}
@@ -1803,6 +1919,10 @@ def lead_supply_list_to_dict(
             current_assignment=current_assignments.get(lead.current_assignment_id),
             assignment_history=(histories.get(lead.id, []) if include_assignment_history else None),
             followup_history=(followups.get(lead.id, []) if include_assignment_history else None),
+            latest_pre_dispatch_task=latest_pre_dispatch_tasks.get(lead.id),
+            supplier_cooperation_status=supplier_cooperation_statuses.get(
+                lead.supplier_company_id
+            ),
         )
         for lead in leads
     ]

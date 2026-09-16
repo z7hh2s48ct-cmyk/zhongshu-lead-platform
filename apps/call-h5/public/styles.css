@@ -24,6 +24,7 @@ body{
     linear-gradient(180deg,#fffdf9 0,#f8f1e8 46%,#f2e7d7 100%);
 }
 button,input,select,textarea{font:inherit}
+.return-evidence-list{display:grid;gap:10px;margin-top:8px}.return-evidence{display:grid;gap:8px;padding:10px;border:1px solid var(--line);border-radius:12px;background:var(--paper)}.return-evidence img{display:block;width:100%;max-height:240px;object-fit:contain;border-radius:8px}.return-evidence audio{width:100%}.evidence-error{margin:0;color:var(--bad);font-size:12px}
 button{-webkit-tap-highlight-color:transparent}
 button:active,.task:active,.choice:active{transform:translateY(1px)}
 button:focus-visible,.task:focus-visible,.choice:focus-within,.input:focus,.select:focus,.textarea:focus{
