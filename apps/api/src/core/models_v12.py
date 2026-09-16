@@ -70,6 +70,9 @@ _extend_mapped_column(Lead, "reviewed_at", Column("reviewed_at", DateTime(timezo
 
 _extend_mapped_column(Assignment, "claim_points", Column("claim_points", Integer, nullable=True))
 _extend_mapped_column(Assignment, "appeal_deadline_at", Column("appeal_deadline_at", DateTime(timezone=True), nullable=True))
+_extend_mapped_column(Assignment, "appeal_paused_at", Column("appeal_paused_at", DateTime(timezone=True), nullable=True))
+_extend_mapped_column(Assignment, "appeal_remaining_seconds", Column("appeal_remaining_seconds", Integer, nullable=True))
+_extend_mapped_column(Assignment, "appeal_resumed_at", Column("appeal_resumed_at", DateTime(timezone=True), nullable=True))
 _extend_mapped_column(Assignment, "reward_due_at", Column("reward_due_at", DateTime(timezone=True), nullable=True))
 _extend_mapped_column(
     Assignment,
