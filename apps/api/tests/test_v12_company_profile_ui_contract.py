@@ -27,7 +27,7 @@ def test_v12_workbench_shows_platform_managed_company_profile() -> None:
     assert "data-capability-request" not in js
     assert "service-area-edit" not in js
     assert "申请/更新服务区域" not in js
-    assert "v12-workbench.js?v=20260915-feedback-914" in html
+    assert "v12-workbench.js?v=20260916-feedback-current-claim-points" in html
 
 
 def test_v12_operations_exposes_company_detail_and_platform_configuration() -> None:
@@ -73,7 +73,7 @@ def test_v12_operations_exposes_company_detail_and_platform_configuration() -> N
     assert "data-company-mark-test" in js
     assert "data-company-enable" in js
     assert "/wechat-binding/unbind" in js
-    assert "v12-operations.js?v=20260915-feedback-914" in html
+    assert "v12-operations.js?v=20260916-feedback-current-claim-points" in html
     assert "加盟商能力与服务区域审核申请" not in js
 
 
@@ -102,7 +102,7 @@ def test_v12_operations_exposes_test_company_cleanup_actions() -> None:
     assert "确认永久删除" in js
     delete_flow = js[js.index("function deleteTestCompany") : js.index("function configureCompanyCapability")]
     assert delete_flow.count("method:'DELETE'") == 1
-    assert "v12-operations.js?v=20260915-feedback-914" in html
+    assert "v12-operations.js?v=20260916-feedback-current-claim-points" in html
 
 
 def test_company_detail_modal_is_responsive_without_visible_scrollbars() -> None:
@@ -119,7 +119,7 @@ def test_company_detail_modal_is_responsive_without_visible_scrollbars() -> None
     assert "overflow:visible" in css
     assert ".ops-company-detail>*{min-width:0}" in css
     assert ".ops-company-invite-history .ops-table{min-width:0" in css
-    assert "v12-operations.css?v=20260829-company-detail-fluid" in html
+    assert "v12-operations.css?v=20260916-feedback-915" in html
 
 
 def test_company_invitation_has_a_dedicated_h5_confirmation_page() -> None:

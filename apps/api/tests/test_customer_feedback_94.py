@@ -76,12 +76,13 @@ def test_telesales_submitted_record_shows_its_verification_note() -> None:
     assert "renderSubmittedHistory(historyData, state)" in records
     assert "renderSubmittedHistory(await loadSubmittedHistory(), state)" in records
     assert "item.submitted_at" in records
-    assert "task.is_overdue&&!task.submitted_at" in task_card
+    assert "task.is_overdue" not in task_card
+    assert "处理参考时间" in task_card
     assert "核验备注" in task
     assert "data.verification_info?.note" in task
     assert "esc(data.verification_info?.note" in task
     assert "data.submitted_at?'SUBMITTED':data.status" in task
-    assert "data.is_overdue&&!data.submitted_at" in task
+    assert "data.is_overdue" not in task
 
 
 def test_telesales_history_load_more_only_requests_each_source_next_page() -> None:
@@ -252,5 +253,5 @@ def test_changed_frontend_assets_have_feedback_94_cache_busters() -> None:
     admin_index = ADMIN_INDEX.read_text(encoding="utf-8")
     call_index = CALL_INDEX.read_text(encoding="utf-8")
 
-    assert "v12-operations.js?v=20260915-feedback-914" in admin_index
-    assert "app.js?v=20260911-history-evidence" in call_index
+    assert "v12-operations.js?v=20260916-feedback-current-claim-points" in admin_index
+    assert "app.js?v=20260916-feedback-915" in call_index

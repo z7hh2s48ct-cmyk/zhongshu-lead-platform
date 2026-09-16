@@ -42,6 +42,22 @@ const fmt = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: 
 const statusLabel = (value) => statusLabels[value] || '待确认';
 const statusClass = (value) => value === 'SUBMITTED' ? 'done' : value === 'IN_PROGRESS' ? 'doing' : 'pending';
 const evidenceCount = (request = {}) => Object.values(request.evidence_summary || {}).reduce((sum, count) => sum + Number(count || 0), 0);
+function returnEvidenceChoice(item, selectable = true) {
+  const name = item.original_name || item.type || '退回证据';
+  const url = item.access_token ? `${API}/v1.2/return-evidences/${encodeURIComponent(item.id)}/download?token=${encodeURIComponent(item.access_token)}` : '';
+  const isImage = item.type === 'CHAT_SCREENSHOT' || String(item.mime_type || '').startsWith('image/');
+  const isAudio = item.type === 'CALL_RECORDING' || String(item.mime_type || '').startsWith('audio/');
+  const typeLabel = { CHAT_SCREENSHOT: '沟通截图', CALL_RECORDING: '通话录音' }[item.type] || '文件证据';
+  const preview = !url ? '<p class="evidence-error">证据链接暂不可用，请刷新后重试。</p>' : isImage ? `<a href="${esc(url)}" target="_blank" rel="noopener"><img data-return-evidence-media src="${esc(url)}" alt="${esc(name)}" loading="lazy"></a>` : isAudio ? `<audio data-return-evidence-media controls preload="metadata" src="${esc(url)}">当前浏览器不支持播放录音。</audio>` : `<a class="btn small outline" href="${esc(url)}" target="_blank" rel="noopener">查看文件</a>`;
+  const selection = selectable ? `<label class="choice"><input type="checkbox" name="verification_evidence" value="${esc(item.id)}"> 本次核验采用这份证据</label>` : '';
+  return `<article class="return-evidence"><b>${esc(name)}</b><small class="muted">${esc(typeLabel)} · 上传人 ${esc(item.uploaded_by_name || '未记录')} · ${esc(fmt(item.created_at))}</small>${preview}<p class="evidence-error" data-return-evidence-error hidden>证据暂时无法预览，可刷新后重试。</p>${selection}</article>`;
+}
+function bindReturnEvidencePreviewErrors(root=document) {
+  root.querySelectorAll('[data-return-evidence-media]').forEach((media) => media.addEventListener('error', () => {
+    const message = media.closest('.return-evidence')?.querySelector('[data-return-evidence-error]');
+    if (message) message.hidden = false;
+  }));
+}
 const greetingName = (value) => {
   const name = String(value || '').trim();
   return name.length > 6 ? `${name.slice(0, 6)}…` : name;
@@ -283,11 +299,10 @@ function taskDescription(task) {
 function taskCard(task) {
   const lead = task.lead || {};
   const request = task.return_request || {};
-  const overdue = Boolean(task.is_overdue&&!task.submitted_at);
   const displayStatus = task.display_status || task.status;
   const typeFact = task.task_kind === 'RETURN' ? `退回原因：${returnReasonLabels[request.reason_code] || '待确认'} · 证据 ${evidenceCount(request)} 份` : '资料不全，等待电话事实核验';
   const deadline = task.due_at || request.appeal_deadline_at;
-  return `<article class="task" data-task-kind="${task.task_kind}" data-task="${task.id}" tabindex="0"><div class="row"><h3>${esc(lead.customer_name || '待核验客户')}</h3><span class="badge ${statusClass(displayStatus)}">${esc(overdue ? '已超时' : statusLabel(displayStatus))}</span></div><p class="task-meta">${esc(TASK_KIND[task.task_kind].label)} · ${esc(lead.city || '')} ${esc(lead.district || '')}</p><dl class="task-facts"><div><dt>任务说明</dt><dd>${esc(typeFact)}</dd></div><div><dt>处理期限</dt><dd>${fmt(deadline)}</dd></div></dl><p>${esc(overdue ? '已超时，运营人员会重新安排核验。' : taskDescription(task))}</p></article>`;
+  return `<article class="task" data-task-kind="${task.task_kind}" data-task="${task.id}" tabindex="0"><div class="row"><h3>${esc(lead.customer_name || '待核验客户')}</h3><span class="badge ${statusClass(displayStatus)}">${esc(statusLabel(displayStatus))}</span></div><p class="task-meta">${esc(TASK_KIND[task.task_kind].label)} · ${esc(lead.city || '')} ${esc(lead.district || '')}</p><dl class="task-facts"><div><dt>任务说明</dt><dd>${esc(typeFact)}</dd></div><div><dt>处理参考时间</dt><dd>${fmt(deadline)}</dd></div></dl><p>${esc(taskDescription(task))}</p></article>`;
 }
 
 function callHomeGreeting() {
@@ -307,8 +322,7 @@ function homeTaskRow(task) {
   const lead = task.lead || {};
   const customer = lead.customer_name || '待核验客户';
   const place = [lead.city, lead.district].filter(Boolean).join(' · ') || '地区待补充';
-  const overdue = Boolean(task.is_overdue);
-  return `<article class="home-task-row" data-task-kind="${task.task_kind}" data-task="${task.id}" tabindex="0"><span class="home-task-avatar">${esc(String(customer).slice(0, 1))}</span><span class="home-task-copy"><b>${esc(customer)}</b><small>${esc(place)} · ${esc(TASK_KIND[task.task_kind].label)}</small></span><span class="badge ${statusClass(task.status)}">${esc(overdue ? '已超时' : statusLabel(task.status))}</span>${icon('chevron-right')}</article>`;
+  return `<article class="home-task-row" data-task-kind="${task.task_kind}" data-task="${task.id}" tabindex="0"><span class="home-task-avatar">${esc(String(customer).slice(0, 1))}</span><span class="home-task-copy"><b>${esc(customer)}</b><small>${esc(place)} · ${esc(TASK_KIND[task.task_kind].label)}</small></span><span class="badge ${statusClass(task.status)}">${esc(statusLabel(task.status))}</span>${icon('chevron-right')}</article>`;
 }
 
 function homeTaskList(tasks) {
@@ -381,15 +395,15 @@ function renderSubmittedHistory(historyData, state = submittedHistoryState) {
 
 function taskFacts(kind, data) {
   const lead = data.lead || {};
-  if (kind === 'PRE_DISPATCH') return [['任务类型', '前置核验'], ['处理期限', fmt(data.due_at)], ['客户需求', lead.need_summary || '--'], ['下一步', data.submitted_at ? '已提交运营处置' : '完成电话事实核验']];
+  if (kind === 'PRE_DISPATCH') return [['任务类型', '前置核验'], ['处理参考时间', fmt(data.due_at)], ['客户需求', lead.need_summary || '--'], ['下一步', data.submitted_at ? '已提交运营处置' : '完成电话事实核验']];
   const request = data.return_request || {};
-  return [['任务类型', '退回核验'], ['处理期限', fmt(data.due_at)], ['退回原因', returnReasonLabels[request.reason_code] || '待确认'], ['证据数量', `${evidenceCount(request)} 份`], ['下一步', data.submitted_at ? '已提交运营终审' : '完成退回事实核验']];
+  return [['任务类型', '退回核验'], ['处理参考时间', fmt(data.due_at)], ['退回原因', returnReasonLabels[request.reason_code] || '待确认'], ['证据数量', `${evidenceCount(request)} 份`], ['下一步', data.submitted_at ? '已提交运营终审' : '完成退回事实核验']];
 }
 
 function taskForm(kind, data = {}) {
   const conclusions = TASK_KIND[kind].conclusions;
   const availableEvidence = kind === 'RETURN' ? (data.return_request?.available_evidences || []) : [];
-  const evidenceChoices = availableEvidence.length ? `<div class="form"><label>本次采用的已有证据</label><div class="radio-grid">${availableEvidence.map((item) => `<label class="choice"><input type="checkbox" name="verification_evidence" value="${esc(item.id)}"> ${esc(item.original_name || item.type || '证据')}</label>`).join('')}</div></div>` : '';
+  const evidenceChoices = availableEvidence.length ? `<div class="form"><label>加盟商提交的退回证据</label><p class="muted">可直接查看图片、播放录音或打开文件；预览失败不影响填写和提交核验结果。</p><div class="return-evidence-list">${availableEvidence.map(item => returnEvidenceChoice(item, true)).join('')}</div></div>` : '';
   const evidenceUpload = kind === 'RETURN' ? '<div class="form"><label>上传新的核验证据</label><input id="verification-evidence-files" type="file" multiple accept="image/jpeg,image/png,image/webp,audio/mpeg,audio/wav,audio/mp4,audio/aac"><small class="muted">支持 JPG、PNG、WEBP、MP3、WAV、M4A、AAC；提交时自动上传并绑定。</small></div>' : '';
   return `<section class="card" id="result-form"><h2>填写结果</h2><div class="form"><label>联系结果 *</label><select id="contact_result" class="select">${Object.entries(contactLabels).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></div><div class="form"><label>事实结论 *</label><div class="radio-grid">${Object.entries(conclusions).map(([value, label], index) => `<label class="choice"><input type="radio" name="conclusion" value="${value}" ${index === 0 ? 'checked' : ''}> ${label}</label>`).join('')}</div></div>${evidenceChoices}${evidenceUpload}<div class="form"><label>核验备注 *</label><textarea id="note" class="textarea" placeholder="记录客户说明和核验依据"></textarea></div><button id="submit" class="btn primary block">提交核验结果</button></section>`;
 }
@@ -400,18 +414,17 @@ async function task(kind, id) {
   const displayStatus=data.submitted_at?'SUBMITTED':data.status;
   const lead = data.lead || {};
   const details = taskFacts(kind, data).map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('');
-  const overdue = Boolean(data.is_overdue&&!data.submitted_at);
-  const canContact = data.status === 'IN_PROGRESS' && !overdue;
-  const verificationEvidence = (data.verification_info?.evidences || []).map((item) => {
-    const label = esc(item.original_name || item.type || '核验证据');
-    const url = item.access_token ? `${API}/v1.2/return-evidences/${encodeURIComponent(item.id)}/download?token=${encodeURIComponent(item.access_token)}` : '';
-    return `<li>${url ? `<a href="${url}" target="_blank" rel="noopener">${label}</a>` : label}</li>`;
-  }).join('');
-  const action = overdue ? '<section class="card"><h2>任务已超时</h2><p class="muted">为保证核验结论有效，本任务不能继续处理。请等待运营人员改派。</p></section>' : data.status === 'ASSIGNED' ? `<section class="card"><h2>开始核验</h2><p class="muted">该任务已由运营派发给您。开始后可查看完整手机号；这不是自主领取。</p><button class="btn primary block" id="start">开始核验</button></section>` : data.status === 'IN_PROGRESS' ? taskForm(kind, data) : `<section class="card"><h2>已提交结论</h2><dl class="detail"><div><dt>联系结果</dt><dd>${esc(contactLabels[data.contact_result] || '待确认')}</dd></div><div><dt>事实结论</dt><dd>${esc(TASK_KIND[kind].conclusions[data.conclusion] || '待确认')}</dd></div><div><dt>核验备注</dt><dd>${esc(data.verification_info?.note || '暂无核验备注')}</dd></div></dl>${verificationEvidence ? `<h3>本次核验证据</h3><ul>${verificationEvidence}</ul>` : ''}<p class="muted">结论已经提交运营人员处置，不能由电销人员直接改变客资状态。</p></section>`;
+  const canContact = data.status === 'IN_PROGRESS';
+  const availableEvidence = kind === 'RETURN' ? (data.return_request?.available_evidences || []) : [];
+  const readonlyReturnEvidence = availableEvidence.length ? `<section class="card"><h2>加盟商提交的退回证据</h2><p class="muted">开始核验前可先查看；预览失败不影响继续处理。</p><div class="return-evidence-list">${availableEvidence.map((item) => returnEvidenceChoice(item, false)).join('')}</div></section>` : '';
+  const verificationEvidenceItems = data.verification_info?.evidences || [];
+  const verificationEvidence = verificationEvidenceItems.length ? `<div class="return-evidence-list">${verificationEvidenceItems.map((item) => returnEvidenceChoice(item, false)).join('')}</div>` : '';
+  const action = data.status === 'ASSIGNED' ? `${readonlyReturnEvidence}<section class="card"><h2>开始核验</h2><p class="muted">该任务已由运营派发给您。开始后可查看完整手机号；参考时间不限制继续处理。</p><button class="btn primary block" id="start">开始核验</button></section>` : data.status === 'IN_PROGRESS' ? taskForm(kind, data) : `<section class="card"><h2>已提交结论</h2><dl class="detail"><div><dt>联系结果</dt><dd>${esc(contactLabels[data.contact_result] || '待确认')}</dd></div><div><dt>事实结论</dt><dd>${esc(TASK_KIND[kind].conclusions[data.conclusion] || '待确认')}</dd></div><div><dt>核验备注</dt><dd>${esc(data.verification_info?.note || '暂无核验备注')}</dd></div></dl>${readonlyReturnEvidence}${verificationEvidence ? `<h3>本次核验证据</h3>${verificationEvidence}` : ''}<p class="muted">结论已经提交运营人员处置，不能由电销人员直接改变客资状态。</p></section>`;
   const contactActions = canContact ? `<div class="detail-actions"><button id="dial" class="btn gold">${icon('phone')}<span>一键拨号</span></button><button id="copy-phone" class="btn outline">复制号码</button></div>` : '';
   const guide = canContact ? '<section class="quick-guide"><b>核验说明</b><span>拨号由您主动确认；桌面端可复制号码，只提交事实结论，不决定派发、退款或终审。</span><a href="#result-form">填写结果</a></section>' : '';
-  zsSetSafeHtml(app, shell(`<button class="btn small outline" data-history-back>返回</button><section class="detail-hero"><div><p class="eyebrow">${esc(TASK_KIND[kind].label)}</p><h1>${esc(lead.customer_name || '待核验客户')}</h1><span class="badge ${statusClass(displayStatus)}">${esc(overdue ? '已超时' : statusLabel(displayStatus))}</span></div>${contactActions}</section>${guide}<section class="card compact"><dl class="detail"><div><dt>手机号</dt><dd><strong>${esc(lead.phone || lead.phone_masked || '--')}</strong></dd></div><div><dt>地区</dt><dd>${esc(lead.city || '--')} ${esc(lead.district || '')}</dd></div>${details}</dl></section>${action}`, data.submitted_at ? 'records' : 'verify', '核验详情'));
+  zsSetSafeHtml(app, shell(`<button class="btn small outline" data-history-back>返回</button><section class="detail-hero"><div><p class="eyebrow">${esc(TASK_KIND[kind].label)}</p><h1>${esc(lead.customer_name || '待核验客户')}</h1><span class="badge ${statusClass(displayStatus)}">${esc(statusLabel(displayStatus))}</span></div>${contactActions}</section>${guide}<section class="card compact"><dl class="detail"><div><dt>手机号</dt><dd><strong>${esc(lead.phone || lead.phone_masked || '--')}</strong></dd></div><div><dt>地区</dt><dd>${esc(lead.city || '--')} ${esc(lead.district || '')}</dd></div>${details}</dl></section>${action}`, data.submitted_at ? 'records' : 'verify', '核验详情'));
   bind();
+  bindReturnEvidencePreviewErrors(app);
   bindTaskActions(kind, id, lead.phone);
 }
 

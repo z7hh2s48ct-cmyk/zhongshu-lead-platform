@@ -442,7 +442,7 @@ def test_verified_platform_lead_correction_recomputes_dispatch_candidates(api_cl
     assert pool_item["pre_dispatch_task_id"] == task["id"]
 
 
-def test_overdue_pre_dispatch_task_cannot_be_dialed(api_client) -> None:
+def test_overdue_pre_dispatch_task_can_be_dialed_and_reassigned(api_client) -> None:
     client, factory = api_client
     with factory() as db:
         operation = db.scalar(select(User).where(User.username == "operation"))
@@ -464,7 +464,7 @@ def test_overdue_pre_dispatch_task_cannot_be_dialed(api_client) -> None:
             city="上海市",
             region_code="310000",
             category_code="OLD_RENOVATION",
-            need_summary="超时后不得继续拨打",
+            need_summary="提示期限后仍可继续拨打",
             consent_confirmed=True,
             status=LeadV12Status.PENDING_REVIEW.value,
             review_status="PENDING",
@@ -511,14 +511,15 @@ def test_overdue_pre_dispatch_task_cannot_be_dialed(api_client) -> None:
         )
     )
     assert detail["is_overdue"] is True
-    assert detail["lead"]["next_owner"] == "OPERATION"
-    assert detail["lead"]["phone"] is None
-    dial = client.post(
-        f"/api/v1/v1.2/pre-dispatch-verifications/tasks/{task_id}/dial",
-        headers=telesales_headers,
+    assert detail["lead"]["next_owner"] == "TELESALES"
+    assert detail["lead"]["phone"] == "13900139012"
+    dial = _data(
+        client.post(
+            f"/api/v1/v1.2/pre-dispatch-verifications/tasks/{task_id}/dial",
+            headers=telesales_headers,
+        )
     )
-    assert dial.status_code == 409
-    assert dial.json()["code"] == "PRE_DISPATCH_TASK_OVERDUE"
+    assert dial["phone"] == "13900139012"
 
     reassigned = _data(
         client.post(

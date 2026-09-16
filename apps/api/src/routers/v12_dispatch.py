@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,7 @@ from ..core.responses import ok, page
 from ..core.security import decrypt_text, mask_phone
 from ..core.v12_enums import LeadV12Status
 from ..schemas.v12_dispatch import (
+    ClaimBody,
     InternalAssignmentBody,
     ManualDispatchBody,
     RefuseAssignmentBody,
@@ -36,6 +37,7 @@ from ..services.dispatch_v12 import (
     manual_dispatch_idempotency_guard,
     refuse_pending_assignment,
 )
+from ..services.lead_points_v12 import assignment_points_price, get_lead_points_settings
 from ..services.pre_dispatch_v12 import latest_submitted_pre_dispatch_task_ids
 from ..services.supplier_reward_v12 import confirmation_sql_expressions
 
@@ -110,6 +112,7 @@ def _assignment_dict(
     auto_confirmed_at=None,
     transaction_confirmed_at=None,
     transaction_confirmation_policy: str | None = None,
+    points_settings=None,
 ) -> dict:
     reveal_phone = reveal_phone and lead.pending_reason != "CORRECTION_REVIEW_REQUIRED"
     phone = decrypt_text(lead.phone_encrypted) if reveal_phone else None
@@ -120,6 +123,11 @@ def _assignment_dict(
     )
     receive_confirmation_status, receive_confirmed_at = _receive_confirmation(
         assignment.claimed_at
+    )
+    displayed_points = (
+        assignment_points_price(assignment, points_settings)
+        if points_settings is not None
+        else int(assignment.points_price)
     )
     return {
         "id": assignment.id,
@@ -149,8 +157,12 @@ def _assignment_dict(
         if transaction_confirmed_at
         else None,
         "transaction_confirmation_policy": transaction_confirmation_policy,
-        "points_price": assignment.points_price,
-        "claim_points": assignment.claim_points,
+        "points_price": displayed_points,
+        "claim_points": (
+            displayed_points
+            if assignment.status == "PENDING_CLAIM" and assignment.claimed_at is None
+            else assignment.claim_points
+        ),
         "price_rule_id": assignment.price_rule_id,
         "price_version": assignment.price_version,
         "customer_name": lead.customer_name,
@@ -171,6 +183,9 @@ def _assignment_dict(
         if assignment.released_at
         else None,
         "release_reason": assignment.release_reason,
+        "appeal_paused_at": assignment.appeal_paused_at.isoformat() if assignment.appeal_paused_at else None,
+        "appeal_remaining_seconds": assignment.appeal_remaining_seconds,
+        "appeal_resumed_at": assignment.appeal_resumed_at.isoformat() if assignment.appeal_resumed_at else None,
         "appeal_deadline_at": assignment.appeal_deadline_at.isoformat()
         if assignment.appeal_deadline_at
         else None,
@@ -213,6 +228,9 @@ def _assignment_detail_projection(
             Assignment.released_at,
             Assignment.release_reason,
             Assignment.appeal_deadline_at,
+            Assignment.appeal_paused_at,
+            Assignment.appeal_remaining_seconds,
+            Assignment.appeal_resumed_at,
             Assignment.reward_due_at,
             Assignment.first_followup_due_at,
             Assignment.internal_assignee_user_id,
@@ -239,7 +257,12 @@ def _assignment_detail_projection(
     )
 
 
-def _projected_assignment_dict(row, *, reveal_phone: bool = False) -> dict:
+def _projected_assignment_dict(
+    row,
+    *,
+    reveal_phone: bool = False,
+    points_settings=None,
+) -> dict:
     reveal_phone = (
         reveal_phone
         and row.lead_pending_reason != "CORRECTION_REVIEW_REQUIRED"
@@ -249,6 +272,11 @@ def _projected_assignment_dict(row, *, reveal_phone: bool = False) -> dict:
         mask_phone(phone) if phone is not None else _masked_encrypted_phone(row.phone_encrypted)
     )
     receive_confirmation_status, receive_confirmed_at = _receive_confirmation(row.claimed_at)
+    displayed_points = (
+        assignment_points_price(row, points_settings)
+        if points_settings is not None
+        else int(row.points_price)
+    )
     return {
         "id": row.id,
         "lead_id": row.lead_id,
@@ -269,8 +297,12 @@ def _projected_assignment_dict(row, *, reveal_phone: bool = False) -> dict:
         if row.transaction_confirmed_at
         else None,
         "transaction_confirmation_policy": row.transaction_confirmation_policy,
-        "points_price": row.points_price,
-        "claim_points": row.claim_points,
+        "points_price": displayed_points,
+        "claim_points": (
+            displayed_points
+            if row.status == "PENDING_CLAIM" and row.claimed_at is None
+            else row.claim_points
+        ),
         "price_rule_id": row.price_rule_id,
         "price_version": row.price_version,
         "customer_name": row.customer_name,
@@ -285,6 +317,9 @@ def _projected_assignment_dict(row, *, reveal_phone: bool = False) -> dict:
         "claimed_at": row.claimed_at.isoformat() if row.claimed_at else None,
         "released_at": row.released_at.isoformat() if row.released_at else None,
         "release_reason": row.release_reason,
+        "appeal_paused_at": row.appeal_paused_at.isoformat() if row.appeal_paused_at else None,
+        "appeal_remaining_seconds": row.appeal_remaining_seconds,
+        "appeal_resumed_at": row.appeal_resumed_at.isoformat() if row.appeal_resumed_at else None,
         "appeal_deadline_at": row.appeal_deadline_at.isoformat()
         if row.appeal_deadline_at
         else None,
@@ -503,6 +538,7 @@ def own_assignments(
         .offset((page_no - 1) * page_size)
         .limit(page_size)
     ).all()
+    points_settings = get_lead_points_settings(db)
     items = [
         _assignment_dict(
             assignment,
@@ -512,6 +548,7 @@ def own_assignments(
             auto_confirmed_at=auto_confirmed_at,
             transaction_confirmed_at=transaction_confirmed_at,
             transaction_confirmation_policy=transaction_confirmation_policy,
+            points_settings=points_settings,
         )
         for assignment, lead, follow_status, auto_confirmed_at, transaction_confirmed_at, transaction_confirmation_policy in rows
     ]
@@ -540,11 +577,13 @@ def own_assignment_detail(
     row = db.execute(statement).one_or_none()
     if row is None:
         raise AppError("ASSIGNMENT_NOT_FOUND", "派发单不存在", 404)
+    points_settings = get_lead_points_settings(db)
     return ok(
         request,
         _projected_assignment_dict(
             row,
             reveal_phone=row.status in CLAIMED_CONTACT_STATUSES,
+            points_settings=points_settings,
         ),
     )
 
@@ -554,6 +593,7 @@ def claim_own_assignment(
     assignment_id: str,
     request: Request,
     principal: CurrentPrincipal,
+    body: ClaimBody | None = Body(default=None),
     db: Session = Depends(get_db),
 ):
     company_id = _principal_company_id(principal)
@@ -594,6 +634,7 @@ def claim_own_assignment(
             assignment_id=assignment_id,
             company_id=company_id,
             claimed_by=principal.user_id,
+            expected_points=body.expected_points if body else None,
         )
         lead = get_dispatch_lead(db, result.assignment.lead_id)
         if not result.idempotent:
@@ -639,7 +680,7 @@ def claim_own_assignment(
         }
 
     payload, coalesced = run_claim_singleflight(
-        f"{company_id}:{assignment_id}",
+        f"{company_id}:{assignment_id}:{body.expected_points if body else 'unquoted'}",
         execute_claim,
         before_wait=db.rollback,
     )
@@ -823,6 +864,7 @@ def company_assignments(
         .offset((page_no - 1) * page_size)
         .limit(page_size)
     ).all()
+    points_settings = get_lead_points_settings(db)
     payload = page(
         [
             _assignment_dict(
@@ -830,6 +872,7 @@ def company_assignments(
                 lead,
                 reveal_phone=principal.can("lead.phone.read") or principal.can("*"),
                 follow_status=follow_status,
+                points_settings=points_settings,
             )
             for assignment, lead, follow_status in rows
         ],

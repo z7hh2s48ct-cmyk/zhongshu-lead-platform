@@ -31,6 +31,7 @@ from apps.api.src.services.dispatch_v12 import (
     list_candidates,
 )
 from apps.api.src.services.lead_points_v12 import (
+    assignment_points_price,
     get_lead_points_settings,
     update_lead_points_settings,
 )
@@ -200,7 +201,7 @@ def test_operation_fixed_price_covers_single_batch_and_dispatch_snapshot(api_cli
         assert single.price_version == batch.price_version == 1
         assert single.price_rule_id is None and batch.price_rule_id is None
         assert feishu_price == 240 and feishu_rule is None
-        assert supplier_price == 888
+        assert supplier_price == 240
 
         outcome = dispatch_manually_with_outcome(
             db,
@@ -221,6 +222,10 @@ def test_operation_fixed_price_covers_single_batch_and_dispatch_snapshot(api_cli
             expected_version=1,
             updated_by=operation.id,
         )
+        db.commit()
+        current_settings = get_lead_points_settings(db, lock=True)
+        assert current_settings.version == 2
+        assert assignment_points_price(outcome.assignment, current_settings) == 300
         assert outcome.assignment.points_price == 240
         claimed = claim_assignment(
             db,
@@ -228,11 +233,82 @@ def test_operation_fixed_price_covers_single_batch_and_dispatch_snapshot(api_cli
             company_id=company.id,
             claimed_by=employee.id,
         )
-        assert claimed.ledger.delta == -240
+        assert claimed.assignment.points_price == 300
+        assert claimed.assignment.claim_points == 300
+        assert claimed.assignment.price_rule_id is None
+        assert claimed.assignment.price_version == 2
+        assert claimed.ledger.delta == -300
         assert db.scalar(
             select(PointsAccount.balance).where(PointsAccount.company_id == company.id)
-        ) == 4_760
+        ) == 4_700
         db.commit()
+
+
+def test_claim_rejects_stale_expected_price_without_changing_assignment_or_balance(api_client) -> None:
+    client, factory = api_client
+    admin_headers = _login(client, "admin", "Admin123!")
+    saved = client.put(
+        "/api/v1/v1.2/admin/lead-points-settings",
+        headers=admin_headers,
+        json={"operation_claim_points": 240, "supplier_provision_points": 36, "expected_version": 0},
+    )
+    assert saved.status_code == 200, saved.text
+
+    with factory() as db:
+        operation = db.scalar(select(User).where(User.username == "operation"))
+        assert operation is not None
+        company, employee = _ensure_receiver(db)
+        lead = _operation_lead(
+            db,
+            user_id=operation.id,
+            phone="13900139806",
+            source_kind=LeadSourceKind.SUPPLIER_H5.value,
+        )
+        outcome = dispatch_manually_with_outcome(
+            db,
+            lead_id=lead.id,
+            company_id=company.id,
+            employee_user_id=employee.id,
+            assigned_by=operation.id,
+            idempotency_key="current-points-stale-price-dispatch",
+        )
+        assert outcome.assignment.points_price == 240
+        update_lead_points_settings(
+            db,
+            operation_claim_points=300,
+            supplier_provision_points=50,
+            expected_version=1,
+            updated_by=operation.id,
+        )
+        db.commit()
+        balance_before = db.scalar(
+            select(PointsAccount.balance).where(PointsAccount.company_id == company.id)
+        )
+
+        with pytest.raises(AppError) as stale_price:
+            claim_assignment(
+                db,
+                assignment_id=outcome.assignment.id,
+                company_id=company.id,
+                claimed_by=employee.id,
+                expected_points=240,
+            )
+
+        assert stale_price.value.code == "CLAIM_PRICE_CHANGED"
+        assert stale_price.value.status_code == 409
+        assert stale_price.value.details == {"expected_points": 240, "current_points": 300}
+        assert outcome.assignment.status == "PENDING_CLAIM"
+        assert outcome.assignment.points_price == 240
+        assert outcome.assignment.claim_points == 240
+        assert db.scalar(
+            select(PointsAccount.balance).where(PointsAccount.company_id == company.id)
+        ) == balance_before
+        assert db.scalar(
+            select(func.count(PointsLedger.id)).where(
+                PointsLedger.business_type == "V12_ASSIGNMENT_CLAIM",
+                PointsLedger.business_id == outcome.assignment.id,
+            )
+        ) == 0
 
 
 def test_supplier_fixed_points_keep_48h_window_and_snapshot(db) -> None:

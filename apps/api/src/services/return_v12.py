@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..core.auth import Principal
@@ -20,9 +21,11 @@ from ..core.errors import AppError
 from ..core.models import (
     Assignment,
     AssignmentEvent,
+    Company,
     Lead,
     PointsAccount,
     PointsLedger,
+    Region,
     ReturnEvidence,
     ReturnRequest,
     Role,
@@ -44,6 +47,7 @@ from ..core.v12_enums import (
 from .company_assignment_v12 import require_return_request_access
 from .lead_correction_guard import require_correction_review_resolved
 from .points_service import change_points
+from .return_clock import appeal_deadline
 
 logger = logging.getLogger("zhongshu.return_v12")
 
@@ -69,16 +73,6 @@ def _return_task_is_overdue(task: VerificationTask) -> bool:
             VerificationTaskStatus.IN_PROGRESS.value,
         }
     )
-
-
-def _require_return_task_not_overdue(task: VerificationTask) -> None:
-    if _return_task_is_overdue(task):
-        raise AppError("RETURN_VERIFY_TASK_OVERDUE", "退回事实核验任务已超时，请联系运营人员改派", 409)
-
-
-def require_return_verification_task_not_overdue(task: VerificationTask) -> None:
-    """Keep every executable return-verification action behind the same deadline rule."""
-    _require_return_task_not_overdue(task)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +136,7 @@ def _appeal_deadline(assignment: Assignment) -> datetime:
     if not claimed_at:
         raise AppError("RETURN_NOT_CLAIMED", "未领取客资不能申请退回", 409)
     # Old unsubmitted records follow the same rule during a rolling release.
-    deadline = claimed_at + timedelta(hours=48)
+    deadline = appeal_deadline(assignment)
     assignment.appeal_deadline_at = deadline
     return deadline
 
@@ -174,6 +168,8 @@ def expire_unsubmitted_return_drafts(
                 ReturnRequest.submitted_at.is_(None),
                 Assignment.claimed_at.is_not(None),
                 Assignment.claimed_at <= now - timedelta(hours=48),
+                Assignment.appeal_paused_at.is_(None),
+                or_(Assignment.appeal_resumed_at.is_(None), Assignment.appeal_deadline_at <= now),
                 Lead.deleted_at.is_(None),
             )
             .order_by(Assignment.claimed_at.asc(), ReturnRequest.id.asc())
@@ -188,7 +184,7 @@ def expire_unsubmitted_return_drafts(
         if request.status != ReturnV12Status.DRAFT.value or request.submitted_at is not None:
             continue
         deadline = _initial_deadline(assignment, request)
-        if now < deadline:
+        if assignment.appeal_paused_at is not None or now < deadline:
             continue
         assert_return_transition(ReturnV12Status.DRAFT, ReturnV12Status.EXPIRED)
         request.status = ReturnV12Status.EXPIRED.value
@@ -285,6 +281,31 @@ def create_or_update_return_draft(
     if item:
         if item.company_id != principal.company_id:
             raise AppError("FORBIDDEN", "无权修改该退回申请", 403)
+        if item.status == ReturnV12Status.REJECTED.value:
+            deadline = _appeal_deadline(assignment)
+            if assignment.appeal_resumed_at is None or _now() >= deadline:
+                raise AppError("RETURN_WINDOW_EXPIRED", "已超过领取后 48 小时退回申诉期", 409)
+            # Reuse the unique application while retaining every submitted round
+            # and its evidence baseline in the immutable assignment history.
+            db.add(AssignmentEvent(
+                assignment_id=assignment.id, event_type="V12_RETURN_REOPENED",
+                actor_user_id=principal.user_id,
+                payload={"return_request_id": item.id, "reason_code": item.reason_code,
+                    "return_snapshot": _return_round_snapshot(db, item, assignment),
+                    "description": item.description, "submitted_at": as_utc(item.submitted_at).isoformat(),
+                    "reviewed_at": as_utc(item.reviewed_at).isoformat(),
+                    "reviewed_by": item.reviewed_by, "review_note": item.review_note,
+                    "verification_task_id": item.verification_task_id,
+                    "evidence_sha256": sorted(set(db.scalars(select(ReturnEvidence.sha256).where(
+                        ReturnEvidence.return_request_id == item.id)).all()))},
+            ))
+            item.status = ReturnV12Status.DRAFT.value
+            item.submitted_at = None
+            item.reviewed_at = None
+            item.reviewed_by = None
+            item.review_note = None
+            item.final_decision_reason = None
+            item.verification_task_id = None
         if item.status not in {
             ReturnV12Status.DRAFT.value,
             ReturnV12Status.NEED_MORE_EVIDENCE.value,
@@ -437,7 +458,6 @@ def prepare_return_verification_evidence_upload(
     principal: Principal,
 ) -> tuple[VerificationTask, ReturnRequest]:
     _, _, request, task = _lock_return_verification_context(db, task_id)
-    _require_return_task_not_overdue(task)
     if (
         task.status != VerificationTaskStatus.IN_PROGRESS.value
         or task.assignee_user_id != principal.user_id
@@ -489,6 +509,86 @@ def _evidence_summary(db: Session, return_id: str) -> dict[str, int]:
     return {str(evidence_type): int(count) for evidence_type, count in rows}
 
 
+def _return_round_snapshot(db: Session, request: ReturnRequest, assignment: Assignment) -> dict:
+    return {
+        "id": request.id, "status": request.status, "reason_code": request.reason_code,
+        "description": request.description,
+        "review_note": request.review_note,
+        "reviewed_at": as_utc(request.reviewed_at).isoformat() if request.reviewed_at else None,
+        "reviewed_by": request.reviewed_by,
+        "appeal_deadline_at": as_utc(assignment.appeal_deadline_at).isoformat()
+        if assignment.appeal_deadline_at else None,
+        "appeal_paused_at": as_utc(assignment.appeal_paused_at).isoformat()
+        if assignment.appeal_paused_at else None,
+        "appeal_remaining_seconds": assignment.appeal_remaining_seconds,
+        "appeal_resumed_at": as_utc(assignment.appeal_resumed_at).isoformat()
+        if assignment.appeal_resumed_at else None,
+        "evidence_summary": _evidence_summary(db, request.id),
+        "evidence_ids": list(db.scalars(select(ReturnEvidence.id).where(
+            ReturnEvidence.return_request_id == request.id)).all()),
+    }
+
+
+def return_verification_round_snapshots(db: Session, assignment_ids: set[str]) -> dict[str, dict]:
+    """Batch read the application as it existed for each completed task."""
+    if not assignment_ids:
+        return {}
+    snapshots = {}
+    for item in db.scalars(select(AssignmentEvent).where(
+        AssignmentEvent.assignment_id.in_(assignment_ids),
+        AssignmentEvent.event_type.in_((
+            "V12_RETURN_REOPENED", "V12_RETURN_VERIFY_SUBMITTED", "V12_RETURN_NEED_MORE",
+        )),
+    ).order_by(AssignmentEvent.occurred_at, AssignmentEvent.id)):
+        payload = item.payload or {}
+        if payload.get("verification_task_id") and payload.get("return_snapshot"):
+            snapshots[payload["verification_task_id"]] = payload["return_snapshot"]
+    legacy_tasks = db.scalars(select(VerificationTask).where(
+        VerificationTask.assignment_id.in_(assignment_ids),
+        VerificationTask.task_type == VerificationTaskType.RETURN_VERIFY.value,
+        VerificationTask.submitted_at.is_not(None),
+        VerificationTask.id.not_in(snapshots),
+    )).all()
+    if legacy_tasks:
+        evidence_by_return: dict[str, list] = {}
+        for evidence in db.execute(select(
+            ReturnEvidence.id, ReturnEvidence.return_request_id,
+            ReturnEvidence.evidence_type, ReturnEvidence.created_at,
+        ).where(ReturnEvidence.return_request_id.in_(
+            {task.return_request_id for task in legacy_tasks}
+        ))):
+            evidence_by_return.setdefault(evidence.return_request_id, []).append(evidence)
+        # Legacy events cannot recover the old application's text. Show only
+        # evidence that already existed when that task was submitted, rather
+        # than leaking a later application's content to its former assignee.
+        for task in legacy_tasks:
+            allowed = [item for item in evidence_by_return.get(task.return_request_id, [])
+                if as_utc(item.created_at) <= as_utc(task.submitted_at)]
+            summary: dict[str, int] = {}
+            for item in allowed:
+                summary[item.evidence_type] = summary.get(item.evidence_type, 0) + 1
+            snapshots[task.id] = {
+                "id": task.return_request_id, "history_snapshot_unavailable": True,
+                "status": None, "reason_code": None,
+                "description": "历史申请未保存独立快照，仅展示当时证据及核验结论。",
+                "appeal_deadline_at": None, "appeal_paused_at": None,
+                "appeal_remaining_seconds": None, "appeal_resumed_at": None,
+                "evidence_ids": [item.id for item in allowed], "evidence_summary": summary,
+            }
+    return snapshots
+
+
+def _evidence_uploader_names(
+    db: Session,
+    evidences: list[ReturnEvidence],
+) -> dict[str, str | None]:
+    uploader_ids = {evidence.uploaded_by for evidence in evidences}
+    return {
+        user.id: user.display_name or user.username
+        for user in db.scalars(select(User).where(User.id.in_(uploader_ids))).all()
+    }
+
+
 def _verification_evidence_payloads(
     db: Session,
     *,
@@ -503,6 +603,7 @@ def _verification_evidence_payloads(
             ReturnEvidence.id.in_(evidence_ids),
         )
     ).all()
+    uploader_names = _evidence_uploader_names(db, evidences)
     evidences_by_id = {evidence.id: evidence for evidence in evidences}
     return [
         {
@@ -512,6 +613,8 @@ def _verification_evidence_payloads(
             "mime_type": evidence.mime_type,
             "file_size": evidence.file_size,
             "duration_seconds": evidence.duration_seconds,
+            "uploaded_by": evidence.uploaded_by,
+            "uploaded_by_name": uploader_names.get(evidence.uploaded_by),
             "created_at": evidence.created_at.isoformat(),
         }
         for evidence_id in evidence_ids
@@ -630,6 +733,16 @@ def submit_return_request(
 
     if not initial_submission and _supplementary_evidence_count(db, request) < 1:
         raise AppError("RETURN_SUPPLEMENT_REQUIRED", "请按审核要求补充新的证据材料后再提交", 422)
+    if initial_submission:
+        reopened = db.scalar(select(AssignmentEvent).where(
+            AssignmentEvent.assignment_id == assignment_for_access.id,
+            AssignmentEvent.event_type == "V12_RETURN_REOPENED",
+        ).order_by(AssignmentEvent.occurred_at.desc(), AssignmentEvent.id.desc()).limit(1))
+        if reopened:
+            current_hashes = set(db.scalars(select(ReturnEvidence.sha256).where(
+                ReturnEvidence.return_request_id == request.id)).all())
+            if not current_hashes.difference((reopened.payload or {}).get("evidence_sha256", [])):
+                raise AppError("RETURN_SUPPLEMENT_REQUIRED", "再次申请退回需补充新的证据材料", 422)
 
     assignment = assignment_for_access
     previous_assignment_status = assignment.status
@@ -642,6 +755,8 @@ def submit_return_request(
         }:
             raise AppError("RETURN_ASSIGNMENT_STATE_INVALID", "派发单当前不可提交退回申请", 409)
         request.submitted_at = now
+        assignment.appeal_paused_at = now
+        assignment.appeal_remaining_seconds = max(0, math.ceil((deadline - now).total_seconds()))
     elif assignment.status != AssignmentStatus.RETURN_PENDING.value:
         raise AppError("RETURN_ASSIGNMENT_STATE_INVALID", "退回补充材料与派发单状态不一致", 409)
 
@@ -685,6 +800,9 @@ def submit_return_request(
                 "initial_submission": initial_submission,
                 "previous_assignment_status": previous_assignment_status,
                 "previous_lead_status": previous_lead_status,
+                "appeal_paused_at": as_utc(assignment.appeal_paused_at).isoformat()
+                if assignment.appeal_paused_at else None,
+                "appeal_remaining_seconds": assignment.appeal_remaining_seconds,
             },
         )
     )
@@ -731,9 +849,8 @@ def assign_return_verification_task(
     if task.status not in {
         VerificationTaskStatus.PENDING.value,
         VerificationTaskStatus.ASSIGNED.value,
-    } and not (
-        task.status == VerificationTaskStatus.IN_PROGRESS.value and _return_task_is_overdue(task)
-    ):
+        VerificationTaskStatus.IN_PROGRESS.value,
+    }:
         raise AppError("RETURN_VERIFY_TASK_NOT_ASSIGNABLE", "退回核验任务当前不可分配", 409)
     _require_telesales_user(db, assignee_user_id)
     if not reason.strip():
@@ -765,7 +882,6 @@ def claim_return_verification_task(
     principal: Principal,
 ) -> VerificationTask:
     _, _, _, task = _lock_return_verification_context(db, task_id)
-    _require_return_task_not_overdue(task)
     if task.status == VerificationTaskStatus.IN_PROGRESS.value and task.assignee_user_id == principal.user_id:
         return task
     if task.status == VerificationTaskStatus.PENDING.value or task.assignee_user_id is None:
@@ -798,14 +914,13 @@ def submit_return_verification(
     reference = db.get(VerificationTask, task_id)
     if reference is None or reference.task_type != VerificationTaskType.RETURN_VERIFY.value:
         raise AppError("RETURN_VERIFY_TASK_NOT_FOUND", "退回核验任务不存在", 404)
-    _, _, request = _lock_return_context(db, reference.return_request_id)
+    assignment, _, request = _lock_return_context(db, reference.return_request_id)
     task = db.scalar(
         select(VerificationTask).where(VerificationTask.id == task_id)
         .with_for_update().execution_options(populate_existing=True)
     )
     if task.status == VerificationTaskStatus.SUBMITTED.value and task.assignee_user_id == principal.user_id:
         return task
-    _require_return_task_not_overdue(task)
     if task.status != VerificationTaskStatus.IN_PROGRESS.value or task.assignee_user_id != principal.user_id:
         raise AppError("RETURN_VERIFY_TASK_NOT_OWNED", "任务不属于当前电销人员或状态已变化", 409)
     if request.status != ReturnV12Status.VERIFYING.value:
@@ -844,6 +959,7 @@ def submit_return_verification(
                 "conclusion": task.verification_conclusion,
                 "note": note.strip(),
                 "verification_evidence_ids": normalized_evidence_ids,
+                "return_snapshot": _return_round_snapshot(db, request, assignment),
             },
         )
     )
@@ -951,6 +1067,7 @@ def _final_review_return(
                     "return_request_id": request.id,
                     "verification_task_id": task.id if task else None,
                     "note": note.strip(),
+                    "return_snapshot": _return_round_snapshot(db, request, assignment),
                     "evidence_sha256": sorted(set(db.scalars(
                         select(ReturnEvidence.sha256).where(ReturnEvidence.return_request_id == request.id)
                     ).all())),
@@ -967,6 +1084,16 @@ def _final_review_return(
             task.status = VerificationTaskStatus.RELEASED.value
             task.lock_version += 1
         assignment.status = _restore_assignment_status(lead)
+        if assignment.appeal_paused_at is not None:
+            assignment.appeal_deadline_at = now + timedelta(seconds=assignment.appeal_remaining_seconds or 0)
+            assignment.reward_due_at = assignment.appeal_deadline_at
+            assignment.appeal_paused_at = None
+            assignment.appeal_resumed_at = now
+            request.appeal_deadline_at = assignment.appeal_deadline_at
+            request.due_at = assignment.appeal_deadline_at
+            if reward and reward.status != RewardStatus.SETTLED.value:
+                reward.appeal_deadline_at = assignment.appeal_deadline_at
+                reward.reward_due_at = assignment.appeal_deadline_at
         if lead.status not in {
             LeadV12Status.CLAIMED.value, LeadV12Status.FOLLOWING.value,
             LeadV12Status.COMPLETED.value, LeadV12Status.CLOSED.value,
@@ -987,6 +1114,9 @@ def _final_review_return(
                     "verification_task_id": task.id if task else None,
                     "verification_conclusion": task.verification_conclusion if task else None,
                     "note": note.strip(),
+                    "appeal_resumed_at": now.isoformat() if assignment.appeal_resumed_at else None,
+                    "appeal_remaining_seconds": assignment.appeal_remaining_seconds,
+                    "appeal_deadline_at": as_utc(assignment.appeal_deadline_at).isoformat(),
                 },
             )
         )
@@ -994,18 +1124,22 @@ def _final_review_return(
         if reward and reward.status == RewardStatus.OBSERVING.value:
             from .supplier_reward_v12 import settle_supplier_reward
 
-            settle_supplier_reward(
-                db,
-                reward_id=reward.id,
-                as_of=now,
-                settled_by=principal.user_id,
-            )
+            from .supplier_reward_v12 import resolve_effective_confirmation
+
+            if resolve_effective_confirmation(db, assignment, as_of=now).effective_at is not None:
+                settle_supplier_reward(db, reward_id=reward.id, as_of=now, settled_by=principal.user_id)
         return ReturnFinalReviewResult(request=request, refund_ledger=None)
 
     if reward and reward.status == RewardStatus.SETTLED.value:
         # A successful return refunds the receiver and recovers the supplier's
         # early reward atomically. Lock both accounts in one consistent order.
         company_ids = {request.company_id, reward.supplier_company_id}
+        # Termination approval locks Company before PointsAccount. Take the
+        # same order before refunding so reward reversal cannot form a cycle.
+        # NO KEY UPDATE remains exclusive for business writes while allowing
+        # points-ledger foreign-key checks from an in-flight account debit.
+        db.scalars(select(Company).where(Company.id.in_(company_ids))
+            .order_by(Company.id).with_for_update(key_share=True)).all()
         accounts = db.scalars(
             select(PointsAccount)
             .where(PointsAccount.company_id.in_(company_ids))
@@ -1046,6 +1180,8 @@ def _final_review_return(
     assignment.status = AssignmentStatus.RETURNED.value
     assignment.released_at = now
     assignment.release_reason = "V12_RETURN_APPROVED"
+    assignment.appeal_paused_at = None
+    assignment.appeal_remaining_seconds = 0
     lead.current_assignment_id = None
     # 终审支持退回意味着该客资被确认无效，不再回到派发池。
     assert_lead_transition(lead.status, LeadV12Status.CLOSED)
@@ -1097,6 +1233,72 @@ def _final_review_return(
     )
     db.flush()
     return ReturnFinalReviewResult(request=request, refund_ledger=refund_ledger)
+
+
+def correct_region_and_redispatch(
+    db: Session,
+    *,
+    return_id: str,
+    principal: Principal,
+    province_code: str,
+    city_code: str,
+    district_code: str,
+    reason: str,
+) -> ReturnFinalReviewResult:
+    """Refund the old round and correct a usable lead in one transaction."""
+    if not principal.has_any_role("OPERATION", "SUPER_ADMIN") or not (
+        principal.can("return.review") or principal.can("*")
+    ):
+        raise AppError("FORBIDDEN", "仅运营或管理员可修改区域并重新分配", 403)
+    if len(reason.strip()) < 2:
+        raise AppError("RETURN_REGION_REASON_REQUIRED", "请填写区域修改原因", 422)
+    assignment, lead, request = _lock_return_context(db, return_id)
+    codes = (province_code.strip(), city_code.strip(), district_code.strip())
+    previous = db.scalar(select(AssignmentEvent).where(
+        AssignmentEvent.assignment_id == assignment.id,
+        AssignmentEvent.event_type == "V12_RETURN_REGION_CORRECTED",
+    ).limit(1))
+    if previous:
+        recorded = previous.payload.get("region_codes", [])
+        if list(codes) != recorded:
+            raise AppError("RETURN_REGION_ALREADY_CORRECTED", "此退回已完成区域修改，请刷新后操作", 409)
+        return ReturnFinalReviewResult(request=request,
+            refund_ledger=db.get(PointsLedger, request.refund_ledger_id), idempotent=True)
+    if request.reason_code != "OUT_OF_SERVICE_REGION":
+        raise AppError("RETURN_REGION_REASON_INVALID", "仅超出服务区域的退回可修改区域重新分配", 409)
+    if lead.current_assignment_id != assignment.id or assignment.status != AssignmentStatus.RETURN_PENDING.value:
+        raise AppError("RETURN_ASSIGNMENT_STATE_INVALID", "原派发已解除或不处于退回审核状态", 409)
+    regions = [db.get(Region, code) for code in codes]
+    province, city, district = regions
+    if (any(region is None or not region.active for region in regions)
+        or province.level != "PROVINCE" or city.level != "CITY" or district.level != "DISTRICT"
+        or city.parent_code != province.code or district.parent_code != city.code):
+        raise AppError("RETURN_REGION_INVALID", "请选择有效且相互匹配的省、市、区县", 422)
+    before_region = {"province": lead.province, "city": lead.city,
+        "district": lead.district, "region_code": lead.region_code}
+    result = _final_review_return(db, return_id=return_id, principal=principal,
+        decision="APPROVE", note=reason)
+    # The established approval path handles original-ledger refund and reward
+    # reversal. Only this explicit usable-lead action reopens the closed lead.
+    assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
+    lead.province, lead.city, lead.district = province.name, city.name, district.name
+    lead.region_code = district.code
+    lead.status = LeadV12Status.READY_DISPATCH.value
+    lead.pending_reason = "RETURN_REGION_CORRECTED"
+    lead.review_status = "APPROVED"
+    lead.review_note = reason.strip()
+    lead.snapshot_version += 1
+    assignment.release_reason = "V12_RETURN_REGION_CORRECTED"
+    db.add(AssignmentEvent(assignment_id=assignment.id,
+        event_type="V12_RETURN_REGION_CORRECTED", actor_user_id=principal.user_id,
+        payload={"return_request_id": request.id, "before_region": before_region,
+            "after_region": {"province": lead.province, "city": lead.city,
+                "district": lead.district, "region_code": lead.region_code},
+            "region_codes": list(codes), "reason": reason.strip(),
+            "refund_ledger_id": result.refund_ledger.id},
+    ))
+    db.flush()
+    return result
 
 
 def final_review_return(
@@ -1207,6 +1409,11 @@ def return_request_to_dict(
         if assignments_by_id is not None
         else db.get(Assignment, item.assignment_id)
     )
+    appeal_deadline = (
+        getattr(assignment, "appeal_deadline_at", None)
+        or item.appeal_deadline_at
+        or item.due_at
+    )
     submitter = (
         users_by_id.get(item.submitted_by)
         if users_by_id is not None and item.submitted_by
@@ -1236,9 +1443,20 @@ def return_request_to_dict(
         "status": item.status,
         "submitted_by": item.submitted_by,
         "submitted_at": item.submitted_at.isoformat() if item.submitted_at else None,
-        "appeal_deadline_at": (item.appeal_deadline_at or item.due_at).isoformat()
-        if (item.appeal_deadline_at or item.due_at)
-        else None,
+        "appeal_deadline_at": appeal_deadline.isoformat() if appeal_deadline else None,
+        "appeal_paused_at": (
+            getattr(assignment, "appeal_paused_at", None).isoformat()
+            if assignment and getattr(assignment, "appeal_paused_at", None)
+            else None
+        ),
+        "appeal_remaining_seconds": (
+            getattr(assignment, "appeal_remaining_seconds", None) if assignment else None
+        ),
+        "appeal_resumed_at": (
+            getattr(assignment, "appeal_resumed_at", None).isoformat()
+            if assignment and getattr(assignment, "appeal_resumed_at", None)
+            else None
+        ),
         "verification_task_id": item.verification_task_id,
         "reviewed_by": item.reviewed_by,
         "reviewed_at": item.reviewed_at.isoformat() if item.reviewed_at else None,
@@ -1246,6 +1464,7 @@ def return_request_to_dict(
         "final_decision_reason": item.final_decision_reason,
         "refund_points": item.refund_points,
         "refund_ledger_id": item.refund_ledger_id,
+        "assignment_release_reason": assignment.release_reason if assignment else None,
     }
     if include_evidence:
         data["supplementary_evidence_count"] = _supplementary_evidence_count(db, item)
@@ -1254,6 +1473,7 @@ def return_request_to_dict(
             .where(ReturnEvidence.return_request_id == item.id)
             .order_by(ReturnEvidence.created_at.asc())
         ).all()
+        uploader_names = _evidence_uploader_names(db, evidences)
         data["evidences"] = [
             {
                 "id": evidence.id,
@@ -1263,10 +1483,35 @@ def return_request_to_dict(
                 "file_size": evidence.file_size,
                 "sha256": evidence.sha256,
                 "duration_seconds": evidence.duration_seconds,
+                "uploaded_by": evidence.uploaded_by,
+                "uploaded_by_name": uploader_names.get(evidence.uploaded_by),
                 "created_at": evidence.created_at.isoformat(),
             }
             for evidence in evidences
         ]
+        reopened_event = db.scalar(
+            select(AssignmentEvent)
+            .where(
+                AssignmentEvent.assignment_id == item.assignment_id,
+                AssignmentEvent.event_type == "V12_RETURN_REOPENED",
+            )
+            .order_by(AssignmentEvent.occurred_at.desc(), AssignmentEvent.id.desc())
+            .limit(1)
+        )
+        if reopened_event is None:
+            data["requires_new_evidence"] = False
+            data["current_round_evidence_count"] = len(evidences)
+        else:
+            baseline_hashes = set(
+                (reopened_event.payload or {}).get("evidence_sha256", [])
+            )
+            current_hashes = {evidence.sha256 for evidence in evidences}
+            data["requires_new_evidence"] = (
+                item.status == ReturnV12Status.DRAFT.value
+            )
+            data["current_round_evidence_count"] = len(
+                current_hashes - baseline_hashes
+            )
         data["evidence_summary"] = _evidence_summary(db, item.id)
     task = (
         tasks_by_id.get(item.verification_task_id)
@@ -1419,6 +1664,10 @@ def return_verification_task_list_to_dict(
         for item in db.scalars(select(Assignment).where(Assignment.id.in_(assignment_ids))).all()
     }
     evidence_summaries: dict[str, dict[str, int]] = {request_id: {} for request_id in request_ids}
+    history_assignment_ids = {task.assignment_id for task in tasks
+        if task.submitted_at is not None and task.return_request_id in requests_by_id
+        and task.id != requests_by_id[task.return_request_id].verification_task_id}
+    round_snapshots = return_verification_round_snapshots(db, history_assignment_ids)
     for request_id, evidence_type, count in db.execute(
         select(
             ReturnEvidence.return_request_id,
@@ -1439,6 +1688,7 @@ def return_verification_task_list_to_dict(
             leads_by_id=leads_by_id,
             assignments_by_id=assignments_by_id,
             evidence_summaries=evidence_summaries,
+            round_snapshots=round_snapshots,
         )
         for task in tasks
     ]
@@ -1455,6 +1705,7 @@ def return_verification_task_to_dict(
     leads_by_id: dict[str, Lead] | None = None,
     assignments_by_id: dict[str, Assignment] | None = None,
     evidence_summaries: dict[str, dict[str, int]] | None = None,
+    round_snapshots: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
     request = (
         requests_by_id.get(task.return_request_id) if requests_by_id is not None and task.return_request_id
@@ -1473,14 +1724,19 @@ def return_verification_task_to_dict(
     active_assignee_can_view_phone = (
         principal.has_any_role("TELESALES")
         and task.assignee_user_id == principal.user_id
+        and (task.status == VerificationTaskStatus.IN_PROGRESS.value or task.submitted_at is not None)
         and (principal.can("lead.phone.read") or principal.can("*"))
-        and not is_overdue
     )
     can_view_phone = bool(
         include_phone and (operation_can_view_phone or active_assignee_can_view_phone)
     )
     phone = decrypt_text(lead.phone_encrypted) if lead and can_view_phone else None
     snapshot = assignment.lead_snapshot if assignment and assignment.lead_snapshot else {}
+    appeal_deadline = (
+        getattr(assignment, "appeal_deadline_at", None)
+        or (request.appeal_deadline_at if request else None)
+        or (request.due_at if request else None)
+    )
     phone_masked = snapshot.get("phone_masked")
     if not phone_masked and lead:
         phone_masked = mask_phone(phone or decrypt_text(lead.phone_encrypted))
@@ -1501,9 +1757,20 @@ def return_verification_task_to_dict(
             "status": request.status if request else None,
             "reason_code": request.reason_code if request else None,
             "description": request.description if request else None,
-            "appeal_deadline_at": (request.appeal_deadline_at or request.due_at).isoformat()
-            if request and (request.appeal_deadline_at or request.due_at)
-            else None,
+            "appeal_deadline_at": appeal_deadline.isoformat() if appeal_deadline else None,
+            "appeal_paused_at": (
+                getattr(assignment, "appeal_paused_at", None).isoformat()
+                if assignment and getattr(assignment, "appeal_paused_at", None)
+                else None
+            ),
+            "appeal_remaining_seconds": (
+                getattr(assignment, "appeal_remaining_seconds", None) if assignment else None
+            ),
+            "appeal_resumed_at": (
+                getattr(assignment, "appeal_resumed_at", None).isoformat()
+                if assignment and getattr(assignment, "appeal_resumed_at", None)
+                else None
+            ),
             "evidence_summary": (
                 evidence_summaries.get(request.id, {})
                 if request and evidence_summaries is not None
@@ -1528,6 +1795,15 @@ def return_verification_task_to_dict(
             "need_summary": lead.need_summary if lead else None,
         },
     }
+    historical_snapshot = None
+    if request and task.submitted_at is not None and task.id != request.verification_task_id:
+        snapshots = round_snapshots if round_snapshots is not None else return_verification_round_snapshots(
+            db, {task.assignment_id} if task.assignment_id else set())
+        historical_snapshot = snapshots.get(task.id)
+        if historical_snapshot:
+            result["return_request"].update({
+                key: value for key, value in historical_snapshot.items() if key != "evidence_ids"
+            })
     if (
         include_verification_info
         and task.submitted_at is not None
@@ -1591,11 +1867,15 @@ def return_verification_task_to_dict(
     elif include_verification_info:
         result["verification_info"] = None
     if include_verification_info and request is not None:
+        evidence_filters = [ReturnEvidence.return_request_id == request.id]
+        if historical_snapshot:
+            evidence_filters.append(ReturnEvidence.id.in_(historical_snapshot.get("evidence_ids", [])))
         available_evidences = db.scalars(
             select(ReturnEvidence)
-            .where(ReturnEvidence.return_request_id == request.id)
+            .where(*evidence_filters)
             .order_by(ReturnEvidence.created_at.asc(), ReturnEvidence.id.asc())
         ).all()
+        uploader_names = _evidence_uploader_names(db, available_evidences)
         result["return_request"]["available_evidences"] = [
             {
                 "id": evidence.id,
@@ -1604,6 +1884,8 @@ def return_verification_task_to_dict(
                 "mime_type": evidence.mime_type,
                 "file_size": evidence.file_size,
                 "duration_seconds": evidence.duration_seconds,
+                "uploaded_by": evidence.uploaded_by,
+                "uploaded_by_name": uploader_names.get(evidence.uploaded_by),
                 "created_at": evidence.created_at.isoformat(),
             }
             for evidence in available_evidences

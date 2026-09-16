@@ -15,6 +15,7 @@ from ..services.audit import write_audit
 from ..services.company_assignment_v12 import require_company_assignment_access
 from ..services.dispatch_service import assignment_to_dict, candidate_companies, dispatch_lead, release_assignment
 from ..services.lead_service import lead_to_dict
+from ..services.lead_points_v12 import get_lead_points_settings
 
 router = APIRouter(prefix="/dispatch", tags=["dispatch"])
 
@@ -105,7 +106,19 @@ def assignments(
         count_stmt = count_stmt.where(Assignment.status == status)
     total = db.scalar(count_stmt) or 0
     items = db.scalars(stmt.order_by(Assignment.assigned_at.desc()).offset((page_no - 1) * page_size).limit(page_size)).all()
-    return ok(request, page([assignment_to_dict(x) for x in items], total, page_no, page_size))
+    points_settings = get_lead_points_settings(db)
+    return ok(
+        request,
+        page(
+            [
+                assignment_to_dict(item, points_settings=points_settings)
+                for item in items
+            ],
+            total,
+            page_no,
+            page_size,
+        ),
+    )
 
 
 @router.get("/assignments/{assignment_id}")
@@ -119,7 +132,10 @@ def assignment_detail(assignment_id: str, request: Request, principal: CurrentPr
         if lead is None or lead.deleted_at is not None:
             raise AppError("ASSIGNMENT_NOT_FOUND", "派发订单不存在", 404)
     events = db.scalars(select(AssignmentEvent).where(AssignmentEvent.assignment_id == assignment.id).order_by(AssignmentEvent.occurred_at)).all()
-    data = assignment_to_dict(assignment)
+    data = assignment_to_dict(
+        assignment,
+        points_settings=get_lead_points_settings(db),
+    )
     data["timeline"] = [{"type": x.event_type, "payload": x.payload, "occurred_at": x.occurred_at.isoformat()} for x in events]
     return ok(request, data)
 

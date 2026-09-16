@@ -23,10 +23,13 @@ from ..core.models import (
     StorageCleanupOutbox,
     User,
     UserRole,
+    VerificationTask,
 )
 from ..core.models_v12 import SupplierLeadReward
 from ..core.security import decrypt_text, hash_phone, mask_phone, normalize_phone
 from ..core.time import as_utc
+from ..core.v12_enums import LeadV12Status, VerificationTaskType
+from .pre_dispatch_v12 import is_pre_dispatch_task_requeueable
 from .public_pool_v12 import public_pool_lead_conditions
 from .storage import get_storage
 from .storage_cleanup_worker import enqueue_storage_cleanup
@@ -71,6 +74,7 @@ class LeadReportRow:
     latest_followup_next_at: datetime | None
     latest_followup_by_name: str | None
     latest_followup_at: datetime | None
+    supplier_cooperation_status: str | None = None
     supplier_reward_status: str | None = None
     supplier_reward_points: int | None = None
     supplier_reward_settled_at: datetime | None = None
@@ -133,10 +137,10 @@ def _conditions(filters: dict[str, Any], current_assignment) -> list[Any]:
     if values["region"]:
         conditions.append(
             or_(
-                Lead.region_code == values["region"],
-                Lead.province == values["region"],
-                Lead.city == values["region"],
-                Lead.district == values["region"],
+                Lead.region_code.contains(values["region"], autoescape=True),
+                Lead.province.contains(values["region"], autoescape=True),
+                Lead.city.contains(values["region"], autoescape=True),
+                Lead.district.contains(values["region"], autoescape=True),
             )
         )
     if values["receiver_company_id"]:
@@ -180,6 +184,9 @@ def _report_select(
         assigned_by.display_name.label("assigned_by_name"),
         submitter.display_name.label("submitter_name"),
         supplier.name.label("supplier_company_name"),
+        supplier.supplier_cooperation_status.label(
+            "supplier_cooperation_status"
+        ),
         internal_assignee.display_name.label("internal_assignee_name"),
         internal_role.code.label("internal_assignee_role_code"),
         current_reward.status.label("supplier_reward_status"),
@@ -264,6 +271,7 @@ def _lead_report_row(row: Any) -> LeadReportRow:
         assigned_by_name=row.assigned_by_name,
         submitter_name=row.submitter_name,
         supplier_company_name=row.supplier_company_name,
+        supplier_cooperation_status=row.supplier_cooperation_status,
         internal_assignee_name=row.internal_assignee_name,
         internal_assignee_role_code=row.internal_assignee_role_code,
         latest_followup_status=getattr(row, "latest_followup_status", None),
@@ -332,6 +340,40 @@ def lead_report_to_dicts(
     include_latest_followup: bool = True,
     sequence_start: int = 1,
 ) -> list[dict[str, Any]]:
+    lead_ids = [row.lead.id for row in rows]
+    latest_pre_dispatch_tasks: dict[str, VerificationTask] = {}
+    if lead_ids:
+        ranked_tasks = (
+            select(
+                VerificationTask.id.label("task_id"),
+                func.row_number()
+                .over(
+                    partition_by=VerificationTask.lead_id,
+                    order_by=(
+                        VerificationTask.created_at.desc(),
+                        VerificationTask.id.desc(),
+                    ),
+                )
+                .label("row_number"),
+            )
+            .where(
+                VerificationTask.lead_id.in_(lead_ids),
+                VerificationTask.task_type
+                == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+            )
+            .subquery("ranked_report_pre_dispatch_tasks")
+        )
+        task_rows = db.scalars(
+            select(VerificationTask)
+            .join(
+                ranked_tasks,
+                ranked_tasks.c.task_id == VerificationTask.id,
+            )
+            .where(ranked_tasks.c.row_number == 1)
+        ).all()
+        latest_pre_dispatch_tasks = {
+            task.lead_id: task for task in task_rows
+        }
     assignment_ids = {
         row.assignment.id for row in rows if row.assignment is not None
     }
@@ -369,6 +411,7 @@ def lead_report_to_dicts(
     for sequence, row in enumerate(rows, start=sequence_start):
         lead = row.lead
         assignment = row.assignment
+        latest_pre_dispatch_task = latest_pre_dispatch_tasks.get(lead.id)
         franchise_handler_name, franchise_handler_kind = _franchise_handler(row)
         phone = decrypt_text(lead.phone_encrypted)
         source_display = (
@@ -398,6 +441,37 @@ def lead_report_to_dicts(
                 "lead_status": lead.status,
                 "review_status": lead.review_status,
                 "pending_reason": lead.pending_reason,
+                "latest_pre_dispatch_task_id": (
+                    latest_pre_dispatch_task.id
+                    if latest_pre_dispatch_task
+                    else None
+                ),
+                "latest_pre_dispatch_contact_result": (
+                    latest_pre_dispatch_task.contact_result
+                    if latest_pre_dispatch_task
+                    else None
+                ),
+                "latest_pre_dispatch_conclusion": (
+                    latest_pre_dispatch_task.verification_conclusion
+                    if latest_pre_dispatch_task
+                    else None
+                ),
+                "can_requeue_pre_dispatch": bool(
+                    lead.status
+                    in {
+                        LeadV12Status.PENDING_OPERATION_DISPOSITION.value,
+                        LeadV12Status.CLOSED.value,
+                        LeadV12Status.INVALID.value,
+                    }
+                    and lead.current_assignment_id is None
+                    and is_pre_dispatch_task_requeueable(
+                        latest_pre_dispatch_task
+                    )
+                    and (
+                        lead.supplier_company_id is None
+                        or row.supplier_cooperation_status == "ACTIVE"
+                    )
+                ),
                 "correction_issues": list(
                     (lead.raw_payload or {}).get("correction_issues") or []
                 ),

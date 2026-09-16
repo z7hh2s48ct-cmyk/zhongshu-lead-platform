@@ -180,7 +180,7 @@ def test_supplier_submission_queue_can_be_assigned_without_creating_a_second_tas
     assert assigned.task.assignee_user_id == telesales.id
 
 
-def test_overdue_pre_dispatch_task_blocks_telesales_and_allows_operation_reassignment(db) -> None:
+def test_overdue_pre_dispatch_task_remains_actionable(db) -> None:
     from apps.api.src.services.pre_dispatch_v12 import (
         assign_pre_dispatch_task,
         start_pre_dispatch_task,
@@ -199,13 +199,6 @@ def test_overdue_pre_dispatch_task_blocks_telesales_and_allows_operation_reassig
         username="overdue-telesales",
         password="simple88",
         display_name="电销",
-        role_code="TELESALES",
-    )
-    replacement = create_internal_user(
-        db,
-        username="overdue-replacement",
-        password="simple88",
-        display_name="接手电销",
         role_code="TELESALES",
     )
     lead = Lead(
@@ -239,24 +232,6 @@ def test_overdue_pre_dispatch_task_blocks_telesales_and_allows_operation_reassig
     task = assignment.task
     assert task.due_at is not None
     task.due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
-    with pytest.raises(AppError) as start_after_due:
-        start_pre_dispatch_task(
-            db,
-            task_id=task.id,
-            principal=_principal(telesales, "verification.task.start"),
-        )
-    assert start_after_due.value.code == "PRE_DISPATCH_TASK_OVERDUE"
-
-    assignment = assign_pre_dispatch_task(
-        db,
-        lead_id=lead.id,
-        assignee_user_id=telesales.id,
-        assigned_by=operation.id,
-        reason="原任务超时，重新指定核验期限",
-        template_code="PRE_OVERDUE",
-    )
-    task = assignment.task
-
     start_pre_dispatch_task(
         db,
         task_id=task.id,
@@ -265,27 +240,13 @@ def test_overdue_pre_dispatch_task_blocks_telesales_and_allows_operation_reassig
     task.due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
     db.flush()
 
-    with pytest.raises(AppError) as submit_after_due:
-        submit_pre_dispatch_verification(
-            db,
-            task_id=task.id,
-            principal=_principal(telesales, "verification.submit"),
-            contact_result="CONNECTED",
-            conclusion="QUALIFIED",
-            note="超时后不得再提交事实结论",
-        )
-    assert submit_after_due.value.code == "PRE_DISPATCH_TASK_OVERDUE"
-
-    reassigned = assign_pre_dispatch_task(
+    submission = submit_pre_dispatch_verification(
         db,
-        lead_id=lead.id,
-        assignee_user_id=replacement.id,
-        assigned_by=operation.id,
-        reason="原任务超时，改派重新核验",
-        template_code="PRE_OVERDUE",
+        task_id=task.id,
+        principal=_principal(telesales, "verification.submit"),
+        contact_result="CONNECTED",
+        conclusion="QUALIFIED",
+        note="超过提示期限后仍可提交事实结论",
     )
-    assert reassigned.task.id == task.id
-    assert reassigned.task.assignee_user_id == replacement.id
-    assert reassigned.task.status == "ASSIGNED"
-    assert reassigned.task.started_at is None
-    assert reassigned.task.due_at > datetime.now(timezone.utc)
+    assert submission.task_id == task.id
+    assert task.status == "SUBMITTED"

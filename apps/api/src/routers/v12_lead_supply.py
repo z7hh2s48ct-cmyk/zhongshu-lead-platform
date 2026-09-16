@@ -68,6 +68,7 @@ from ..services.lead_supply_v12 import (
     get_lead_or_404,
     lead_supply_list_to_dict,
     lead_supply_to_dict,
+    list_platform_leads as list_platform_leads_service,
     list_supplier_leads,
     preview_test_lead_delete,
     recheck_platform_lead_correction,
@@ -79,6 +80,7 @@ from ..services.lead_supply_v12 import (
     submit_draft,
     update_draft,
 )
+from ..services.lead_points_v12 import assignment_points_price, get_lead_points_settings
 from ..services.pre_dispatch_v12 import assign_pre_dispatch_task
 from ..services.points_service import ledger_to_dict
 
@@ -156,14 +158,19 @@ def _existing_pre_dispatch_create(
     return lead, task
 
 
-def _quick_assignment_dict(assignment) -> dict:
+def _quick_assignment_dict(assignment, points_settings=None) -> dict:
+    displayed_points = (
+        assignment_points_price(assignment, points_settings)
+        if points_settings is not None
+        else int(assignment.points_price)
+    )
     return {
         "id": assignment.id,
         "lead_id": assignment.lead_id,
         "company_id": assignment.company_id,
         "receiver_company_id": assignment.receiver_company_id,
         "status": assignment.status,
-        "points_price": assignment.points_price,
+        "points_price": displayed_points,
         "assigned_by_user_id": assignment.assigned_by,
         "internal_assignee_user_id": assignment.internal_assignee_user_id,
         "assigned_at": assignment.assigned_at.isoformat(),
@@ -525,7 +532,10 @@ def quick_dispatch_platform_lead(
                     request,
                     {
                         "lead": _lead_detail_dict(db, lead, principal),
-                        "assignment": _quick_assignment_dict(assignment),
+                        "assignment": _quick_assignment_dict(
+                            assignment,
+                            get_lead_points_settings(db),
+                        ),
                         "idempotent": True,
                     },
                     "客资已完成快捷派发",
@@ -627,7 +637,10 @@ def quick_dispatch_platform_lead(
                 request,
                 {
                     "lead": _lead_detail_dict(db, lead, principal),
-                    "assignment": _quick_assignment_dict(assignment),
+                    "assignment": _quick_assignment_dict(
+                        assignment,
+                        get_lead_points_settings(db),
+                    ),
                     "idempotent": False,
                 },
                 "客资已创建并派发给所选加盟商",
@@ -646,7 +659,10 @@ def quick_dispatch_platform_lead(
             request,
             {
                 "lead": _lead_detail_dict(db, lead, principal),
-                "assignment": _quick_assignment_dict(assignment),
+                "assignment": _quick_assignment_dict(
+                    assignment,
+                    get_lead_points_settings(db),
+                ),
                 "idempotent": True,
             },
             "客资已完成快捷派发",
@@ -993,25 +1009,20 @@ def list_platform_leads(
     principal=Depends(require_permissions("lead.manual.manage")),
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
+    region: str | None = Query(default=None, max_length=64),
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
-    stmt = select(Lead).where(
-        Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value,
-        Lead.deleted_at.is_(None),
+    items, total = list_platform_leads_service(
+        db,
+        status=status,
+        region=region,
+        page_no=page_no,
+        page_size=page_size,
     )
-    count_stmt = select(func.count(Lead.id)).where(
-        Lead.source_kind == LeadSourceKind.PLATFORM_MANUAL.value,
-        Lead.deleted_at.is_(None),
-    )
-    if status:
-        stmt = stmt.where(Lead.status == status)
-        count_stmt = count_stmt.where(Lead.status == status)
-    total = db.scalar(count_stmt) or 0
-    items = db.scalars(stmt.order_by(Lead.created_at.desc()).offset((page_no - 1) * page_size).limit(page_size)).all()
     return ok(
         request,
-        page(lead_supply_list_to_dict(db, list(items), principal), total, page_no, page_size),
+        page(lead_supply_list_to_dict(db, items, principal), total, page_no, page_size),
     )
 
 

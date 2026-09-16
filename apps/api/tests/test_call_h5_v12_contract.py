@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 import apps.api.src.core.legacy_guard as legacy_guard
 from apps.api.src.core import models_v12 as _models_v12  # noqa: F401
-from apps.api.src.core.enums import AssignmentStatus, VerificationTaskStatus
+from apps.api.src.core.enums import AssignmentStatus, EvidenceType, VerificationTaskStatus
 from apps.api.src.core.models import (
     Assignment,
     AssignmentEvent,
@@ -15,6 +15,7 @@ from apps.api.src.core.models import (
     Company,
     Lead,
     Notification,
+    ReturnEvidence,
     ReturnRequest,
     User,
     VerificationTask,
@@ -28,6 +29,7 @@ from apps.api.src.core.v12_enums import (
 )
 from apps.api.src.services import return_v12 as return_v12_service
 from apps.api.src.services.auth_service import create_internal_user
+from apps.api.src.services.storage import get_storage
 
 
 CALL_APP = Path("apps/call-h5/public/app.js")
@@ -54,7 +56,7 @@ def _data(response):
     return payload["data"]
 
 
-def _seed_return_verification(factory) -> tuple[str, str, str, str]:
+def _seed_return_verification(factory) -> tuple[str, str, str, str, str]:
     with factory() as db:
         company = db.scalar(select(Company).where(Company.code == "SH-DEMO"))
         franchise = db.scalar(select(User).where(User.username == "franchise_demo"))
@@ -137,8 +139,26 @@ def _seed_return_verification(factory) -> tuple[str, str, str, str]:
         db.add(task)
         db.flush()
         return_request.verification_task_id = task.id
+        stored = get_storage().save(
+            b"\xff\xd8\xff\xe0franchise-evidence",
+            prefix=f"evidence/v1.2/{return_request.id}",
+            filename="franchise-proof.jpg",
+            mime_type="image/jpeg",
+        )
+        franchise_evidence = ReturnEvidence(
+            return_request_id=return_request.id,
+            evidence_type=EvidenceType.CHAT_SCREENSHOT.value,
+            object_key=stored.object_key,
+            original_name="franchise-proof.jpg",
+            mime_type=stored.mime_type,
+            file_size=stored.size,
+            sha256=stored.sha256,
+            uploaded_by=franchise.id,
+        )
+        db.add(franchise_evidence)
+        db.flush()
         db.commit()
-        return task.id, return_request.id, phone, telesales.id
+        return task.id, return_request.id, phone, telesales.id, franchise_evidence.id
 
 
 def test_call_h5_uses_only_v12_assigned_verification_contracts() -> None:
@@ -168,7 +188,7 @@ def test_call_h5_uses_only_v12_assigned_verification_contracts() -> None:
     assert "自主领取" in source
     assert "go('home');route()" not in source
     assert "/admin/index.html" not in source
-    assert "app.js?v=20260911-history-evidence" in index
+    assert "app.js?v=20260916-feedback-915" in index
 
 
 def test_call_h5_home_first_screen_has_personal_task_summary_without_team_finance() -> None:
@@ -188,7 +208,9 @@ def test_call_h5_task_detail_first_screen_exposes_dial_rules_and_result_entry() 
         assert label in source
     for forbidden in ("自动录音", "云外呼", "在线支付"):
         assert forbidden not in source
-    assert source.count("['处理期限', fmt(data.due_at)]") >= 2
+    assert source.count("['处理参考时间', fmt(data.due_at)]") >= 2
+    assert "任务已超时" not in source
+    assert "不能继续处理" not in source
     assert "async function copyPhone" in source
     assert "navigator.clipboard.writeText" in source
     assert "document.execCommand('copy')" in source
@@ -204,9 +226,9 @@ def test_call_h5_route_awaits_async_views_so_failures_reach_the_error_state() ->
 def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch) -> None:
     client, factory = api_client
     monkeypatch.setattr(legacy_guard.settings, "legacy_write_enabled", False)
-    task_id, return_id, phone, telesales_id = _seed_return_verification(factory)
+    task_id, return_id, phone, telesales_id, franchise_evidence_id = _seed_return_verification(factory)
     with factory() as db:
-        create_internal_user(
+        other_telesales_user = create_internal_user(
             db,
             username="return-history-other",
             password="simple88",
@@ -214,6 +236,7 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
             role_code="TELESALES",
         )
         db.commit()
+        other_telesales_id = other_telesales_user.id
     decrypt_calls: list[str] = []
     real_decrypt = return_v12_service.decrypt_text
 
@@ -275,6 +298,12 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     telesales = _login(client, "telesales", "Telesales123!")
     other_telesales = _login(client, "return-history-other", "simple88")
 
+    with factory() as db:
+        task = db.get(VerificationTask, task_id)
+        assert task is not None
+        task.due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.commit()
+
     listed = _data(
         client.get(
             f"/api/v1{TASKS_ENDPOINT}?mine=true&page=1&page_size=20",
@@ -298,12 +327,85 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
 
     detail = _data(client.get(f"/api/v1{TASKS_ENDPOINT}/{task_id}", headers=telesales))
     assert detail["lead"]["phone"] is None
+    assert detail["is_overdue"] is True
+    franchise_evidence = next(
+        item
+        for item in detail["return_request"]["available_evidences"]
+        if item["id"] == franchise_evidence_id
+    )
+    assert franchise_evidence["uploaded_by_name"] == "张老板"
+    assigned_download = client.get(
+        f"/api/v1/v1.2/return-evidences/{franchise_evidence_id}/download",
+        headers=telesales,
+        params={"token": franchise_evidence["access_token"]},
+    )
+    assert assigned_download.status_code == 200
+    assert assigned_download.content == b"\xff\xd8\xff\xe0franchise-evidence"
+    with factory() as db:
+        evidence_read_audit = db.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "V12_RETURN_EVIDENCE_READ",
+                AuditLog.resource_id == franchise_evidence_id,
+                AuditLog.actor_user_id == telesales_id,
+            )
+        )
+        assert evidence_read_audit is not None
+        evidence = db.get(ReturnEvidence, franchise_evidence_id)
+        assert evidence is not None
+        get_storage().delete(evidence.object_key)
+    missing_file = client.get(
+        f"/api/v1/v1.2/return-evidences/{franchise_evidence_id}/download",
+        headers=telesales,
+        params={"token": franchise_evidence["access_token"]},
+    )
+    assert missing_file.status_code == 404
+    assert missing_file.json()["code"] == "EVIDENCE_FILE_MISSING"
+    assert missing_file.json()["message"] == "证据文件已丢失，请联系管理员"
+
+    reassigned = _data(
+        client.post(
+            f"/api/v1{TASKS_ENDPOINT}/{task_id}/assign",
+            headers=operation,
+            json={
+                "assignee_user_id": other_telesales_id,
+                "reason": "运营调整退回核验人员",
+            },
+        )
+    )
+    assert reassigned["assignee_user_id"] == other_telesales_id
+    old_assignee_detail = client.get(
+        f"/api/v1{TASKS_ENDPOINT}/{task_id}", headers=telesales
+    )
+    assert old_assignee_detail.status_code == 403
+    old_assignee_download = client.get(
+        f"/api/v1/v1.2/return-evidences/{franchise_evidence_id}/download",
+        headers=telesales,
+        params={"token": franchise_evidence["access_token"]},
+    )
+    assert old_assignee_download.status_code == 403
+
+    _data(
+        client.post(
+            f"/api/v1{TASKS_ENDPOINT}/{task_id}/assign",
+            headers=operation,
+            json={
+                "assignee_user_id": telesales_id,
+                "reason": "运营重新分配给原核验人员",
+            },
+        )
+    )
+    with factory() as db:
+        task = db.get(VerificationTask, task_id)
+        assert task is not None
+        task.due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.commit()
     assert decrypt_calls == []
 
     claimed = _data(
         client.post(f"/api/v1{TASKS_ENDPOINT}/{task_id}/start", headers=telesales)
     )
     assert claimed["status"] == VerificationTaskStatus.IN_PROGRESS.value
+    assert claimed["is_overdue"] is True
     assert claimed["lead"]["phone"] == phone
     assert len(decrypt_calls) == 1
 
@@ -323,6 +425,8 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
         )
     )
     assert uploaded_evidence["access_token"]
+    assert uploaded_evidence["uploaded_by"] == telesales_id
+    assert uploaded_evidence["uploaded_by_name"] == "电销人员"
 
     dial = _data(
         client.post(f"/api/v1{TASKS_ENDPOINT}/{task_id}/dial", headers=telesales)
@@ -369,6 +473,8 @@ def test_v12_call_flow_works_with_legacy_writes_disabled(api_client, monkeypatch
     )
     verification_evidence = completed_detail["verification_info"]["evidences"][0]
     assert verification_evidence["id"] == uploaded_evidence["id"]
+    assert verification_evidence["uploaded_by"] == telesales_id
+    assert verification_evidence["uploaded_by_name"] == "电销人员"
     assert verification_evidence["access_token"]
     downloaded = client.get(
         f"/api/v1/v1.2/return-evidences/{verification_evidence['id']}/download",

@@ -87,6 +87,7 @@ const document={querySelectorAll:()=>[],querySelector:()=>next};
 const isFranchiseOwner=()=>false,can=()=>false,canClaimAssignment=()=>false;
 const esc=x=>String(x??''),readableLabel=x=>x,fmt=x=>x;
 const deadlineNotice=()=>'',deadlineButtonAttributes=()=>'';
+const returnAppealTiming=()=>'';
 const toast=()=>{},shell=()=>{},item=(title)=>{visible.push(title);return title};
 const api=async url=>{const q=new URL(url,'https://example.test').searchParams;
  const page=Number(q.get('page')),pageSize=Number(q.get('page_size'));

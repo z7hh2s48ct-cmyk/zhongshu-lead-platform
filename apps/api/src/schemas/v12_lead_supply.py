@@ -244,6 +244,15 @@ class PreDispatchDispositionBody(BaseModel):
         return value.strip()
 
 
+class PreDispatchRequeueBody(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        return value.strip()
+
+
 class DedupOverrideBody(BaseModel):
     event_id: str | None = None
     reason: str = Field(min_length=5, max_length=1000)

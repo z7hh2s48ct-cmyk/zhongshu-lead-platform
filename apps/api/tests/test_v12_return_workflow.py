@@ -342,7 +342,7 @@ def test_telesales_cannot_start_an_unassigned_return_verification_task(db) -> No
     assert exc_info.value.code == "RETURN_VERIFY_TASK_NOT_ASSIGNED"
 
 
-def test_overdue_return_verification_blocks_telesales_and_allows_operation_reassignment(db) -> None:
+def test_overdue_return_verification_remains_actionable_and_allows_operation_reassignment(db) -> None:
     setup = _workflow_setup(db)
     owner = _principal(setup["receiver_user"], "return.own.manage")
     request = create_or_update_return_draft(
@@ -375,44 +375,31 @@ def test_overdue_return_verification_blocks_telesales_and_allows_operation_reass
     )
     overdue_detail = return_verification_task_to_dict(db, task, telesales, include_phone=True)
     assert overdue_detail["is_overdue"] is True
-    assert overdue_detail["lead"]["phone"] is None
-    with pytest.raises(AppError) as start_after_due:
-        claim_return_verification_task(db, task_id=task.id, principal=telesales)
-    assert start_after_due.value.code == "RETURN_VERIFY_TASK_OVERDUE"
+    assert overdue_detail["lead"]["phone"] is None  # Start the task before revealing the number.
+    started = claim_return_verification_task(db, task_id=task.id, principal=telesales)
+    assert started.status == VerificationTaskStatus.IN_PROGRESS.value
 
     assignment = assign_return_verification_task(
         db,
         task_id=task.id,
         assignee_user_id=setup["telesales"].id,
         assigned_by=operator.user_id,
-        reason="原核验任务超时，重新指定期限",
+        reason="运营在处理中直接改派核验人员",
     )
     task = assignment.task
     claim_return_verification_task(db, task_id=task.id, principal=telesales)
     task.due_at = datetime.now(timezone.utc) - timedelta(minutes=1)
     db.flush()
 
-    with pytest.raises(AppError) as submit_after_due:
-        submit_return_verification(
-            db,
-            task_id=task.id,
-            principal=telesales,
-            contact_result="EMPTY_NUMBER",
-            conclusion="SUPPORT_RETURN",
-            note="超时后不得提交退回核验结论",
-        )
-    assert submit_after_due.value.code == "RETURN_VERIFY_TASK_OVERDUE"
-
-    reassigned = assign_return_verification_task(
+    submitted_task = submit_return_verification(
         db,
         task_id=task.id,
-        assignee_user_id=setup["telesales"].id,
-        assigned_by=operator.user_id,
-        reason="原核验任务超时，改派其他电销人员",
+        principal=telesales,
+        contact_result="EMPTY_NUMBER",
+        conclusion="SUPPORT_RETURN",
+        note="截止时间仅用于处理时长统计，逾期后仍可提交核验结论",
     )
-    assert reassigned.task.status == VerificationTaskStatus.ASSIGNED.value
-    assert reassigned.task.started_at is None
-    assert reassigned.task.due_at > datetime.now(timezone.utc)
+    assert submitted_task.status == VerificationTaskStatus.SUBMITTED.value
 
 
 def test_missing_return_evidence_is_rejected(db) -> None:
@@ -759,6 +746,8 @@ def test_return_verification_records_selected_evidence_separately(db) -> None:
             "mime_type": "audio/mpeg",
             "file_size": 1024,
             "duration_seconds": 30,
+            "uploaded_by": setup["receiver_user"].id,
+            "uploaded_by_name": "接收方负责人",
             "created_at": evidence.created_at.isoformat(),
         }
     ]
@@ -862,7 +851,7 @@ def test_missing_return_submission_event_never_misattributed_review_note(db, cap
     assert request.id in caplog.text
 
 
-def test_final_reject_restores_following_and_settles_reward_immediately(db) -> None:
+def test_final_reject_restores_following_and_remaining_reward_window(db) -> None:
     setup = _workflow_setup(db, lead_status=LeadV12Status.FOLLOWING.value)
     request, task = _submit_and_verify(db, setup, conclusion="DOES_NOT_SUPPORT_RETURN")
     reviewer = _principal(setup["reviewer"], "return.review")
@@ -879,9 +868,11 @@ def test_final_reject_restores_following_and_settles_reward_immediately(db) -> N
     assert request.status == ReturnV12Status.REJECTED.value
     assert setup["assignment"].status == AssignmentStatus.FOLLOWING.value
     assert setup["lead"].status == LeadV12Status.FOLLOWING.value
-    assert setup["reward"].status == RewardStatus.SETTLED.value
-    assert setup["reward"].ledger_id is not None
-    assert as_utc(setup["reward"].reward_due_at) == as_utc(request.reviewed_at)
+    assert setup["reward"].status == RewardStatus.OBSERVING.value
+    assert setup["reward"].ledger_id is None
+    assert as_utc(setup["reward"].reward_due_at) > as_utc(request.reviewed_at)
+    assert setup["assignment"].appeal_paused_at is None
+    assert setup["assignment"].appeal_remaining_seconds > 45 * 3600
     assert task.status == VerificationTaskStatus.RELEASED.value
     assert db.get(PointsAccount, setup["account"].id).balance == 900
     supplier_account = db.scalar(
@@ -889,7 +880,7 @@ def test_final_reject_restores_following_and_settles_reward_immediately(db) -> N
             PointsAccount.company_id == setup["supplier"].id
         )
     )
-    assert supplier_account is not None and supplier_account.supply_balance == 30
+    assert supplier_account is None
     assert db.scalar(
         select(Notification).where(Notification.scene == "V12_RETURN_REJECTED")
     ) is None
@@ -976,6 +967,12 @@ def test_need_more_allows_new_evidence_and_creates_second_verification_round(db)
         .with_only_columns(__import__("sqlalchemy").func.count(VerificationTask.id))
     )
     assert task_count == 2
+    previous = return_verification_task_to_dict(db, first_task, reviewer, include_verification_info=True)
+    assert previous["return_request"]["status"] == ReturnV12Status.NEED_MORE_EVIDENCE.value
+    assert previous["return_request"]["review_note"] == "请补充客户沟通录音后重新核验"
+    assert supplementary.id not in {
+        item["id"] for item in previous["return_request"]["available_evidences"]
+    }
 
 
 def test_return_verification_task_list_defaults_to_open_tasks(db) -> None:

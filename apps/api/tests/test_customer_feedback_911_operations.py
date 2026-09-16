@@ -146,7 +146,7 @@ def test_operation_role_can_read_full_phone() -> None:
 
 def test_operation_return_details_include_full_phone_and_verification_note(api_client) -> None:
     client, factory = api_client
-    task_id, return_id, phone, telesales_id = _seed_return_verification(factory)
+    task_id, return_id, phone, telesales_id, _ = _seed_return_verification(factory)
     operation = _login(client, "operation", "Operation123!")
     assigned = client.post(
         f"/api/v1{TASKS_ENDPOINT}/{task_id}/assign",
@@ -203,7 +203,7 @@ def test_operations_ui_covers_feedback_entries_and_details() -> None:
 
 def test_telesales_cannot_use_operation_direct_invalid_endpoint(api_client) -> None:
     client, factory = api_client
-    _, return_id, _, _ = _seed_return_verification(factory)
+    _, return_id, _, _, _ = _seed_return_verification(factory)
     telesales = _login(client, "telesales", "Telesales123!")
 
     response = client.post(

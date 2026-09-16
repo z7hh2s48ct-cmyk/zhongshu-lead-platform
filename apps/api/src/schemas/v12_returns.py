@@ -104,6 +104,20 @@ class ReturnDirectInvalidBody(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
+class ReturnRegionRedispatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    province_code: str = Field(min_length=1, max_length=32)
+    city_code: str = Field(min_length=1, max_length=32)
+    district_code: str = Field(min_length=1, max_length=32)
+    reason: str = Field(min_length=2, max_length=1000)
+
+    @field_validator("province_code", "city_code", "district_code", "reason", mode="before")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
+
+
 class ReturnFinalReviewBody(BaseModel):
     decision: str = Field(pattern=r"^(APPROVE|REJECT|NEED_MORE)$")
     note: str = Field(min_length=2, max_length=1000)

@@ -26,6 +26,7 @@ from ..core.time import as_utc
 from ..core.v12_enums import ReturnV12Status, RewardStatus
 from .lead_correction_guard import CORRECTION_REVIEW_REASON
 from .points_service import change_points
+from .return_clock import appeal_deadline
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +164,7 @@ def resolve_effective_confirmation(
     claimed_at = as_utc(assignment.claimed_at)
     if claimed_at is None:
         return EffectiveConfirmation(None, None, None)
-    deadline_at = claimed_at + timedelta(hours=48)
+    deadline_at = appeal_deadline(assignment)
     manual_at = _manual_confirmation_at(db, assignment.id)
     return_request = db.scalar(
         select(ReturnRequest)
@@ -178,14 +179,20 @@ def resolve_effective_confirmation(
     if (
         manual_at is not None
         and (deadline_at is None or manual_at <= deadline_at)
-        and (submitted_at is None or manual_at <= submitted_at)
+        and (submitted_at is None or manual_at <= submitted_at
+             or (assignment.appeal_resumed_at is not None
+                 and return_request.status == ReturnV12Status.REJECTED.value
+                 and as_utc(return_request.reviewed_at) <= manual_at))
         and manual_at <= now
     ):
         return EffectiveConfirmation(manual_at, "MANUAL_CONFIRMED", deadline_at)
     if (
         deadline_at is not None
         and deadline_at <= now
-        and (submitted_at is None or submitted_at > deadline_at)
+        and assignment.appeal_paused_at is None
+        and (submitted_at is None or submitted_at > deadline_at
+             or (assignment.appeal_resumed_at is not None
+                 and return_request.status == ReturnV12Status.REJECTED.value))
     ):
         return EffectiveConfirmation(deadline_at, "CLAIM_48H", deadline_at)
     rejected_at = (
@@ -194,7 +201,7 @@ def resolve_effective_confirmation(
         and return_request.status == ReturnV12Status.REJECTED.value
         else None
     )
-    if rejected_at is not None and rejected_at <= now:
+    if rejected_at is not None and rejected_at <= now and assignment.appeal_resumed_at is None:
         return EffectiveConfirmation(rejected_at, "RETURN_REJECTED", deadline_at)
     return EffectiveConfirmation(None, None, deadline_at)
 
@@ -226,7 +233,7 @@ def confirmation_sql_expressions(*, dialect_name: str) -> ConfirmationSqlExpress
         .correlate(Assignment)
         .scalar_subquery()
     )
-    deadline_at = (
+    original_deadline_at = (
         func.datetime(
             Assignment.claimed_at,
             "+48 hours",
@@ -235,25 +242,33 @@ def confirmation_sql_expressions(*, dialect_name: str) -> ConfirmationSqlExpress
         if dialect_name == "sqlite"
         else Assignment.claimed_at + text("INTERVAL '48 hours'")
     )
+    deadline_at = case(
+        (Assignment.appeal_resumed_at.is_not(None), Assignment.appeal_deadline_at),
+        else_=original_deadline_at,
+    )
     manual_is_first = and_(
         manual_at.is_not(None),
         or_(deadline_at.is_(None), manual_at <= deadline_at),
-        or_(submitted_at.is_(None), manual_at <= submitted_at),
+        or_(submitted_at.is_(None), manual_at <= submitted_at,
+            and_(Assignment.appeal_resumed_at.is_not(None), rejected_at <= manual_at)),
     )
     deadline_is_effective = and_(
         deadline_at.is_not(None),
-        or_(submitted_at.is_(None), submitted_at > deadline_at),
+        Assignment.appeal_paused_at.is_(None),
+        or_(submitted_at.is_(None), submitted_at > deadline_at,
+            and_(Assignment.appeal_resumed_at.is_not(None), rejected_at.is_not(None))),
     )
+    legacy_rejection = and_(rejected_at.is_not(None), Assignment.appeal_resumed_at.is_(None))
     effective_at = case(
         (manual_is_first, manual_at),
         (deadline_is_effective, deadline_at),
-        (rejected_at.is_not(None), rejected_at),
+        (legacy_rejection, rejected_at),
         else_=None,
     )
     policy = case(
         (manual_is_first, "MANUAL_CONFIRMED"),
         (deadline_is_effective, "CLAIM_48H"),
-        (rejected_at.is_not(None), "RETURN_REJECTED"),
+        (legacy_rejection, "RETURN_REJECTED"),
         else_=None,
     )
     return ConfirmationSqlExpressions(
@@ -464,7 +479,7 @@ def settle_supplier_reward(
         assert_reward_transition(RewardStatus.WAITING_CLAIM, RewardStatus.OBSERVING)
         reward.status = RewardStatus.OBSERVING.value
     reward.observed_at = reward.observed_at or claimed_at
-    reward.appeal_deadline_at = claimed_at + timedelta(hours=48)
+    reward.appeal_deadline_at = confirmation.deadline_at
     reward.reward_due_at = due_at
     if assignment.status == "RETURN_PENDING" or active_appeal:
         assert_reward_transition(RewardStatus.OBSERVING, RewardStatus.FROZEN)
@@ -543,7 +558,15 @@ def _select_due_reward_ids(
         SupplierLeadReward.status.in_(SETTLEABLE_REWARD_STATUSES),
         Assignment.claimed_at.is_not(None),
         or_(
-            Assignment.claimed_at <= as_of - timedelta(hours=48),
+            and_(
+                Assignment.appeal_paused_at.is_(None),
+                or_(
+                    and_(Assignment.appeal_resumed_at.is_(None),
+                         Assignment.claimed_at <= as_of - timedelta(hours=48)),
+                    and_(Assignment.appeal_resumed_at.is_not(None),
+                         Assignment.appeal_deadline_at <= as_of),
+                ),
+            ),
             select(FollowUp.id)
             .where(
                 FollowUp.assignment_id == Assignment.id,
