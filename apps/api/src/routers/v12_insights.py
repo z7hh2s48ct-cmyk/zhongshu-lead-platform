@@ -53,6 +53,7 @@ from ..core.v12_enums import VerificationTaskType
 from ..schemas.v12_reports import LeadExportRequestBody, LeadReportSearchBody
 from ..services.audit import write_audit
 from ..services.lead_export_v12 import lead_report_to_dicts, list_lead_report_rows
+from ..services.lead_points_v12 import assignment_points_price, get_lead_points_settings
 from ..services.notification_service import visible_notification_condition
 from ..services.return_v12 import return_request_to_dict
 from ..services.storage import create_file_access_token, get_storage
@@ -2091,6 +2092,7 @@ def _trace(
     lead_id = lead.id if lead else assignment.lead_id if assignment else return_request.lead_id if return_request else reward.lead_id if reward else task.lead_id if task else None
     assignment_id = assignment.id if assignment else return_request.assignment_id if return_request else reward.assignment_id if reward else getattr(task, "assignment_id", None) if task else None
     assignments = db.scalars(select(Assignment).where(Assignment.lead_id == lead_id).order_by(Assignment.created_at)).all() if lead_id else []
+    points_settings = get_lead_points_settings(db)
     assignment_ids = {item.id for item in assignments}
     if assignment_id:
         assignment_ids.add(assignment_id)
@@ -2302,8 +2304,12 @@ def _trace(
                     if resolved_lead and resolved_lead.current_assignment_id == item.id
                     else follow_status_by_assignment.get(item.id)
                 ),
-                "points_price": item.points_price,
-                "claim_points": item.claim_points,
+                "points_price": assignment_points_price(item, points_settings),
+                "claim_points": (
+                    assignment_points_price(item, points_settings)
+                    if item.status == "PENDING_CLAIM" and item.claimed_at is None
+                    else item.claim_points
+                ),
                 "assigned_at": _iso(item.assigned_at),
                 "claimed_at": _iso(item.claimed_at),
                 "auto_confirmed_at": auto_confirmed_at_by_assignment.get(item.id),

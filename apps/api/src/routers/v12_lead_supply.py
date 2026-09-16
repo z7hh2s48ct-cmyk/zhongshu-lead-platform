@@ -80,6 +80,7 @@ from ..services.lead_supply_v12 import (
     submit_draft,
     update_draft,
 )
+from ..services.lead_points_v12 import assignment_points_price, get_lead_points_settings
 from ..services.pre_dispatch_v12 import assign_pre_dispatch_task
 from ..services.points_service import ledger_to_dict
 
@@ -157,14 +158,19 @@ def _existing_pre_dispatch_create(
     return lead, task
 
 
-def _quick_assignment_dict(assignment) -> dict:
+def _quick_assignment_dict(assignment, points_settings=None) -> dict:
+    displayed_points = (
+        assignment_points_price(assignment, points_settings)
+        if points_settings is not None
+        else int(assignment.points_price)
+    )
     return {
         "id": assignment.id,
         "lead_id": assignment.lead_id,
         "company_id": assignment.company_id,
         "receiver_company_id": assignment.receiver_company_id,
         "status": assignment.status,
-        "points_price": assignment.points_price,
+        "points_price": displayed_points,
         "assigned_by_user_id": assignment.assigned_by,
         "internal_assignee_user_id": assignment.internal_assignee_user_id,
         "assigned_at": assignment.assigned_at.isoformat(),
@@ -526,7 +532,10 @@ def quick_dispatch_platform_lead(
                     request,
                     {
                         "lead": _lead_detail_dict(db, lead, principal),
-                        "assignment": _quick_assignment_dict(assignment),
+                        "assignment": _quick_assignment_dict(
+                            assignment,
+                            get_lead_points_settings(db),
+                        ),
                         "idempotent": True,
                     },
                     "客资已完成快捷派发",
@@ -628,7 +637,10 @@ def quick_dispatch_platform_lead(
                 request,
                 {
                     "lead": _lead_detail_dict(db, lead, principal),
-                    "assignment": _quick_assignment_dict(assignment),
+                    "assignment": _quick_assignment_dict(
+                        assignment,
+                        get_lead_points_settings(db),
+                    ),
                     "idempotent": False,
                 },
                 "客资已创建并派发给所选加盟商",
@@ -647,7 +659,10 @@ def quick_dispatch_platform_lead(
             request,
             {
                 "lead": _lead_detail_dict(db, lead, principal),
-                "assignment": _quick_assignment_dict(assignment),
+                "assignment": _quick_assignment_dict(
+                    assignment,
+                    get_lead_points_settings(db),
+                ),
                 "idempotent": True,
             },
             "客资已完成快捷派发",

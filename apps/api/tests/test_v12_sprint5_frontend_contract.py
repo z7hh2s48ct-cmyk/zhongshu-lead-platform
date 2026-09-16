@@ -26,7 +26,7 @@ def test_h5_workbench_supports_followup_history_and_guarded_submission() -> None
     html = Path("apps/h5/public/v12-workbench.html").read_text(encoding="utf-8")
     js = Path("apps/h5/public/v12-workbench.js").read_text(encoding="utf-8")
 
-    assert "v12-workbench.js?v=20260916-feedback-915" in html
+    assert "v12-workbench.js?v=20260916-feedback-current-claim-points" in html
     assert "跟进历史" in js
     assert "新增跟进" in js
     assert 'type="datetime-local"' in js

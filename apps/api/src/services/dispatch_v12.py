@@ -45,8 +45,13 @@ from .company_profile_v12 import (
 )
 from .lead_correction_guard import require_correction_review_resolved
 from .lead_deletion_v12 import require_lead_not_deleted
-from .lead_points_v12 import get_lead_points_settings, operation_claim_points_for_lead
-from .points_service import change_points, resolve_price
+from .lead_points_v12 import (
+    LeadPointsSettings,
+    assignment_points_price,
+    get_lead_points_settings,
+    operation_claim_points_for_lead,
+)
+from .points_service import change_points, pending_claim_points, resolve_price
 from .reward_rule_v12 import (
     SupplierRewardRule,
     calculate_reward_points,
@@ -335,6 +340,7 @@ def _points_snapshot(
     company_id: str,
     *,
     lock_account: bool = False,
+    points_settings: LeadPointsSettings | None = None,
 ) -> tuple[int, int, int]:
     """Read balance/reservations without creating an account during a GET.
 
@@ -347,16 +353,9 @@ def _points_snapshot(
         stmt = stmt.with_for_update()
     account = db.scalar(stmt)
     balance = int(account.balance) if account is not None else 0
-    reserved = db.scalar(
-        select(func.coalesce(func.sum(Assignment.points_price), 0))
-        .join(Lead, Lead.id == Assignment.lead_id)
-        .where(
-            Assignment.company_id == company_id,
-            Assignment.status == AssignmentStatus.PENDING_CLAIM.value,
-            Lead.deleted_at.is_(None),
-        )
-    ) or 0
-    return balance, int(reserved), balance - int(reserved)
+    frozen = int(account.frozen_customer_points) if account is not None else 0
+    reserved = pending_claim_points(db, company_id, points_settings=points_settings)
+    return balance, int(reserved), max(0, balance - int(reserved) - frozen)
 
 
 def _receiver_duplicate_assignment(
@@ -458,6 +457,7 @@ def evaluate_candidate(
         db,
         company.id,
         lock_account=lock_account,
+        points_settings=points_settings,
     )
     if available < points_price:
         reasons.append("POINTS_INSUFFICIENT")
@@ -537,6 +537,7 @@ def list_candidates(
     page_no: int | None = None,
     page_size: int | None = None,
 ) -> list[CandidateResult]:
+    reward_rule, points_settings = resolve_supplier_reward_rule_and_points_settings(db)
     capable_companies = (
         select(CompanyLeadCapability.company_id)
         .where(
@@ -547,10 +548,16 @@ def list_candidates(
         .distinct()
         .subquery()
     )
+    reserved_price = Assignment.points_price
+    if points_settings.configured and points_settings.operation_claim_points is not None:
+        reserved_price = case(
+            (Assignment.claimed_at.is_(None), points_settings.operation_claim_points),
+            else_=Assignment.points_price,
+        )
     reserved_by_company = (
         select(
             Assignment.company_id,
-            func.coalesce(func.sum(Assignment.points_price), 0).label("points_reserved"),
+            func.coalesce(func.sum(reserved_price), 0).label("points_reserved"),
         )
         .join(Lead, Lead.id == Assignment.lead_id)
         .where(
@@ -573,7 +580,6 @@ def list_candidates(
         .distinct()
         .subquery()
     )
-    reward_rule, points_settings = resolve_supplier_reward_rule_and_points_settings(db)
     fixed_operation_price = operation_claim_points_for_lead(
         db,
         source_kind=lead.source_kind,
@@ -626,6 +632,7 @@ def list_candidates(
             Company,
             capable_companies.c.company_id.label("capable_company_id"),
             PointsAccount.balance.label("points_balance"),
+            PointsAccount.frozen_customer_points.label("frozen_customer_points"),
             func.coalesce(reserved_by_company.c.points_reserved, 0).label("points_reserved"),
             returned_receiver_companies.c.company_id.label("returned_receiver_company_id"),
             duplicate_receiver_companies.c.company_id.label("duplicate_company_id"),
@@ -706,6 +713,7 @@ def list_candidates(
             (
                 func.coalesce(PointsAccount.balance, 0)
                 - func.coalesce(reserved_by_company.c.points_reserved, 0)
+                - func.coalesce(PointsAccount.frozen_customer_points, 0)
             )
             >= (
                 fixed_operation_price[0]
@@ -765,6 +773,9 @@ def list_candidates(
         )
     ).all()
     balances = {row[0].id: int(row.points_balance or 0) for row in company_rows}
+    frozen = {
+        row[0].id: int(row.frozen_customer_points or 0) for row in company_rows
+    }
     reserved = {row[0].id: int(row.points_reserved or 0) for row in company_rows}
     results: list[CandidateResult] = []
     for company in companies:
@@ -794,7 +805,10 @@ def list_candidates(
         )
         points_balance = int(balances.get(company.id, 0))
         points_reserved = int(reserved.get(company.id, 0))
-        points_available = points_balance - points_reserved
+        points_available = max(
+            0,
+            points_balance - points_reserved - int(frozen.get(company.id, 0)),
+        )
         if points_available < points_price:
             reasons.append("POINTS_INSUFFICIENT")
         results.append(
@@ -1106,6 +1120,7 @@ def claim_assignment(
     assignment_id: str,
     company_id: str,
     claimed_by: str,
+    expected_points: int | None = None,
 ) -> ClaimResult:
     assignment = db.scalar(
         select(Assignment)
@@ -1181,23 +1196,38 @@ def claim_assignment(
     account = db.scalar(
         select(PointsAccount).where(PointsAccount.company_id == company_id).with_for_update()
     )
-    if account is None or int(account.balance) < int(assignment.points_price):
+    points_settings = get_lead_points_settings(db, lock=True)
+    current_points = assignment_points_price(assignment, points_settings)
+    if expected_points is not None and expected_points != current_points:
+        raise AppError(
+            "CLAIM_PRICE_CHANGED",
+            f"领取积分已更新为{current_points}，请确认最新积分后重试",
+            409,
+            {"expected_points": expected_points, "current_points": current_points},
+        )
+    if account is None or int(account.balance) < current_points:
         raise AppError(
             "POINTS_INSUFFICIENT",
             "积分不足，无法领取客资",
             409,
-            {"balance": int(account.balance) if account else 0, "required": int(assignment.points_price)},
+            {"balance": int(account.balance) if account else 0, "required": current_points},
         )
+    if points_settings.configured:
+        assignment.points_price = current_points
+        assignment.claim_points = current_points
+        assignment.price_rule_id = None
+        assignment.price_version = points_settings.version
+        db.flush()
     ledger = change_points(
         db,
         company_id=company_id,
-        delta=-int(assignment.points_price),
+        delta=-current_points,
         ledger_type=PointsLedgerType.CLAIM.value,
         business_type="V12_ASSIGNMENT_CLAIM",
         business_id=assignment.id,
         idempotency_key=f"v12-claim:{assignment.id}",
         created_by=claimed_by,
-        metadata={"lead_id": lead.id, "points_price": int(assignment.points_price)},
+        metadata={"lead_id": lead.id, "points_price": current_points},
     )
 
     deadline = now + timedelta(hours=48)

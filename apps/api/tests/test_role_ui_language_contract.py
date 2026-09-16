@@ -31,7 +31,7 @@ def test_operations_pages_use_business_language_and_existing_safe_endpoints() ->
     assert "/return-evidences/${encodeURIComponent(item.id)}/download" in source
     assert "派发前置电销核验" in source
     assert "派发退回电话核验" in source
-    assert "运营客资领取积分（积分/条）" in source
+    assert "客资领取积分（积分/条）" in source
     assert "加盟商供客积分（积分/条）" in source
     assert "奖励比例（%）" not in source
     assert "esc(label(x.source_kind))" in source

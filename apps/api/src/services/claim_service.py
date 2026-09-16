@@ -16,12 +16,19 @@ from .company_assignment_v12 import require_company_assignment_access
 from .lead_correction_guard import require_correction_review_resolved
 from .lead_service import lead_to_dict
 from .notification_service import create_station_message, enqueue_outbox
-from .points_service import change_points, points_available_for_dispatch
+from .lead_points_v12 import LeadPointsSettings, assignment_points_price, get_lead_points_settings
+from .points_service import change_points, lock_points_account, points_available_for_dispatch
 
 settings = get_settings()
 
 
-def claim_assignment(db: Session, assignment_id: str, principal: Principal, idempotency_key: str) -> tuple[Assignment, PointsLedger]:
+def claim_assignment(
+    db: Session,
+    assignment_id: str,
+    principal: Principal,
+    idempotency_key: str,
+    expected_points: int | None = None,
+) -> tuple[Assignment, PointsLedger]:
     if not principal.company_id:
         raise AppError("COMPANY_CONTEXT_REQUIRED", "当前账号未绑定加盟商公司", 403)
     assignment = db.scalar(
@@ -72,16 +79,33 @@ def claim_assignment(db: Session, assignment_id: str, principal: Principal, idem
     if not company or company.status != "ACTIVE":
         raise AppError("COMPANY_DISABLED", "加盟商公司已停用", 403)
 
+    lock_points_account(db, assignment.company_id)
+    points_settings = get_lead_points_settings(db, lock=True)
+    current_points = assignment_points_price(assignment, points_settings)
+    if expected_points is not None and expected_points != current_points:
+        raise AppError(
+            "CLAIM_PRICE_CHANGED",
+            f"领取积分已更新为{current_points}，请确认最新积分后重试",
+            409,
+            {"expected_points": expected_points, "current_points": current_points},
+        )
+    if points_settings.configured:
+        assignment.points_price = current_points
+        assignment.claim_points = current_points
+        assignment.price_rule_id = None
+        assignment.price_version = points_settings.version
+        db.flush()
+
     ledger = change_points(
         db,
         company_id=assignment.company_id,
-        delta=-assignment.points_price,
+        delta=-current_points,
         ledger_type=PointsLedgerType.CLAIM,
         business_type="ASSIGNMENT",
         business_id=assignment.id,
         idempotency_key=f"claim:{assignment.id}:{idempotency_key}",
         created_by=principal.user_id,
-        metadata={"price_version": assignment.price_version},
+        metadata={"price_version": assignment.price_version, "points_price": current_points},
     )
     assignment.status = AssignmentStatus.CLAIMED
     assignment.claimed_at = now
@@ -94,7 +118,13 @@ def claim_assignment(db: Session, assignment_id: str, principal: Principal, idem
     return assignment, ledger
 
 
-def own_assignment_detail(db: Session, assignment: Assignment, principal: Principal) -> dict[str, Any]:
+def own_assignment_detail(
+    db: Session,
+    assignment: Assignment,
+    principal: Principal,
+    *,
+    points_settings: LeadPointsSettings | None = None,
+) -> dict[str, Any]:
     require_company_assignment_access(principal, assignment)
     lead = db.get(Lead, assignment.lead_id)
     if lead is None or lead.deleted_at is not None:
@@ -108,7 +138,12 @@ def own_assignment_detail(db: Session, assignment: Assignment, principal: Princi
         AssignmentStatus.RETURN_PENDING,
         AssignmentStatus.COMPLETED,
     }
-    balance, reserved, available = points_available_for_dispatch(db, assignment.company_id)
+    current_settings = points_settings or get_lead_points_settings(db)
+    balance, reserved, available = points_available_for_dispatch(
+        db,
+        assignment.company_id,
+        points_settings=current_settings,
+    )
     if lead is not None:
         current_lead = lead_to_dict(lead, principal, reveal_phone=unlocked)
     else:
@@ -128,7 +163,7 @@ def own_assignment_detail(db: Session, assignment: Assignment, principal: Princi
     return {
         "id": assignment.id,
         "status": assignment.status,
-        "points_price": assignment.points_price,
+        "points_price": assignment_points_price(assignment, current_settings),
         "assigned_at": assignment.assigned_at.isoformat(),
         "claimed_at": assignment.claimed_at.isoformat() if assignment.claimed_at else None,
         "expires_at": assignment.expires_at.isoformat() if assignment.expires_at else None,

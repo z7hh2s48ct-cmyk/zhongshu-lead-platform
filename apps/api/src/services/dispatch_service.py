@@ -19,7 +19,12 @@ from ..core.models import (
     Lead,
     ReturnRequest,
 )
-from .lead_points_v12 import get_lead_points_settings, operation_claim_points_for_lead
+from .lead_points_v12 import (
+    LeadPointsSettings,
+    assignment_points_price,
+    get_lead_points_settings,
+    operation_claim_points_for_lead,
+)
 from .notification_service import create_station_message, enqueue_outbox
 from .points_service import points_available_for_dispatch, resolve_price
 
@@ -71,7 +76,11 @@ def candidate_companies(db: Session, lead: Lead, *, include_balance: bool = Fals
             company,
             points_settings=points_settings,
         )
-        balance, reserved, available = points_available_for_dispatch(db, company.id)
+        balance, reserved, available = points_available_for_dispatch(
+            db,
+            company.id,
+            points_settings=points_settings,
+        )
         if available < price:
             reasons.append("POINTS_INSUFFICIENT")
         item: dict[str, Any] = {
@@ -200,13 +209,22 @@ def release_assignment(db: Session, assignment: Assignment, *, principal: Princi
     )
 
 
-def assignment_to_dict(assignment: Assignment, *, include_snapshot: bool = True) -> dict[str, Any]:
+def assignment_to_dict(
+    assignment: Assignment,
+    *,
+    include_snapshot: bool = True,
+    points_settings: LeadPointsSettings | None = None,
+) -> dict[str, Any]:
     data: dict[str, Any] = {
         "id": assignment.id,
         "lead_id": assignment.lead_id,
         "company_id": assignment.company_id,
         "status": assignment.status,
-        "points_price": assignment.points_price,
+        "points_price": (
+            assignment_points_price(assignment, points_settings)
+            if points_settings is not None
+            else assignment.points_price
+        ),
         "price_version": assignment.price_version,
         "assigned_at": assignment.assigned_at.isoformat(),
         "claimed_at": assignment.claimed_at.isoformat() if assignment.claimed_at else None,

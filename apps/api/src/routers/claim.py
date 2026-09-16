@@ -20,7 +20,13 @@ router = APIRouter(prefix="/claims", tags=["claims"])
 
 @router.post("/assignments/{assignment_id}")
 def claim(assignment_id: str, body: ClaimBody, request: Request, principal=Depends(require_permissions("assignment.own.claim")), db: Session = Depends(get_db)):
-    assignment, ledger = claim_assignment(db, assignment_id, principal, body.idempotency_key)
+    assignment, ledger = claim_assignment(
+        db,
+        assignment_id,
+        principal,
+        body.idempotency_key,
+        expected_points=body.expected_points,
+    )
     write_audit(db, principal=principal, action="ASSIGNMENT_CLAIM", resource_type="assignment", resource_id=assignment.id, company_id=assignment.company_id, after={"status": assignment.status, "ledger_id": ledger.id}, request_id=request.state.request_id)
     db.commit()
     return ok(request, {"assignment": own_assignment_detail(db, assignment, principal), "ledger": ledger_to_dict(ledger)}, "领取成功")

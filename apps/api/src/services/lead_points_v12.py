@@ -9,10 +9,10 @@ from sqlalchemy.orm import Session
 from ..core.enums import ConfigStatus
 from ..core.errors import AppError
 from ..core.models import SystemConfig
-from ..core.v12_enums import LeadSourceKind
 
 LEAD_POINTS_DOMAIN = "lead_points"
 LEAD_POINTS_KEY = "global"
+LEAD_POINTS_ADVISORY_LOCK_ID = 71912026
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,12 @@ class LeadPointsSettings:
         }
 
 
-def _latest_settings_config(db: Session, *, lock: bool = False) -> SystemConfig | None:
+def _latest_settings_config(
+    db: Session,
+    *,
+    lock: bool = False,
+    refresh: bool = False,
+) -> SystemConfig | None:
     stmt = (
         select(SystemConfig)
         .where(
@@ -46,11 +51,15 @@ def _latest_settings_config(db: Session, *, lock: bool = False) -> SystemConfig 
     )
     if lock:
         stmt = stmt.with_for_update()
+    if refresh:
+        stmt = stmt.execution_options(populate_existing=True)
     return db.scalar(stmt)
 
 
-def get_lead_points_settings(db: Session) -> LeadPointsSettings:
-    item = _latest_settings_config(db)
+def get_lead_points_settings(db: Session, *, lock: bool = False) -> LeadPointsSettings:
+    if lock and db.get_bind().dialect.name == "postgresql":
+        db.execute(select(func.pg_advisory_xact_lock_shared(LEAD_POINTS_ADVISORY_LOCK_ID)))
+    item = _latest_settings_config(db, refresh=lock)
     if item is None:
         return LeadPointsSettings(False, None, None, 0)
     return lead_points_settings_from_config(item)
@@ -75,16 +84,24 @@ def operation_claim_points_for_lead(
     source_type: str | None = None,
     settings: LeadPointsSettings | None = None,
 ) -> tuple[int, int] | None:
-    source = source_kind or source_type
-    if source not in {
-        LeadSourceKind.PLATFORM_MANUAL.value,
-        LeadSourceKind.FEISHU_IMPORT.value,
-    }:
-        return None
+    del source_kind, source_type
     settings = settings or get_lead_points_settings(db)
     if not settings.configured or settings.operation_claim_points is None:
         return None
     return settings.operation_claim_points, settings.version
+
+
+def assignment_points_price(assignment: object, settings: LeadPointsSettings) -> int:
+    status = getattr(assignment, "status", None)
+    status_value = getattr(status, "value", status)
+    if (
+        status_value == "PENDING_CLAIM"
+        and getattr(assignment, "claimed_at", None) is None
+        and settings.configured
+        and settings.operation_claim_points is not None
+    ):
+        return settings.operation_claim_points
+    return int(getattr(assignment, "points_price"))
 
 
 def update_lead_points_settings(
@@ -96,7 +113,7 @@ def update_lead_points_settings(
     updated_by: str,
 ) -> LeadPointsSettings:
     if db.get_bind().dialect.name == "postgresql":
-        db.execute(select(func.pg_advisory_xact_lock(71912026)))
+        db.execute(select(func.pg_advisory_xact_lock(LEAD_POINTS_ADVISORY_LOCK_ID)))
     elif db.get_bind().dialect.name == "sqlite":
         # SQLite ignores FOR UPDATE. A no-op write serializes both first-time and
         # subsequent setting changes before the expected-version check.

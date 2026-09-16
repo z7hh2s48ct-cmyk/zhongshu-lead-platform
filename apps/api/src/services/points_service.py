@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
@@ -21,7 +21,7 @@ from ..core.models import (
     SupplyTerminationRequest,
 )
 from ..core.time import as_utc
-from .lead_points_v12 import LeadPointsSettings, operation_claim_points_for_lead
+from .lead_points_v12 import LeadPointsSettings, get_lead_points_settings, operation_claim_points_for_lead
 from .notification_service import create_station_message, enqueue_outbox
 
 settings = get_settings()
@@ -40,17 +40,41 @@ def get_or_create_account(db: Session, company_id: str) -> PointsAccount:
     return account
 
 
-def points_available_for_dispatch(db: Session, company_id: str) -> tuple[int, int, int]:
-    account = get_or_create_account(db, company_id)
-    reserved = db.scalar(
-        select(func.coalesce(func.sum(Assignment.points_price), 0))
-        .join(Lead, Lead.id == Assignment.lead_id)
-        .where(
-            Assignment.company_id == company_id,
-            Assignment.status == AssignmentStatus.PENDING_CLAIM,
-            Lead.deleted_at.is_(None),
+def pending_claim_points(
+    db: Session,
+    company_id: str,
+    *,
+    points_settings: LeadPointsSettings | None = None,
+) -> int:
+    current_settings = points_settings or get_lead_points_settings(db)
+    pending_price = Assignment.points_price
+    if current_settings.configured and current_settings.operation_claim_points is not None:
+        pending_price = case(
+            (Assignment.claimed_at.is_(None), current_settings.operation_claim_points),
+            else_=Assignment.points_price,
         )
-    ) or 0
+    return int(
+        db.scalar(
+            select(func.coalesce(func.sum(pending_price), 0))
+            .join(Lead, Lead.id == Assignment.lead_id)
+            .where(
+                Assignment.company_id == company_id,
+                Assignment.status == AssignmentStatus.PENDING_CLAIM,
+                Lead.deleted_at.is_(None),
+            )
+        )
+        or 0
+    )
+
+
+def points_available_for_dispatch(
+    db: Session,
+    company_id: str,
+    *,
+    points_settings: LeadPointsSettings | None = None,
+) -> tuple[int, int, int]:
+    account = get_or_create_account(db, company_id)
+    reserved = pending_claim_points(db, company_id, points_settings=points_settings)
     available = max(0, int(account.balance - reserved - account.frozen_customer_points))
     return int(account.balance), int(reserved), available
 

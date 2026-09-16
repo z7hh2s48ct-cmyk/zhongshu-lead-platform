@@ -30,6 +30,7 @@ class ManualDispatchBody(BaseModel):
 
 class ClaimBody(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=128)
+    expected_points: int | None = Field(default=None, gt=0, strict=True)
 
 
 class RefuseAssignmentBody(BaseModel):

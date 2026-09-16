@@ -83,7 +83,7 @@ def test_supplier_workbench_assets_are_cache_busted_for_feedback_911() -> None:
     html = WORKBENCH_HTML.read_text(encoding="utf-8")
 
     assert "v12-workbench.css?v=20260911-feedback-911" in html
-    assert "v12-workbench.js?v=20260916-feedback-915" in html
+    assert "v12-workbench.js?v=20260916-feedback-current-claim-points" in html
 
 
 def test_supplier_customer_name_is_optional_and_blank_is_submitted_unchanged() -> None:
