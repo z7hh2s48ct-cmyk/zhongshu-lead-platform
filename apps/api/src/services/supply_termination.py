@@ -174,6 +174,12 @@ def termination_blockers(db: Session, company_id: str) -> list[dict[str, Any]]:
     )) or 0)
     if early_count:
         blockers.append({"code": "EARLY_REWARD_RETURN_WINDOW", "count": early_count, "record_ids": early_ids[:20], "truncated": early_count > 20, "message": "提前确认的奖励仍在48小时退回窗口内"})
+    # 2026-09-17 S1：在途提现与终止结算互斥，防止同一批供客积分被两条流程重复占用。
+    from .supply_withdrawal import in_flight_withdrawal_points
+
+    withdrawal_in_flight = in_flight_withdrawal_points(db, company_id=company_id)
+    if withdrawal_in_flight:
+        blockers.append({"code": "SUPPLY_WITHDRAWAL_IN_FLIGHT", "count": 1, "record_ids": [], "truncated": False, "message": f"仍有 {withdrawal_in_flight} 供客积分提现在途，需先完成或取消提现"})
     return blockers
 
 

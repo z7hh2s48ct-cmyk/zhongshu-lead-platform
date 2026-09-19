@@ -560,6 +560,7 @@ class SupplyPointsWithdrawal(Base, TimestampMixin):
     # 收款资料变更申请（S3）：已审核申请需更换收款资料时提交超管审批。
     change_payee_name_encrypted: Mapped[str | None] = mapped_column(Text)
     change_payee_account_encrypted: Mapped[str | None] = mapped_column(Text)
+    change_payee_qrcode_url: Mapped[str | None] = mapped_column(Text)
     change_payment_method: Mapped[str | None] = mapped_column(String(32))
     change_reason: Mapped[str | None] = mapped_column(Text)
     change_status: Mapped[str | None] = mapped_column(String(32), index=True)

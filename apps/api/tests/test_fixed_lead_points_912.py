@@ -98,7 +98,7 @@ def _ensure_receiver(db) -> tuple[Company, User]:
             CompanyServiceAreaV12(
                 company_id=company.id,
                 region_code="310101",
-                region_level="CITY",
+                region_level="DISTRICT",
                 is_primary_city=True,
                 active=True,
                 review_status="APPROVED",
@@ -431,7 +431,7 @@ def test_legacy_dispatch_uses_one_v2_settings_snapshot_for_all_candidates(db) ->
             CompanyCreateBody(
                 code=f"LEGACY-FIXED-{index}",
                 name=f"旧派发固定积分加盟商{index}",
-                region_codes=["310100"],
+                region_codes=["310101"],
                 capabilities=[{"category_code": "OLD_RENOVATION", "brand_code": None}],
             ),
         )
@@ -454,7 +454,7 @@ def test_legacy_dispatch_uses_one_v2_settings_snapshot_for_all_candidates(db) ->
         phone_encrypted=encrypt_text("13900139805"),
         phone_hash=hash_phone("13900139805"),
         city="上海市",
-        region_code="310100",
+        region_code="310101",
         category_code="OLD_RENOVATION",
         status="QUALIFIED",
     )

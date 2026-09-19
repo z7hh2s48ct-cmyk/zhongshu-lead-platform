@@ -37,6 +37,7 @@ from ..core.security import decrypt_text, mask_phone
 from ..core.state_machine_v12 import assert_lead_transition, assert_return_transition
 from ..core.time import as_utc
 from ..core.v12_enums import (
+    LeadSourceKind,
     LeadV12Status,
     ReturnReasonCode,
     ReturnV12Status,
@@ -1295,10 +1296,17 @@ def correct_region_and_redispatch(
         lead.pending_reason = "RETURN_REGION_CORRECTED"
         pool_target = LeadV12Status.READY_DISPATCH.value
     else:
-        assert_lead_transition(lead.status, LeadV12Status.PUBLIC_POOL)
-        lead.status = LeadV12Status.PUBLIC_POOL.value
+        # 公海池当前只承载加盟商供资来源客资；其他来源保持待派发并标记
+        # 无承接原因，由派发入口的候选资格校验兜底（评审 Issue 3）。
+        if lead.source_kind == LeadSourceKind.SUPPLIER_H5.value:
+            assert_lead_transition(lead.status, LeadV12Status.PUBLIC_POOL)
+            lead.status = LeadV12Status.PUBLIC_POOL.value
+            pool_target = LeadV12Status.PUBLIC_POOL.value
+        else:
+            assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
+            lead.status = LeadV12Status.READY_DISPATCH.value
+            pool_target = LeadV12Status.READY_DISPATCH.value
         lead.pending_reason = "PUBLIC_POOL_NO_LOCAL_RECEIVER"
-        pool_target = LeadV12Status.PUBLIC_POOL.value
     lead.review_status = "APPROVED"
     lead.review_note = reason.strip()
     lead.snapshot_version += 1

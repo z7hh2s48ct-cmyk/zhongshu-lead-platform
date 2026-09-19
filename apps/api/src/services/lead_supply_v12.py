@@ -1626,6 +1626,21 @@ def lead_supply_to_dict(
             or lead.submitter_user_id == principal.user_id
         )
     )
+    # 2026-09-17 S9：供资方不显示接收方身份；平台权限保留完整追溯。
+    _is_platform_viewer = bool(
+        principal
+        and (
+            principal.can("*")
+            or principal.can("lead.read")
+            or principal.can("lead.supplier.review")
+        )
+    )
+    _hide_receiver = bool(
+        principal
+        and principal.company_id
+        and principal.company_id == lead.supplier_company_id
+        and not _is_platform_viewer
+    )
     result = {
         "id": lead.id,
         "source_kind": lead.source_kind,
@@ -1672,10 +1687,18 @@ def lead_supply_to_dict(
             current_assignment.get("status") if current_assignment else None
         ),
         "current_receiver_company_id": (
-            current_assignment.get("receiver_company_id") if current_assignment else None
+            None
+            if _hide_receiver
+            else (current_assignment.get("receiver_company_id") if current_assignment else None)
         ),
         "current_receiver_company_name": (
-            current_assignment.get("receiver_company_name") if current_assignment else None
+            None
+            if _hide_receiver
+            else (
+                current_assignment.get("receiver_company_name")
+                if current_assignment
+                else None
+            )
         ),
         "assigned_by_user_id": (
             current_assignment.get("assigned_by_user_id") if current_assignment else None

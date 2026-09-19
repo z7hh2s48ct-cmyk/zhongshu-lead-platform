@@ -27,7 +27,7 @@ from ..core.models import (
     SystemConfig,
     User,
 )
-from ..core.security import decrypt_text, encrypt_text, mask_phone
+from ..core.security import decrypt_text, encrypt_text
 from .points_service import change_points, get_or_create_account, lock_points_account
 from .supply_termination import _published_rate
 
@@ -70,17 +70,24 @@ def at_risk_supply_points(db: Session, *, company_id: str, now: datetime) -> int
     return sum(int(row[0] or 0) for row in rows)
 
 
-def in_flight_withdrawal_points(db: Session, *, company_id: str) -> int:
-    total = db.scalar(
-        select(func.sum(SupplyPointsWithdrawal.points_requested)).where(
-            SupplyPointsWithdrawal.company_id == company_id,
-            SupplyPointsWithdrawal.status.in_(ACTIVE_WITHDRAWAL_STATUSES),
-        )
+def in_flight_withdrawal_points(
+    db: Session, *, company_id: str, exclude_withdrawal_id: str | None = None
+) -> int:
+    statement = select(func.sum(SupplyPointsWithdrawal.points_requested)).where(
+        SupplyPointsWithdrawal.company_id == company_id,
+        SupplyPointsWithdrawal.status.in_(ACTIVE_WITHDRAWAL_STATUSES),
     )
-    return int(total or 0)
+    if exclude_withdrawal_id is not None:
+        statement = statement.where(SupplyPointsWithdrawal.id != exclude_withdrawal_id)
+    return int(db.scalar(statement) or 0)
 
 
-def available_supply_points(db: Session, *, company_id: str) -> dict[str, Any]:
+def available_supply_points(
+    db: Session,
+    *,
+    company_id: str,
+    exclude_withdrawal_id: str | None = None,
+) -> dict[str, Any]:
     """可提现额 = 供客积分余额 - 冻结 - 在途申请 - 仍可能冲回部分。"""
 
     account = db.scalar(
@@ -88,7 +95,9 @@ def available_supply_points(db: Session, *, company_id: str) -> dict[str, Any]:
     )
     balance = int(account.supply_balance or 0) if account else 0
     frozen = int(account.frozen_supply_points or 0) if account else 0
-    in_flight = in_flight_withdrawal_points(db, company_id=company_id)
+    in_flight = in_flight_withdrawal_points(
+        db, company_id=company_id, exclude_withdrawal_id=exclude_withdrawal_id
+    )
     at_risk = at_risk_supply_points(db, company_id=company_id, now=_now())
     available = max(0, balance - frozen - in_flight - at_risk)
     return {
@@ -111,7 +120,13 @@ def create_withdrawal(
     payment_method: str,
     payee_qrcode_url: str | None = None,
 ) -> SupplyPointsWithdrawal:
-    _require_owner(db, company_id)
+    company = _require_owner(db, company_id)
+    if company.supplier_cooperation_status in {"TERMINATION_PENDING", "TERMINATED"}:
+        raise AppError(
+            "WITHDRAWAL_COOPERATION_INVALID",
+            "终止合作流程进行中，不能申请供客积分提现",
+            409,
+        )
     if payment_method not in PAYEE_METHODS:
         raise AppError("WITHDRAWAL_PAYEE_METHOD_INVALID", "收款方式无效", 422)
     if not payee_name.strip() or not payee_account.strip():
@@ -173,11 +188,13 @@ def review_withdrawal(
         item.status = "REJECTED"
         item.review_note = review_note.strip()
         item.reviewed_by = reviewed_by
-        item.approved_at = _now()
         db.flush()
         return item
     account = lock_points_account(db, item.company_id)
-    availability = available_supply_points(db, company_id=item.company_id)
+    # 排除被审申请自身：PENDING_REVIEW 已计入在途，再比较会把自身扣两次。
+    availability = available_supply_points(
+        db, company_id=item.company_id, exclude_withdrawal_id=item.id
+    )
     if item.points_requested > availability["available"]:
         raise AppError(
             "WITHDRAWAL_AMOUNT_EXCEEDS_AVAILABLE",
@@ -284,6 +301,16 @@ def fail_offline_payment(
     item.payment_note = f"付款失败：{note.strip()}"
     item.paid_at = None
     item.payment_recorded_by = decided_by
+    history = list(item.payment_history_json or [])
+    history.append(
+        {
+            "at": _now().isoformat(),
+            "event": "PAYMENT_FAILED",
+            "note": note.strip(),
+            "recorded_by": decided_by,
+        }
+    )
+    item.payment_history_json = history
     db.flush()
     return item
 
@@ -300,6 +327,13 @@ def confirm_offline_payment(
         return item
     if item.status != "PAID_PENDING_WRITE_OFF" or not item.payment_external_reference or item.paid_at is None:
         raise AppError("WITHDRAWAL_PAYMENT_NOT_RECORDED", "请先登记并核实线下付款", 409)
+    company = db.get(Company, item.company_id)
+    if company.supplier_cooperation_status in {"TERMINATION_PENDING", "TERMINATED"}:
+        raise AppError(
+            "WITHDRAWAL_COOPERATION_INVALID",
+            "终止合作流程进行中，需先完成终止结算或恢复合作",
+            409,
+        )
     if int(item.payment_amount_cents or 0) != int(item.cash_amount_cents_snapshot or 0):
         raise AppError("WITHDRAWAL_PAYMENT_AMOUNT_MISMATCH", "付款金额与审批快照不一致", 409)
     account = db.scalar(
@@ -358,6 +392,7 @@ def request_payment_change(
     item.change_payee_name_encrypted = encrypt_text(payee_name.strip())
     item.change_payee_account_encrypted = encrypt_text(payee_account.strip())
     item.change_payment_method = payment_method
+    item.change_payee_qrcode_url = (payee_qrcode_url or "").strip() or None
     item.change_reason = reason.strip()
     item.change_status = "PENDING"
     item.change_requested_by = requested_by
@@ -382,11 +417,20 @@ def review_payment_change(
         item.payee_name_encrypted = item.change_payee_name_encrypted
         item.payee_account_encrypted = item.change_payee_account_encrypted
         item.payment_method = item.change_payment_method or item.payment_method
+        if item.change_payee_qrcode_url:
+            item.payee_qrcode_url = item.change_payee_qrcode_url
     item.change_status = "APPROVED" if normalized == "APPROVE" else "REJECTED"
     item.change_reviewed_by = reviewed_by
     item.change_reviewed_at = _now()
     db.flush()
     return item
+
+
+def _mask_payee_account(value: str | None) -> str | None:
+    """收款账号脱敏：银行账号/收款码不是手机号，统一只留末 4 位。"""
+    if not value:
+        return None
+    return f"****{value[-4:]}" if len(value) > 4 else "****"
 
 
 def withdrawal_to_dict(
@@ -415,9 +459,10 @@ def withdrawal_to_dict(
         "points_requested": int(item.points_requested),
         "requested_by": item.requested_by,
         "requested_by_name": requester.display_name if requester else None,
+        # payee_name 不做 reveal 门控：负责人查看自己的申请属自查场景。
         "payee_name": payee_name,
         "payee_account": payee_account if reveal_payee else None,
-        "payee_account_masked": mask_phone(payee_account) if reveal_payee else None,
+        "payee_account_masked": _mask_payee_account(payee_account) if reveal_payee else None,
         "payment_method": item.payment_method,
         "payee_qrcode_url": item.payee_qrcode_url if reveal_payee else None,
         "cash_cents_per_point_snapshot": item.cash_cents_per_point_snapshot,
@@ -432,6 +477,7 @@ def withdrawal_to_dict(
         "change_reason": item.change_reason,
         "change_payee_name": change_payee_name if reveal_payee else None,
         "change_payee_account": change_payee_account if reveal_payee else None,
+        "change_payee_qrcode_url": item.change_payee_qrcode_url if reveal_payee else None,
         "change_payment_method": item.change_payment_method,
         "cancel_note": item.cancel_note,
         "created_at": item.created_at.isoformat(),

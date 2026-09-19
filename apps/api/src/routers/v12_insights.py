@@ -1105,16 +1105,23 @@ def supplier_performance_report(
     ):
         raise AppError("FORBIDDEN", "无权查看供资业绩", 403)
     company_id = principal.company_id
-    members = db.execute(
-        select(User.id, User.display_name, Role.code)
+    member_rows = db.execute(
+        select(User.id, User.display_name, User.status, Role.code)
         .join(UserRole, UserRole.user_id == User.id)
         .join(Role, Role.id == UserRole.role_id)
         .where(
             User.company_id == company_id,
-            User.status == "ACTIVE",
             Role.code.in_(["FRANCHISE_OWNER", "FRANCHISE_EMPLOYEE"]),
         )
     ).all()
+    # 停用成员保留行（人员停用不丢历史贡献）；双角色账号按用户去重。
+    members: list[Any] = []
+    seen_user_ids: set[str] = set()
+    for row in member_rows:
+        if row.id in seen_user_ids:
+            continue
+        seen_user_ids.add(row.id)
+        members.append(row)
     # 员工只看本人；负责人看本公司全部成员。
     if principal.has_any_role("FRANCHISE_EMPLOYEE") and not principal.can("assignment.own.read"):
         members = [row for row in members if row.id == principal.user_id]
@@ -1192,12 +1199,13 @@ def supplier_performance_report(
 
     employees = []
     totals = {"uploaded": 0, "effective": 0, "points_credited": 0, "points_reversed": 0, "points_net": 0}
-    for user_id, display_name, role_code in members:
+    for user_id, display_name, user_status, role_code in members:
         credited = credited_map.get(user_id, 0)
         reversed_points = reversed_map.get(user_id, 0)
         row = {
             "user_id": user_id,
             "display_name": display_name,
+            "user_status": user_status,
             "role_code": role_code,
             "uploaded": uploads.get(user_id, 0),
             "effective": effectives.get(user_id, 0),

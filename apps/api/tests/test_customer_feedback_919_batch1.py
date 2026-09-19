@@ -96,6 +96,19 @@ def test_region_redispatch_with_receiver_coverage_returns_to_dispatch_pool(db):
     assert (setup['lead'].province, setup['lead'].city, setup['lead'].district) == ('河南省', '郑州市', '中原区')
 
 
+def test_region_redispatch_platform_source_without_coverage_stays_dispatchable(db):
+    setup, request, args = _redispatch_case(db)
+    setup["lead"].source_kind = "PLATFORM_MANUAL"
+    setup["lead"].source_type = "PLATFORM_MANUAL"
+    db.commit()
+    result = service.correct_region_and_redispatch(db, **args)
+    db.commit()
+    # 公海池只承载供资来源客资；平台来源无承接时保持待派发并标记原因。
+    assert result.pool_target == "READY_DISPATCH"
+    assert setup["lead"].status == "READY_DISPATCH"
+    assert setup["lead"].pending_reason == "PUBLIC_POOL_NO_LOCAL_RECEIVER"
+
+
 def test_region_redispatch_idempotent_replay_keeps_pool_target(db):
     setup, request, args = _redispatch_case(db)
     service.correct_region_and_redispatch(db, **args)

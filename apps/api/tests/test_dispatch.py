@@ -17,11 +17,11 @@ def operation_principal() -> Principal:
 
 
 def test_candidate_and_single_active_dispatch(db) -> None:
-    company = create_company(db, CompanyCreateBody(code="SH-A", name="上海旧改加盟商", region_codes=["310100"], capabilities=[{"category_code":"OLD_RENOVATION","brand_code":None}]))
+    company = create_company(db, CompanyCreateBody(code="SH-A", name="上海旧改加盟商", region_codes=["310101"], capabilities=[{"category_code":"OLD_RENOVATION","brand_code":None}]))
     company.primary_user_id = "wechat-user"
-    lead = Lead(customer_name="张先生", phone_encrypted=encrypt_text("13800138000"), phone_hash=hash_phone("13800138000"), city="上海市", region_code="310100", category_code="OLD_RENOVATION", status="QUALIFIED")
+    lead = Lead(customer_name="张先生", phone_encrypted=encrypt_text("13800138000"), phone_hash=hash_phone("13800138000"), city="上海市", region_code="310101", category_code="OLD_RENOVATION", status="QUALIFIED")
     db.add(lead)
-    db.add(LeadPriceRule(region_code="310100", category_code="OLD_RENOVATION", points_cost=150, priority=1, version=1, status="PUBLISHED"))
+    db.add(LeadPriceRule(region_code="310101", category_code="OLD_RENOVATION", points_cost=150, priority=1, version=1, status="PUBLISHED"))
     db.flush()
     change_points(db, company_id=company.id, delta=1000, ledger_type="ADJUST", business_type="TEST", business_id="seed", idempotency_key="seed-points-01", created_by=None)
     db.commit()

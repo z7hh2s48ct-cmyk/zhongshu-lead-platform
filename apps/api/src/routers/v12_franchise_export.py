@@ -71,18 +71,26 @@ def build_claimed_lead_export_rows(
     ).all()
 
     reveal_phone = principal.can("lead.own.phone.read") or principal.can("*")
+
+    def _csv_safe(value: str) -> str:
+        # 防 CSV 公式注入：姓名/备注来自外部输入，= + - @ 开头的单元格加前缀。
+        text = str(value or "")
+        return f"'{text}" if text[:1] in ("=", "+", "-", "@", "\t") else text
+
     result: list[tuple[str, ...]] = []
     for assignment, lead, assignee in rows:
         phone = decrypt_text(lead.phone_encrypted) or ""
         result.append(
             (
-                lead.customer_name or "",
-                phone if reveal_phone else mask_phone(phone),
-                "".join(part or "" for part in (lead.province, lead.city, lead.district)),
-                lead.need_summary or "",
+                _csv_safe(lead.customer_name or ""),
+                _csv_safe(phone if reveal_phone else mask_phone(phone)),
+                _csv_safe(
+                    "".join(part or "" for part in (lead.province, lead.city, lead.district))
+                ),
+                _csv_safe(lead.need_summary or ""),
                 _format_time(assignment.assigned_at),
                 _format_time(assignment.claimed_at),
-                (assignee.display_name if assignee else "") or "",
+                _csv_safe((assignee.display_name if assignee else "") or ""),
             )
         )
     return result

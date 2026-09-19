@@ -119,6 +119,55 @@ def test_withdrawal_full_flow_freezes_then_writes_off_once(db):
     assert db.get(PointsAccount, account.id).supply_balance == 700
 
 
+def test_withdrawal_review_allows_more_than_half_available(db):
+    """评审 Critical#1 回归：审核时被审申请自身不能重复占用在途额度。"""
+    setup, _ = _setup_wallet(db)
+    _seed_rate(db)
+    item = _apply(db, setup, points=600)
+    reviewed = review_withdrawal(
+        db,
+        withdrawal_id=item.id,
+        reviewed_by=setup["reviewer"].id,
+        decision="APPROVE",
+        review_note="超过一半余额也应可审",
+    )
+    db.commit()
+    assert reviewed.status == "APPROVED_PENDING_PAYMENT"
+    # 但剩余额度不足以再发起第二笔同样的申请。
+    with pytest.raises(AppError):
+        _apply(db, setup, points=600)
+
+
+def test_withdrawal_and_termination_mutually_exclusive(db):
+    setup, _ = _setup_wallet(db)
+    _seed_rate(db)
+    item = _apply(db, setup, points=100)
+    review_withdrawal(
+        db,
+        withdrawal_id=item.id,
+        reviewed_by=setup["reviewer"].id,
+        decision="APPROVE",
+        review_note="在途提现阻断终止结算",
+    )
+    db.commit()
+    from apps.api.src.services.supply_termination import termination_blockers
+
+    codes = [blocker["code"] for blocker in termination_blockers(db, setup["receiver"].id)]
+    assert "SUPPLY_WITHDRAWAL_IN_FLIGHT" in codes
+
+    # 反向：终止流程进行中不能新申请提现。
+    db.get(Company, setup["receiver"].id) if False else None
+    from apps.api.src.core.models import Company as CompanyModel
+
+    company = db.get(CompanyModel, setup["receiver"].id)
+    company.supplier_cooperation_status = "TERMINATION_PENDING"
+    db.commit()
+    with pytest.raises(AppError) as error:
+        _apply(db, setup, points=50)
+    assert error.value.code == "WITHDRAWAL_COOPERATION_INVALID"
+    db.rollback()
+
+
 def test_withdrawal_reject_exceeds_available_and_release_on_reject(db):
     setup, account = _setup_wallet(db)
     _seed_rate(db)
@@ -184,11 +233,13 @@ def test_payment_change_requires_review_and_only_before_payment(db):
         requested_by=setup["receiver_user"].id,
         payee_name="李四",
         payee_account="6222020200998877665",
-        payment_method="BANK",
+        payment_method="WECHAT_QR",
         reason="原账户停用",
+        payee_qrcode_url="https://files.example/new-qr.png",
     )
     db.commit()
     assert changed.change_status == "PENDING"
+    assert changed.change_payee_qrcode_url == "https://files.example/new-qr.png"
     with pytest.raises(AppError):
         record_offline_payment(
             db,
@@ -206,6 +257,8 @@ def test_payment_change_requires_review_and_only_before_payment(db):
     db.commit()
     assert approved.change_status == "APPROVED"
     assert decrypt_text(approved.payee_name_encrypted) == "李四"
+    # 评审 Issue 6 回归：二维码方式变更审批通过后必须回写新二维码。
+    assert approved.payee_qrcode_url == "https://files.example/new-qr.png"
 
     record_offline_payment(
         db,
@@ -269,16 +322,6 @@ def test_withdrawal_http_endpoints(api_client):
         db.flush()
         assign_role(db, employee, "FRANCHISE_EMPLOYEE")
         employee_principal = _principal(employee, "assignment.employee.read")
-    app.dependency_overrides[get_current_principal] = lambda: owner_principal
-    try:
-        forbidden = client.post(
-            "/api/v1/v1.2/supply-withdrawals",
-            json={"points_requested": 100, "payee_name": "张三", "payee_account": "123", "payment_method": "BANK"},
-        )
-        # employee principal 有公司上下文之前先验证员工无权：切换到员工再试
-    finally:
-        app.dependency_overrides.pop(get_current_principal, None)
-
     app.dependency_overrides[get_current_principal] = lambda: employee_principal
     try:
         employee_forbidden = client.post(

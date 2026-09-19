@@ -230,7 +230,7 @@ def test_pending_or_terminated_cooperation_blocks_supply_wallet_debits(db) -> No
 def test_terminated_supplier_cooperation_keeps_receiving_claiming_and_followup(db) -> None:
     company, owner = _company(db, "TERM-RECEIVER")
     company.supplier_cooperation_status = "TERMINATED"
-    db.add(CompanyServiceRegion(company_id=company.id, region_code="310100", active=True))
+    db.add(CompanyServiceRegion(company_id=company.id, region_code="310101", active=True))
     db.add(CompanyCapability(company_id=company.id, category_code="RENOVATION", active=True))
     change_points(
         db, company_id=company.id, delta=200, ledger_type="RECHARGE",
@@ -242,7 +242,7 @@ def test_terminated_supplier_cooperation_keeps_receiving_claiming_and_followup(d
         phone_encrypted=encrypt_text("13800138088"),
         phone_hash=hash_phone("13800138088"),
         city="上海市",
-        region_code="310100",
+        region_code="310101",
         category_code="RENOVATION",
         status="QUALIFIED",
     )
