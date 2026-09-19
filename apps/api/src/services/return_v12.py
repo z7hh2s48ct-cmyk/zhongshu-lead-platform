@@ -25,7 +25,6 @@ from ..core.models import (
     Lead,
     PointsAccount,
     PointsLedger,
-    Region,
     ReturnEvidence,
     ReturnRequest,
     Role,
@@ -44,7 +43,9 @@ from ..core.v12_enums import (
     RewardStatus,
     VerificationTaskType,
 )
+from .china_regions import match_province_city_district
 from .company_assignment_v12 import require_return_request_access
+from .dispatch_v12 import has_receiver_coverage
 from .lead_correction_guard import require_correction_review_resolved
 from .points_service import change_points
 from .return_clock import appeal_deadline
@@ -88,6 +89,8 @@ class ReturnFinalReviewResult:
     request: ReturnRequest
     refund_ledger: PointsLedger | None
     idempotent: bool = False
+    # 修改实际区域重新入池时的去向：READY_DISPATCH（有承接）或 PUBLIC_POOL（无承接）。
+    pool_target: str = LeadV12Status.READY_DISPATCH.value
 
 
 @dataclass(frozen=True, slots=True)
@@ -1263,28 +1266,39 @@ def correct_region_and_redispatch(
         if list(codes) != recorded:
             raise AppError("RETURN_REGION_ALREADY_CORRECTED", "此退回已完成区域修改，请刷新后操作", 409)
         return ReturnFinalReviewResult(request=request,
-            refund_ledger=db.get(PointsLedger, request.refund_ledger_id), idempotent=True)
+            refund_ledger=db.get(PointsLedger, request.refund_ledger_id), idempotent=True,
+            pool_target=previous.payload.get("pool_target", LeadV12Status.READY_DISPATCH.value))
     if request.reason_code != "OUT_OF_SERVICE_REGION":
         raise AppError("RETURN_REGION_REASON_INVALID", "仅超出服务区域的退回可修改区域重新分配", 409)
     if lead.current_assignment_id != assignment.id or assignment.status != AssignmentStatus.RETURN_PENDING.value:
         raise AppError("RETURN_ASSIGNMENT_STATE_INVALID", "原派发已解除或不处于退回审核状态", 409)
-    regions = [db.get(Region, code) for code in codes]
-    province, city, district = regions
-    if (any(region is None or not region.active for region in regions)
-        or province.level != "PROVINCE" or city.level != "CITY" or district.level != "DISTRICT"
-        or city.parent_code != province.code or district.parent_code != city.code):
+    # 前端下拉使用静态快照，后端校验必须同源；数据库 regions 表只是按需
+    # 物化的服务区域行，没有省级行，用它校验会误拦所有合法组合。
+    matched = match_province_city_district(*codes)
+    if matched is None:
         raise AppError("RETURN_REGION_INVALID", "请选择有效且相互匹配的省、市、区县", 422)
+    province, city, district = matched
     before_region = {"province": lead.province, "city": lead.city,
         "district": lead.district, "region_code": lead.region_code}
     result = _final_review_return(db, return_id=return_id, principal=principal,
         decision="APPROVE", note=reason)
     # The established approval path handles original-ledger refund and reward
     # reversal. Only this explicit usable-lead action reopens the closed lead.
-    assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
-    lead.province, lead.city, lead.district = province.name, city.name, district.name
-    lead.region_code = district.code
-    lead.status = LeadV12Status.READY_DISPATCH.value
-    lead.pending_reason = "RETURN_REGION_CORRECTED"
+    lead.province, lead.city, lead.district = (
+        province["name"], city["name"], district["name"],
+    )
+    lead.region_code = district["code"]
+    # 去向规则：改后区域有可承接的加盟商时回派发池；无可承接时进公海池。
+    if has_receiver_coverage(db, lead):
+        assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
+        lead.status = LeadV12Status.READY_DISPATCH.value
+        lead.pending_reason = "RETURN_REGION_CORRECTED"
+        pool_target = LeadV12Status.READY_DISPATCH.value
+    else:
+        assert_lead_transition(lead.status, LeadV12Status.PUBLIC_POOL)
+        lead.status = LeadV12Status.PUBLIC_POOL.value
+        lead.pending_reason = "PUBLIC_POOL_NO_LOCAL_RECEIVER"
+        pool_target = LeadV12Status.PUBLIC_POOL.value
     lead.review_status = "APPROVED"
     lead.review_note = reason.strip()
     lead.snapshot_version += 1
@@ -1295,10 +1309,13 @@ def correct_region_and_redispatch(
             "after_region": {"province": lead.province, "city": lead.city,
                 "district": lead.district, "region_code": lead.region_code},
             "region_codes": list(codes), "reason": reason.strip(),
+            "pool_target": pool_target,
             "refund_ledger_id": result.refund_ledger.id},
     ))
     db.flush()
-    return result
+    return ReturnFinalReviewResult(request=result.request,
+        refund_ledger=result.refund_ledger, idempotent=result.idempotent,
+        pool_target=pool_target)
 
 
 def final_review_return(

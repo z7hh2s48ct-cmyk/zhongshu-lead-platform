@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from urllib.parse import quote
 
@@ -15,7 +16,8 @@ from ..core.enums import EvidenceType, VerificationTaskStatus
 from ..core.errors import AppError
 from ..core.models import Assignment, Lead, ReturnEvidence, ReturnRequest, VerificationTask
 from ..core.responses import ok, page
-from ..core.v12_enums import ReturnV12Status, VerificationTaskType
+from ..core.security import hash_phone
+from ..core.v12_enums import LeadV12Status, ReturnV12Status, VerificationTaskType
 from ..schemas.v12_returns import (
     ReturnDirectInvalidBody,
     ReturnDraftV12Body,
@@ -293,6 +295,7 @@ def list_returns_v12(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
     company_id: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
@@ -332,6 +335,31 @@ def list_returns_v12(
         # 运营默认队列只是已正式提交的申请；草稿仍留在
         # 发起人侧继续补材料，管理员可通过 status=DRAFT 显式查阅。
         filters.append(ReturnRequest.submitted_at.is_not(None))
+    normalized_keyword = keyword.strip() if keyword else None
+    if normalized_keyword:
+        # 搜索口径：退回编号（列表展示的 TH 编号取自 id 去连字符片段）、
+        # 客户姓名、11 位手机号（按号码指纹精确匹配）。
+        lead_keyword_filters = [Lead.customer_name.contains(normalized_keyword)]
+        keyword_digits = "".join(ch for ch in normalized_keyword if ch.isdigit())
+        if len(keyword_digits) == 11 and keyword_digits.startswith("1"):
+            lead_keyword_filters.append(Lead.phone_hash == hash_phone(keyword_digits))
+        compact_keyword = re.sub(r"[^0-9A-Za-z]", "", normalized_keyword).upper()
+        code_filters = []
+        if compact_keyword:
+            code_filters.append(
+                func.replace(ReturnRequest.id, "-", "").contains(compact_keyword)
+            )
+        filters.append(
+            or_(
+                *code_filters,
+                ReturnRequest.lead_id.in_(
+                    select(Lead.id).where(
+                        Lead.deleted_at.is_(None),
+                        or_(*lead_keyword_filters),
+                    )
+                ),
+            )
+        )
     total = db.scalar(select(func.count(ReturnRequest.id)).where(*filters)) or 0
     items = db.scalars(
         select(ReturnRequest)
@@ -819,6 +847,7 @@ def correct_return_region(
         resource_type="return_request", resource_id=result.request.id,
         company_id=result.request.company_id,
         after={"lead_id": lead.id, "region_code": body.district_code,
+            "pool_target": result.pool_target,
             "refund_ledger_id": result.refund_ledger.id, "idempotent": result.idempotent},
         reason=body.reason, request_id=request.state.request_id)
     db.commit()
@@ -826,7 +855,13 @@ def correct_return_region(
     data["lead_region"] = {"province": lead.province, "city": lead.city,
         "district": lead.district, "region_code": lead.region_code}
     data["idempotent"] = result.idempotent
-    return ok(request, data, "原领取积分已退还，区域已修改，客资可重新分配")
+    data["pool_target"] = result.pool_target
+    message = (
+        "原领取积分已退还，区域已修改；暂无可承接的加盟商，客资已转入公海池"
+        if result.pool_target == LeadV12Status.PUBLIC_POOL.value
+        else "原领取积分已退还，区域已修改，客资可重新分配"
+    )
+    return ok(request, data, message)
 
 
 @router.post("/returns/{return_id}/final-review")

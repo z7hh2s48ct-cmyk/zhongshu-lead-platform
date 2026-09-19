@@ -275,8 +275,9 @@ def list_service_areas(db: Session, company_id: str) -> list[CompanyServiceAreaV
 
 def _validate_region_hierarchy(db: Session, regions: dict[str, Region], primary_city_code: str) -> None:
     primary = db.get(Region, primary_city_code)
-    if primary is None or not primary.active or primary.level != "CITY":
-        raise AppError("PRIMARY_CITY_LEVEL_INVALID", "主要城市必须选择城市级地区", 422)
+    # 主要地区支持城市或区县级（含县级市），主体归属可落到县（2026-09-19 S12）。
+    if primary is None or not primary.active or primary.level not in {"CITY", "DISTRICT"}:
+        raise AppError("PRIMARY_CITY_LEVEL_INVALID", "主要城市必须选择城市或区县级地区", 422)
     invalid_codes: list[str] = []
     for code, region in regions.items():
         if region.level == "CITY":
