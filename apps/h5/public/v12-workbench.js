@@ -97,7 +97,8 @@ async function home(){
   const assignmentsRequest=canReadAssignments()
     ?Promise.all(HOME_ASSIGNMENT_STATUSES.map(status=>api(`/v1.2/assignments?status=${status}&page=1&page_size=3`))).then(pages=>pages.flatMap(page=>page.items||[]))
     :Promise.resolve([]);
-  const [d,account,assignmentRows]=await Promise.all([api('/v1.2/reports/own'),accountRequest,assignmentsRequest]);
+  const performanceRequest=companyId?api('/v1.2/reports/supplier-performance').catch(()=>''):Promise.resolve(null);
+  const [d,account,assignmentRows,performance]=await Promise.all([api('/v1.2/reports/own'),accountRequest,assignmentsRequest,performanceRequest]);
   S.unreadNotifications=Number(d.unread_notifications||0);
   const received=d.received_assignments?.by_status||{};
   const returnsByStatus=d.returns?.by_status||{};
@@ -115,7 +116,8 @@ async function home(){
   const secondaryMetrics=owner?franchiseHomeMetrics([{labelText:'公司待跟进',value:following,view:followView},{labelText:'消耗积分',value:consumedPoints,view:'points'},{labelText:'退回处理中',value:returnProcessing,view:'returns'}]):franchiseHomeMetrics([{labelText:'待跟进',value:following,view:followView},{labelText:'供资进度',value:supplierLeadTotal,view:'leads'},{labelText:'退回处理中',value:returnProcessing,view:'returns'}]);
   const taskView=owner&&waitingClaim?'assignments':followView;
   const ownerTodos=owner?companyTodoList({waitingClaim,following,supplyRework,returnProcessing}):'';
-  shell(`${franchiseHomeGreeting()}${franchiseHomeHero(hero)}${ownerTodos}${secondaryMetrics}${homeTaskList(assignmentRows,taskView,owner?'进行中的客资':'待处理客资')}`);
+  const performanceCard=(()=>{if(!performance||!performance.employees)return '';const rows=performance.employees.slice(0,5).map(member=>`<article class="wb-item"><div class="wb-item-top"><h3>${esc(member.display_name||'成员')}</h3><span>${esc(member.role_code==='FRANCHISE_OWNER'?'负责人':'员工')}</span></div><p>上传 ${member.uploaded} · 有效 ${member.effective} · 净贡献 ${member.points_net} 分（入账 ${member.points_credited} / 冲回 ${member.points_reversed}）</p></article>`).join('');if(!rows)return '';return `<section class="wb-card"><div class="wb-card-head"><h2>员工供资业绩</h2></div><div class="wb-list">${rows}</div></section>`;})();
+  shell(`${franchiseHomeGreeting()}${franchiseHomeHero(hero)}${ownerTodos}${secondaryMetrics}${performanceCard}${homeTaskList(assignmentRows,taskView,owner?'进行中的客资':'待处理客资')}`);
 }
 function profileIdentity(role){const name=String(S.me?.display_name||'当前用户').trim()||'当前用户';const initial=name.slice(0,1);return `<section class="wb-profile-summary"><span class="wb-profile-avatar" aria-hidden="true">${esc(initial)}</span><div><p>我的</p><h1>${esc(name)}</h1><span>${esc(S.me?.company_name||'所属加盟商')} · ${esc(role)}</span></div></section>`}
 function profileSecurity(){const hasPassword=Boolean(S.me?.has_password);return `<section class="wb-card wb-account-security"><div class="wb-card-head"><h2>账户与安全</h2></div><div class="wb-account-actions"><button class="wb-account-action" id="profile-username" type="button"><i>${icon('user')}</i><span><b>登录账号</b><small>${esc(S.me?.username||'--')}</small></span><em>${icon('chevron-right')}</em></button><button class="wb-account-action" id="profile-password" type="button"><i>${icon('key-round')}</i><span><b>${hasPassword?'登录密码':'备用登录密码'}</b><small>${hasPassword?'修改密码':'公众号登录之外的备用方式'}</small></span><em>${icon('chevron-right')}</em></button></div></section>`}
@@ -540,7 +542,9 @@ async function assignments(){
     return item(`序号 ${rowSequence(page,index)} · ${x.customer_name||x.lead?.customer_name||'客户'}`,x.status,`<p>${esc(x.phone||x.phone_masked||'领取后查看')} · ${esc(x.city||x.lead?.city||'')}</p><p>接收确认：${esc(receiveConfirmation)} · 有效认定：${esc(assignmentEffectiveRecognition(x,x.current_follow_status))}</p><p>当前跟进：${esc(currentFollow)} · ${x.status==='PENDING_CLAIM'?'当前领取积分':'实际扣除积分'} ${x.points_price||0}</p><p>${x.status==='PENDING_CLAIM'?'点击领取时将再次核对后台最新积分。':''}</p><p>${x.status==='PENDING_CLAIM'?deadlineNotice(x.expires_at,'领取截止'):esc(returnAppealTiming(x))}</p>${collaboration}`,`<button class="wb-btn" data-assignment="${x.id}">详情</button>${x.status==='PENDING_CLAIM'&&canClaimAssignment()?`<button class="wb-btn primary" data-claim="${x.id}" data-claim-points="${esc(x.points_price)}" ${deadlineButtonAttributes(x.expires_at)}>领取</button><button class="wb-btn danger" data-refuse="${x.id}" ${deadlineButtonAttributes(x.expires_at)}>拒绝领取</button>`:''}${manage}`);
   }).join('');
   const title=followMode?'跟进':'接收';
-  shell(`<section class="wb-page-head"><h1>${title}</h1></section><div class="wb-list">${list||`<div class="wb-empty">暂无${title==='接收'?'待领取':'待跟进'}客资</div>`}</div>${workbenchPager([page])}`);
+  const exportVisible=(isFranchiseOwner()&&can('assignment.own.read'))||(can('assignment.employee.read')&&!isFranchiseOwner());
+  const exportLink=exportVisible?`<a class="wb-btn" href="/api/v1/v1.2/company/claimed-leads/export" download>导出已领取客资</a>`:'';
+  shell(`<section class="wb-page-head"><div><h1>${title}</h1></div>${exportLink}</section><div class="wb-list">${list||`<div class="wb-empty">暂无${title==='接收'?'待领取':'待跟进'}客资</div>`}</div>${workbenchPager([page])}`);
   bindWorkbenchPager(assignments);
   document.querySelectorAll('[data-assignment]').forEach(b=>b.onclick=()=>assignmentDetail(b.dataset.assignment));
   document.querySelectorAll('[data-claim]').forEach(b=>b.onclick=()=>claim(b.dataset.claim,b,b.dataset.claimPoints));
