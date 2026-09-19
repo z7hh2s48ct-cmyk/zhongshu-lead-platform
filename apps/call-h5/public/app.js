@@ -359,6 +359,20 @@ async function verify() {
   document.querySelectorAll('[data-filter]').forEach((node) => { node.onclick = () => { location.hash = `#/verify${node.dataset.filter ? `?status=${node.dataset.filter}` : ''}`; }; });
 }
 
+async function loadDialStats() {
+  try {
+    return await api('/v1.2/pre-dispatch-verifications/dial-stats');
+  } catch (error) {
+    return null; // 统计加载失败不阻塞记录页。
+  }
+}
+
+function dialStatsCards(stats) {
+  if (!stats) return '';
+  const entries = [['今日', stats.today], ['本周', stats.week], ['本月', stats.month]];
+  return `<section class="metrics callDialStats" aria-label="我的通话量统计">${entries.map(([label, value]) => `<div class="metric"><span>${esc(label)}拨打</span><b>${Number(value?.dials || 0)}</b><small>提交核验 ${Number(value?.submitted || 0)} 次</small></div>`).join('')}</section>`;
+}
+
 async function records() {
   if (!await auth()) return;
   if (!isSubmittedHistoryRoute()) return;
@@ -370,7 +384,9 @@ async function records() {
     state.nextPage.PRE_DISPATCH === 1
     && state.nextPage.RETURN === 1
   );
+  const statsPromise = loadDialStats();
   const historyData = needsFirstPage ? await loadSubmittedHistory() : submittedHistoryView();
+  state.dialStats = await statsPromise;
   renderSubmittedHistory(historyData, state);
 }
 
@@ -378,7 +394,7 @@ function renderSubmittedHistory(historyData, state = submittedHistoryState) {
   if (!historyData || !submittedHistoryRequestIsCurrent(state)) return;
   const items = historyData.items.filter((item) => item.submitted_at);
   const loadMore = historyData.hasMore ? '<button class="btn outline block" id="load-more-records">加载更多记录</button>' : '';
-  zsSetSafeHtml(app, shell(`<h1>核验记录</h1><p class="muted">已提交的内容只保留事实结论，后续业务处置由运营人员完成。</p>${items.length ? `${items.map(taskCard).join('')}${loadMore}` : emptyState('暂无已提交记录', '完成核验并提交后，记录会保留在这里。')}`, 'records', '核验记录'));
+  zsSetSafeHtml(app, shell(`<h1>核验记录</h1><p class="muted">已提交的内容只保留事实结论，后续业务处置由运营人员完成。</p>${dialStatsCards(state.dialStats)}${items.length ? `${items.map(taskCard).join('')}${loadMore}` : emptyState('暂无已提交记录', '完成核验并提交后，记录会保留在这里。')}`, 'records', '核验记录'));
   bind(() => { submittedHistoryState = null; route(); });
   bindTaskCards();
   document.querySelector('#load-more-records')?.addEventListener('click', async (event) => {

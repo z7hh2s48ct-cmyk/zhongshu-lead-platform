@@ -17,7 +17,7 @@ from ..core.security import decrypt_text, normalize_phone
 from ..core.state_machine_v12 import assert_lead_transition
 from ..core.time import as_utc
 from ..core.v12_enums import LeadSourceKind, LeadV12Status, VerificationTaskType
-from .dispatch_v12 import approved_lead_pool_target
+from .dispatch_v12 import approved_lead_pool_target, lead_missing_district_region
 from .lead_correction_guard import require_correction_review_resolved
 from .supply_termination import require_supply_write_enabled
 from .verification_service import latest_published_template
@@ -118,10 +118,16 @@ def reopen_closed_lead(
             "未接、拒接或无法核验的客资必须先重新进入电销核验",
             409,
         )
-    assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
-    lead.status = LeadV12Status.READY_DISPATCH.value
     lead.current_assignment_id = None
-    lead.pending_reason = "REOPENED_FOR_REDISPATCH"
+    if lead_missing_district_region(db, lead):
+        # 2026-09-19 S7：缺县的已关闭客资重新启用后转电销补县，不回派发池。
+        assert_lead_transition(lead.status, LeadV12Status.PENDING_TELESALES_VERIFY)
+        lead.status = LeadV12Status.PENDING_TELESALES_VERIFY.value
+        lead.pending_reason = "DISTRICT_PENDING_VERIFY"
+    else:
+        assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
+        lead.status = LeadV12Status.READY_DISPATCH.value
+        lead.pending_reason = "REOPENED_FOR_REDISPATCH"
     lead.review_status = "APPROVED"
     lead.review_note = normalized_reason
     lead.reviewed_at = _now()
@@ -805,6 +811,8 @@ def decide_pre_dispatch_disposition(
         lead.pending_reason = (
             "PUBLIC_POOL_NO_LOCAL_RECEIVER"
             if target is LeadV12Status.PUBLIC_POOL
+            else "DISTRICT_PENDING_VERIFY"
+            if target is LeadV12Status.PENDING_TELESALES_VERIFY
             else None
         )
     elif normalized_decision == "RETURN_REWORK":

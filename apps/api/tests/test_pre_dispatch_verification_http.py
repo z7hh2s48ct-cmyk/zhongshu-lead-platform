@@ -58,7 +58,7 @@ def test_pre_dispatch_http_flow_never_allows_telesales_to_self_assign(api_client
             phone_encrypted=encrypt_text("13900139010"),
             phone_hash=hash_phone("13900139010"),
             city="上海市",
-            region_code="310000",
+            region_code="310101",
             category_code="OLD_RENOVATION",
             need_summary="确认装修需求真实性",
             consent_confirmed=True,
@@ -216,7 +216,7 @@ def test_pre_dispatch_submitted_history_orders_by_submission_and_batches_leads(a
                 phone_encrypted=encrypt_text(f"139001391{index:02d}"),
                 phone_hash=hash_phone(f"139001391{index:02d}"),
                 city="上海市",
-                region_code="310000",
+                region_code="310101",
                 category_code="OLD_RENOVATION",
                 need_summary="验证提交历史排序和批量读取",
                 consent_confirmed=True,
@@ -321,6 +321,21 @@ def test_verified_platform_lead_correction_recomputes_dispatch_candidates(api_cl
             db.add(area)
         area.active = True
         area.review_status = "APPROVED"
+        district_area = db.scalar(
+            select(CompanyServiceAreaV12).where(
+                CompanyServiceAreaV12.company_id == company.id,
+                CompanyServiceAreaV12.region_code == "310101",
+            )
+        )
+        if district_area is None:
+            district_area = CompanyServiceAreaV12(
+                company_id=company.id,
+                region_code="310101",
+                region_level="DISTRICT",
+            )
+            db.add(district_area)
+        district_area.active = True
+        district_area.review_status = "APPROVED"
         account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == company.id))
         assert account is not None
         account.balance = 5000
@@ -350,7 +365,7 @@ def test_verified_platform_lead_correction_recomputes_dispatch_candidates(api_cl
                 "customer_name": "完整流程核验客户",
                 "phone": "13900139188",
                 "city": "上海市",
-                "region_code": "310000",
+                "region_code": "310101",
                 "category_code": "OLD_RENOVATION",
                 "need_summary": "客户计划在上海翻新住房",
                 "consent_confirmed": True,
@@ -462,7 +477,7 @@ def test_overdue_pre_dispatch_task_can_be_dialed_and_reassigned(api_client) -> N
             phone_encrypted=encrypt_text("13900139012"),
             phone_hash=hash_phone("13900139012"),
             city="上海市",
-            region_code="310000",
+            region_code="310101",
             category_code="OLD_RENOVATION",
             need_summary="提示期限后仍可继续拨打",
             consent_confirmed=True,

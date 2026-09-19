@@ -37,7 +37,7 @@ def _v12_lead(*, user_id: str, phone: str, status: str) -> Lead:
         phone_fingerprint=fingerprint_phone(phone),
         consent_confirmed=True,
         city="上海市",
-        region_code="310000",
+        region_code="310101",
         category_code="OLD_RENOVATION",
         brand_code="ZHONGSHU",
         need_summary="接口字段隔离测试",
@@ -116,6 +116,15 @@ def _prepare_dispatch_lead(factory, *, phone: str) -> tuple[str, str, str]:
                     region_code="310000",
                     region_level="CITY",
                     is_primary_city=True,
+                    active=True,
+                    review_status="APPROVED",
+                )
+            )
+            db.add(
+                CompanyServiceAreaV12(
+                    company_id=company.id,
+                    region_code="310101",
+                    region_level="DISTRICT",
                     active=True,
                     review_status="APPROVED",
                 )

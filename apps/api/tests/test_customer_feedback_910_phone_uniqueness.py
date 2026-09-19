@@ -61,7 +61,8 @@ def test_same_phone_is_reserved_across_all_input_sources(db, source_kind) -> Non
     _assert_duplicate(db)
 
 
-def test_historical_test_and_soft_deleted_leads_still_reserve_phone(db) -> None:
+def test_soft_deleted_leads_no_longer_reserve_phone(db) -> None:
+    """2026-09-17 确认口径：手机号唯一排除逻辑删除记录；同号仅剩已删记录时可新录入。"""
     old_time = datetime.now(timezone.utc) - timedelta(days=2000)
     _lead(
         db,
@@ -72,6 +73,23 @@ def test_historical_test_and_soft_deleted_leads_still_reserve_phone(db) -> None:
         deleted_at=datetime.now(timezone.utc),
         delete_reason="用户删除测试记录",
     )
+    db.commit()
+    db.expire_all()
+
+    normalized = require_unique_lead_phone(db, phone=PHONE)
+    assert normalized == PHONE
+
+
+def test_undeleted_duplicate_still_blocks_even_when_deleted_exists(db) -> None:
+    """历史/逻辑删除分开对待：只要存在未删除记录，同号仍被拦截。"""
+    old_time = datetime.now(timezone.utc) - timedelta(days=2000)
+    _lead(
+        db,
+        status="INVALID",
+        deleted_at=old_time,
+        delete_reason="历史删除记录",
+    )
+    _lead(db)
     db.commit()
     db.expire_all()
 

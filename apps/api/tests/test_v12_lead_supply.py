@@ -52,7 +52,7 @@ def _valid_values(phone: str = "13800138000") -> dict:
         "customer_name": "张先生",
         "phone": phone,
         "city": "武汉市",
-        "region_code": "420100",
+        "region_code": "420102",
         "need_summary": "计划建设一套两层乡墅",
         "consent_confirmed": True,
     }
