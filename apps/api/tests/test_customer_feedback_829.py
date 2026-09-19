@@ -372,9 +372,8 @@ def test_item_4_service_region_select_all_is_scoped_to_current_parent() -> None:
     assert "items.map(item=>({code:item.code,label:`${cityItem.option_name} · ${item.name}`,level:'DISTRICT'}))" in markup
 
 
-def test_item_4_all_current_city_districts_accept_city_only_lead_and_claim(
-    api_client,
-) -> None:
+def test_item_4_city_only_lead_is_blocked_by_county_gate(api_client) -> None:
+    """2026-09-17 确认口径替代旧市级规则：市级客资不得派发，缺县 422。"""
     client, factory = api_client
     with factory() as db:
         company = db.scalar(select(Company).where(Company.code == "SH-DEMO"))
@@ -438,16 +437,13 @@ def test_item_4_all_current_city_districts_accept_city_only_lead_and_claim(
     assert candidate["eligible"] is True
     assert candidate["region_match"] is True
 
+    # 县级派发门槛：即使加盟商覆盖全市，缺县的市级客资也不能派发。
     dispatched = client.post(
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=payload,
     )
-    assert dispatched.status_code == 200, dispatched.text
-    assignment_id = dispatched.json()["data"]["assignment"]["id"]
-    client.post("/api/v1/auth/logout")
-    _login(client, "franchise_employee_demo", "Employee123!")
-    claimed = client.post(f"/api/v1/v1.2/assignments/{assignment_id}/claim")
-    assert claimed.status_code == 200, claimed.text
+    assert dispatched.status_code == 422, dispatched.text
+    assert dispatched.json()["code"] == "LEAD_DISTRICT_REQUIRED"
 
 
 def test_item_4_missing_one_current_city_district_does_not_expand_scope(
@@ -500,9 +496,9 @@ def test_item_4_missing_one_current_city_district_does_not_expand_scope(
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=payload,
     )
-    assert dispatched.status_code == 409, dispatched.text
-    assert dispatched.json()["code"] == "DISPATCH_CANDIDATE_INELIGIBLE"
-    assert "SERVICE_REGION_MISMATCH" in dispatched.json()["details"]["reasons"]
+    # 2026-09-17 确认口径：县级门槛先于范围扩展判断，缺县直接 422。
+    assert dispatched.status_code == 422, dispatched.text
+    assert dispatched.json()["code"] == "LEAD_DISTRICT_REQUIRED"
 
 
 def test_item_5_unassigned_platform_lead_can_be_corrected_directly(api_client) -> None:

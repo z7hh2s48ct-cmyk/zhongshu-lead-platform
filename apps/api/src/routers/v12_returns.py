@@ -295,7 +295,7 @@ def list_returns_v12(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
     company_id: str | None = Query(default=None),
-    keyword: str | None = Query(default=None),
+    keyword: str | None = None,
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):

@@ -313,7 +313,7 @@ def test_withdrawal_http_endpoints(api_client):
         assert reviewed.status_code == 200, reviewed.text
         assert reviewed.json()["data"]["status"] == "APPROVED_PENDING_PAYMENT"
         recorded = client.post(
-            f"/api/v1/v1.2/admin/supply-withdrawals/{withdrawal_id}/record-payment",
+            f"/api/v1/v1.2/admin/supply-withdrawals/{withdrawal_id}/record-transfer",
             json={"external_reference": "TXN-WD-HTTP", "amount_cents": 400},
         )
         assert recorded.status_code == 200, recorded.text

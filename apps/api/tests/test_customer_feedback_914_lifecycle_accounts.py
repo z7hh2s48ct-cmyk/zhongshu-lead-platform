@@ -352,7 +352,7 @@ def _legacy_verification_context(db):
     db.flush()
     db.add(UserRole(user_id=telesales.id, role_id=role.id))
     lead = _lead(db, status="IMPORTED")
-    lead.region_code = "310100"
+    lead.region_code = "310101"
     lead.category_code = "OLD_RENOVATION"
     publish_template(db, code="CF914-LEGACY", name="旧版核验", schema={"fields": []})
     db.commit()
@@ -452,6 +452,8 @@ def test_operation_reopens_closed_lead_for_a_new_assignment_round_without_reusin
     db.add_all([operator, company])
     db.flush()
     lead = _lead(db, status="CLOSED")
+    # 2026-09-19 S7：重开回派发池的前提是客资具备有效县级地区。
+    lead.region_code = "310101"
     old_assignment = Assignment(
         lead_id=lead.id,
         company_id=company.id,

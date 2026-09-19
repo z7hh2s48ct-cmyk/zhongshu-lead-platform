@@ -148,7 +148,9 @@ def test_supplier_reward_api_names_the_exact_lead_and_companies(api_client) -> N
     assert item["lead_code"].startswith("KZ-")
     assert item["customer_name"] == "九一四奖励客户"
     assert item["supplier_company_name"] == case["supplier_name"]
-    assert item["receiver_company_name"] == case["receiver_name"]
+    # 2026-09-17 S9：供资方不显示接收方身份（平台权限仍可追溯）。
+    assert item["receiver_company_name"] is None
+    assert item["receiver_company_id"] is None
 
     detail = client.get(
         f"/api/v1/v1.2/supplier-rewards/{case['reward_id']}",

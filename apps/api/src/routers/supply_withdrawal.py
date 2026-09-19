@@ -211,7 +211,7 @@ def cancel_supply_withdrawal(
     return ok(request, withdrawal_to_dict(db, item, reveal_payee=True), "提现申请已取消")
 
 
-@router.post("/supply-withdrawals/{withdrawal_id}/payment-change")
+@router.post("/supply-withdrawals/{withdrawal_id}/payee-change")
 def request_supply_withdrawal_payment_change(
     withdrawal_id: str,
     body: SupplyWithdrawalPaymentChangeBody,
@@ -278,7 +278,7 @@ def review_supply_withdrawal(
     return ok(request, withdrawal_to_dict(db, item, reveal_payee=True), "审核完成")
 
 
-@router.post("/admin/supply-withdrawals/{withdrawal_id}/record-payment")
+@router.post("/admin/supply-withdrawals/{withdrawal_id}/record-transfer")
 def record_supply_withdrawal_payment(
     withdrawal_id: str,
     body: SupplyWithdrawalPaymentBody,
@@ -366,7 +366,7 @@ def confirm_supply_withdrawal_payment(
     )
 
 
-@router.post("/admin/supply-withdrawals/{withdrawal_id}/payment-change/review")
+@router.post("/admin/supply-withdrawals/{withdrawal_id}/payee-change/review")
 def review_supply_withdrawal_payment_change(
     withdrawal_id: str,
     body: SupplyWithdrawalChangeReviewBody,
