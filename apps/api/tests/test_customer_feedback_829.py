@@ -676,7 +676,8 @@ def test_item_5_dispatched_correction_requires_reason_version_and_rechecks_recei
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
         json={
             "customer_name": "只更正姓名的客户",
-            "phone": None,
+            # 2026-09-19 确认口径：手机号只读，更正表单回填原值提交。
+            "phone": "13900139806",
             "reason": "再次核对但事实没有变化",
             "expected_snapshot_version": 9,
         },
@@ -758,7 +759,7 @@ def test_item_5_dispatched_correction_requires_reason_version_and_rechecks_recei
     assert claimed.status_code == 200, claimed.text
 
 
-def test_item_5_post_dispatch_duplicate_phone_correction_is_rejected(api_client) -> None:
+def test_item_5_post_dispatch_phone_correction_is_read_only(api_client) -> None:
     client, factory = api_client
     now = datetime.now(timezone.utc)
     duplicate_phone = "13900139816"
@@ -815,8 +816,10 @@ def test_item_5_post_dispatch_duplicate_phone_correction_is_rejected(api_client)
             "expected_snapshot_version": 3,
         },
     )
-    assert corrected.status_code == 409, corrected.text
-    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-19 确认口径：手机号为只读字段，更正请求在字段校验即被拒绝（无需到达查重）。
+    assert corrected.status_code == 422, corrected.text
+    assert corrected.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert corrected.json()["details"]["fields"] == ["phone"]
     with factory() as db:
         lead = db.get(Lead, lead_id)
         assignment = db.get(Assignment, assignment_id)
@@ -1204,8 +1207,10 @@ def test_item_5_completed_assignment_correction_records_warning_without_reopenin
             "expected_snapshot_version": 8,
         },
     )
-    assert duplicate.status_code == 409, duplicate.text
-    assert duplicate.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-19 确认口径：手机号只读，字段校验先于查重拒绝。
+    assert duplicate.status_code == 422, duplicate.text
+    assert duplicate.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert duplicate.json()["details"]["fields"] == ["phone"]
 
     corrected = client.patch(
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",

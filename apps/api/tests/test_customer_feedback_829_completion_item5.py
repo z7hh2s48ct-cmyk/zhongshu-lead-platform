@@ -433,8 +433,10 @@ def test_unassigned_processing_lead_duplicate_phone_change_is_rejected(
         json={"phone": duplicate_phone, "expected_snapshot_version": 2},
     )
 
-    assert corrected.status_code == 409, corrected.text
-    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-19 确认口径：手机号只读，字段校验先于查重拒绝。
+    assert corrected.status_code == 422, corrected.text
+    assert corrected.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert corrected.json()["details"]["fields"] == ["phone"]
 
     with factory() as db:
         old_task = db.get(VerificationTask, submitted_task_id)
@@ -727,8 +729,10 @@ def test_duplicate_phone_correction_without_location_is_rejected_before_queueing
         f"/api/v1/v1.2/platform/leads/{target_id}/correction",
         json={"phone": duplicate_phone, "expected_snapshot_version": 1},
     )
-    assert corrected.status_code == 409, corrected.text
-    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-19 确认口径：手机号只读，字段校验先于查重与派单队列。
+    assert corrected.status_code == 422, corrected.text
+    assert corrected.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert corrected.json()["details"]["fields"] == ["phone"]
 
     with factory() as db:
         lead = db.get(Lead, target_id)
@@ -798,7 +802,10 @@ def test_phone_correction_cancels_unsettled_ineligible_supplier_reward(
         },
     )
 
-    assert corrected.status_code == 200, corrected.text
+    # 2026-09-19 确认口径：手机号只读，更正在字段校验即被拒绝，奖励不受影响。
+    assert corrected.status_code == 422, corrected.text
+    assert corrected.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert corrected.json()["details"]["fields"] == ["phone"]
     with factory() as db:
         reward = db.get(SupplierLeadReward, reward_id)
         audit = db.scalar(
@@ -807,43 +814,16 @@ def test_phone_correction_cancels_unsettled_ineligible_supplier_reward(
                 AuditLog.resource_id == lead_id,
             )
         )
-        assert reward is not None and audit is not None
-        assert reward.status == RewardStatus.CANCELLED.value
-        assert reward.cancelled_at is not None
-        assert reward.exception_reason == (
-            f"CORRECTION_DEDUP_{decision.value}"
-            f"|PREVIOUS_STATUS={reward_status.value}"
-        )
-        assert audit.metadata_json["reward_changes"] == [
-            {
-                "reward_id": reward_id,
-                "before_status": reward_status.value,
-                "after_status": RewardStatus.CANCELLED.value,
-                "reason": reward.exception_reason,
-            }
-        ]
-        if assignment_status is AssignmentStatus.COMPLETED:
-            lead = db.get(Lead, lead_id)
-            assert lead is not None
-            assert lead.pending_reason is None
+        lead = db.get(Lead, lead_id)
+        assert reward is not None and audit is None and lead is not None
+        assert reward.status == reward_status.value
+        assert reward.cancelled_at is None
+        assert reward.exception_reason is None
+        assert lead.phone_hash == hash_phone("13900139741")
 
 
-@pytest.mark.parametrize(
-    ("decision", "resolution"),
-    [
-        (DuplicateDecision.REWARD_DUPLICATE, "CLEAR_CORRECTION"),
-        (DuplicateDecision.HARD_DUPLICATE, "CLEAR_CORRECTION"),
-        (DuplicateDecision.HARD_DUPLICATE, "MANUAL_OVERRIDE"),
-    ],
-)
-def test_correction_cancelled_reward_is_restored_after_duplicate_is_cleared(
-    api_client,
-    monkeypatch,
-    decision: DuplicateDecision,
-    resolution: str,
-) -> None:
+def test_phone_change_correction_keeps_supplier_reward_intact(api_client) -> None:
     client, factory = api_client
-    _patch_correction_dedup(monkeypatch, decision)
     with factory() as db:
         operation = db.scalar(select(User).where(User.username == "operation"))
         receiver = db.scalar(select(Company).where(Company.code == "SH-DEMO"))
@@ -862,62 +842,30 @@ def test_correction_cancelled_reward_is_restored_after_duplicate_is_cleared(
         reward_id = reward.id
 
     _login(client)
-    first = client.patch(
+    rejected = client.patch(
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
         json={
             "phone": "13900139744",
-            "reason": "第一次更正电话",
+            "reason": "核对后更正联系电话",
             "expected_snapshot_version": 1,
         },
     )
-    assert first.status_code == 200, first.text
-
-    if resolution == "CLEAR_CORRECTION":
-        _patch_correction_dedup(monkeypatch, DuplicateDecision.CLEAR)
-        resolved = client.patch(
-            f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
-            json={
-                "phone": "13900139745",
-                "reason": "再次核对确认为非重复客户",
-                "expected_snapshot_version": 2,
-            },
-        )
-        audit_action = "V12_PLATFORM_LEAD_FACT_CORRECTION"
-    else:
-        with factory() as db:
-            event = db.scalar(
-                select(LeadDedupEvent)
-                .where(LeadDedupEvent.lead_id == lead_id)
-                .order_by(LeadDedupEvent.created_at.desc(), LeadDedupEvent.id.desc())
-            )
-            assert event is not None
-            event_id = event.id
-        resolved = client.post(
-            f"/api/v1/v1.2/admin/leads/{lead_id}/dedup-override",
-            json={"event_id": event_id, "reason": "人工核实为不同客户"},
-        )
-        audit_action = "V12_DEDUP_OVERRIDE"
-
-    assert resolved.status_code == 200, resolved.text
+    # 2026-09-19 确认口径：手机号只读，更正不再触发查重与奖励取消/恢复链路。
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert rejected.json()["details"]["fields"] == ["phone"]
     with factory() as db:
         reward = db.get(SupplierLeadReward, reward_id)
-        audits = db.scalars(
-            select(AuditLog)
-            .where(
-                AuditLog.action == audit_action,
-                AuditLog.resource_id == lead_id,
+        event_count = db.scalar(
+            select(func.count(LeadDedupEvent.id)).where(
+                LeadDedupEvent.lead_id == lead_id
             )
-            .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-        ).all()
+        )
         assert reward is not None
         assert reward.status == RewardStatus.WAITING_CLAIM.value
         assert reward.cancelled_at is None
         assert reward.exception_reason is None
-        assert any(
-            change.get("after_status") == RewardStatus.WAITING_CLAIM.value
-            for audit in audits
-            for change in audit.metadata_json.get("reward_changes", [])
-        )
+        assert event_count == 0
 
 
 def test_settled_supplier_reward_blocks_phone_correction_and_rolls_back(
@@ -954,8 +902,10 @@ def test_settled_supplier_reward_blocks_phone_correction_and_rolls_back(
         },
     )
 
-    assert blocked.status_code == 409, blocked.text
-    assert blocked.json()["code"] == "LEAD_CORRECTION_REWARD_REVERSAL_REQUIRED"
+    # 2026-09-19 确认口径：手机号只读，更正在字段校验即被拒绝，已结算奖励不受影响。
+    assert blocked.status_code == 422, blocked.text
+    assert blocked.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert blocked.json()["details"]["fields"] == ["phone"]
     with factory() as db:
         lead = db.get(Lead, lead_id)
         reward = db.get(SupplierLeadReward, reward_id)
@@ -1199,7 +1149,7 @@ def test_legacy_verification_route_cannot_mutate_v12_task(
     "source_kind",
     [LeadSourceKind.SUPPLIER_H5, LeadSourceKind.FEISHU_LEGACY],
 )
-def test_correction_revalidates_consent_for_every_ready_source(
+def test_correction_consent_is_read_only_for_every_ready_source(
     api_client,
     source_kind: LeadSourceKind,
 ) -> None:
@@ -1227,9 +1177,10 @@ def test_correction_revalidates_consent_for_every_ready_source(
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
         json={"consent_confirmed": False, "expected_snapshot_version": 1},
     )
+    # 2026-09-19 确认口径：授权标记只读，字段校验先于提交校验拒绝。
     assert response.status_code == 422, response.text
-    assert response.json()["code"] == "LEAD_SUBMISSION_INVALID"
-    assert "consent_confirmed" in response.json()["details"]["fields"]
+    assert response.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert response.json()["details"]["fields"] == ["consent_confirmed"]
 
     with factory() as db:
         lead = db.get(Lead, lead_id)
@@ -1366,8 +1317,10 @@ def test_historical_terminal_lead_rejects_duplicate_phone_correction(
             "expected_snapshot_version": 3,
         },
     )
-    assert corrected.status_code == 409, corrected.text
-    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-19 确认口径：手机号只读，历史客资同样在字段校验被拒。
+    assert corrected.status_code == 422, corrected.text
+    assert corrected.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert corrected.json()["details"]["fields"] == ["phone"]
 
     with factory() as db:
         lead = db.get(Lead, lead_id)
