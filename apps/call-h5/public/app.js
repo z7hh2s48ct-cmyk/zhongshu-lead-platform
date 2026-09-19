@@ -224,6 +224,7 @@ function newSubmittedHistoryState() {
     total: { PRE_DISPATCH: 0, RETURN: 0 },
     loaded: { PRE_DISPATCH: 0, RETURN: 0 },
     done: { PRE_DISPATCH: false, RETURN: false },
+    filter: { start: '', end: '', outcome: '' },
     inFlight: null,
   };
 }
@@ -310,8 +311,9 @@ function callHomeGreeting() {
   return `<section class="call-home-greeting"><div><p>内部电销工作台</p><h1>${esc(greetingName(name))}，上午好</h1></div><div class="call-home-avatar" aria-label="${esc(name)}">${esc(name.slice(0, 1))}</div></section>`;
 }
 
-function callHomeHero({ value, actionLabel, hasDoing }) {
-  return `<section class="hero callHomeHero"><div><small>今日待核验</small><strong>${Number(value || 0)}</strong><span>运营派发的本人任务</span></div><button class="btn gold" data-route="verify">${icon(hasDoing ? 'user-check' : 'phone')}<span>${esc(actionLabel)}</span></button></section>`;
+function callHomeHero({ value, actionLabel, hasDoing, verifiedToday }) {
+  const verifiedPart = verifiedToday == null ? '' : ` · 今日已核验 ${Number(verifiedToday)} 条`;
+  return `<section class="hero callHomeHero"><div><small>今日待核验</small><strong>${Number(value || 0)}</strong><span>运营派发的本人任务${verifiedPart}</span></div><button class="btn gold" data-route="verify">${icon(hasDoing ? 'user-check' : 'phone')}<span>${esc(actionLabel)}</span></button></section>`;
 }
 
 function callHomeMetrics(items) {
@@ -340,10 +342,10 @@ function bindTaskCards() {
 
 async function home() {
   if (!await auth()) return;
-  const tasks = await loadTasks();
+  const [tasks, dialStats] = await Promise.all([loadTasks(), loadDialStats()]);
   const actionable = tasks.filter((item) => item.status !== 'SUBMITTED');
   const hasDoing = actionable.some((item) => item.status === 'IN_PROGRESS');
-  zsSetSafeHtml(app, shell(`${callHomeGreeting()}${callHomeHero({ value: actionable.length, actionLabel: hasDoing ? '继续核验' : '开始核验', hasDoing })}${callHomeMetrics([['待开始', metric(tasks, ['ASSIGNED']), 'verify?status=ASSIGNED'], ['核验中', metric(tasks, ['IN_PROGRESS']), 'verify?status=IN_PROGRESS'], ['已提交', metric(tasks, ['SUBMITTED']), 'records']])}${homeTaskList(actionable)}`));
+  zsSetSafeHtml(app, shell(`${callHomeGreeting()}${callHomeHero({ value: actionable.length, actionLabel: hasDoing ? '继续核验' : '开始核验', hasDoing, verifiedToday: dialStats ? dialStats.today?.submitted ?? null : null })}${callHomeMetrics([['待开始', metric(tasks, ['ASSIGNED']), 'verify?status=ASSIGNED'], ['核验中', metric(tasks, ['IN_PROGRESS']), 'verify?status=IN_PROGRESS'], ['已提交', metric(tasks, ['SUBMITTED']), 'records']])}${homeTaskList(actionable)}`));
   bind();
   bindTaskCards();
 }
@@ -359,6 +361,48 @@ async function verify() {
   document.querySelectorAll('[data-filter]').forEach((node) => { node.onclick = () => { location.hash = `#/verify${node.dataset.filter ? `?status=${node.dataset.filter}` : ''}`; }; });
 }
 
+async function loadDialStats() {
+  try {
+    return await api('/v1.2/pre-dispatch-verifications/dial-stats');
+  } catch (error) {
+    return null; // 统计加载失败不阻塞记录页。
+  }
+}
+
+const RECORDS_OUTCOME_OPTIONS = [['', '全部'], ['VALID', '有效'], ['INVALID', '无效']];
+
+// 2026-09-19 客户确认口径：每核验 1 次计 1 条，不论接通与否；
+// 有效＝已接通且结论明确，无效＝未接通（无人接听/空号/停机/拒接等）或结论为不全/无法核验/明确无效/重复/信息不足。
+function verificationOutcome(item) {
+  const decisive = { PRE_DISPATCH: ['QUALIFIED'], RETURN: ['SUPPORT_RETURN', 'DOES_NOT_SUPPORT_RETURN'] }[item.task_kind] || [];
+  return item.contact_result === 'CONNECTED' && decisive.includes(item.conclusion) ? 'VALID' : 'INVALID';
+}
+
+function beijingDateKey(iso) {
+  return iso ? new Date(Date.parse(iso) + 8 * 3600 * 1000).toISOString().slice(0, 10) : '';
+}
+
+function filterSubmittedHistory(items, filter) {
+  return items.filter((item) => {
+    const day = beijingDateKey(item.submitted_at);
+    if (filter.start && day && day < filter.start) return false;
+    if (filter.end && day && day > filter.end) return false;
+    if (filter.outcome && verificationOutcome(item) !== filter.outcome) return false;
+    return true;
+  });
+}
+
+function recordsFilterBar(state) {
+  const filter = state.filter;
+  return `<section class="card" aria-label="核验记录筛选"><div class="form"><label>按日期</label><div style="display:flex;gap:8px;align-items:center"><input id="records-filter-start" type="date" value="${esc(filter.start)}" aria-label="开始日期"><span class="muted">至</span><input id="records-filter-end" type="date" value="${esc(filter.end)}" aria-label="结束日期"></div></div><div class="form"><label>按结论</label><div class="filters" role="tablist">${RECORDS_OUTCOME_OPTIONS.map(([value, label]) => `<button type="button" class="btn small ${filter.outcome === value ? 'primary' : 'outline'}" data-records-outcome="${value}">${label}</button>`).join('')}</div></div></section>`;
+}
+
+function dialStatsCards(stats) {
+  if (!stats) return '';
+  const entries = [['今日', stats.today], ['本周', stats.week], ['本月', stats.month]];
+  return `<section class="metrics callDialStats" aria-label="我的核验量统计">${entries.map(([label, value]) => `<div class="metric"><span>${esc(label)}核验</span><b>${Number(value?.submitted || 0)}</b><small>拨打 ${Number(value?.dials || 0)} 次</small></div>`).join('')}</section>`;
+}
+
 async function records() {
   if (!await auth()) return;
   if (!isSubmittedHistoryRoute()) return;
@@ -370,17 +414,37 @@ async function records() {
     state.nextPage.PRE_DISPATCH === 1
     && state.nextPage.RETURN === 1
   );
+  const statsPromise = loadDialStats();
   const historyData = needsFirstPage ? await loadSubmittedHistory() : submittedHistoryView();
+  state.dialStats = await statsPromise;
   renderSubmittedHistory(historyData, state);
 }
 
 function renderSubmittedHistory(historyData, state = submittedHistoryState) {
   if (!historyData || !submittedHistoryRequestIsCurrent(state)) return;
   const items = historyData.items.filter((item) => item.submitted_at);
+  const filter = state.filter;
+  const filterActive = Boolean(filter.start || filter.end || filter.outcome);
+  const filtered = filterActive ? filterSubmittedHistory(items, filter) : items;
+  const countLine = filterActive ? `<p class="muted">已加载 ${items.length} 条，符合条件 ${filtered.length} 条；筛选只作用于已加载记录，可继续"加载更多"。</p>` : '';
   const loadMore = historyData.hasMore ? '<button class="btn outline block" id="load-more-records">加载更多记录</button>' : '';
-  zsSetSafeHtml(app, shell(`<h1>核验记录</h1><p class="muted">已提交的内容只保留事实结论，后续业务处置由运营人员完成。</p>${items.length ? `${items.map(taskCard).join('')}${loadMore}` : emptyState('暂无已提交记录', '完成核验并提交后，记录会保留在这里。')}`, 'records', '核验记录'));
+  zsSetSafeHtml(app, shell(`<h1>核验记录</h1><p class="muted">已提交的内容只保留事实结论，后续业务处置由运营人员完成。</p>${dialStatsCards(state.dialStats)}${recordsFilterBar(state)}${countLine}${filtered.length ? `${filtered.map(taskCard).join('')}${loadMore}` : emptyState(filterActive ? '没有符合条件的记录' : '暂无已提交记录', filterActive ? '调整日期范围或结论筛选后重试。' : '完成核验并提交后，记录会保留在这里。')}`, 'records', '核验记录'));
   bind(() => { submittedHistoryState = null; route(); });
   bindTaskCards();
+  document.querySelectorAll('[data-records-outcome]').forEach((node) => {
+    node.onclick = () => {
+      state.filter.outcome = node.dataset.recordsOutcome || '';
+      renderSubmittedHistory(submittedHistoryView(), state);
+    };
+  });
+  [['#records-filter-start', 'start'], ['#records-filter-end', 'end']].forEach(([selector, key]) => {
+    const node = document.querySelector(selector);
+    if (!node) return;
+    node.onchange = () => {
+      state.filter[key] = node.value;
+      renderSubmittedHistory(submittedHistoryView(), state);
+    };
+  });
   document.querySelector('#load-more-records')?.addEventListener('click', async (event) => {
     event.currentTarget.disabled = true;
     try {

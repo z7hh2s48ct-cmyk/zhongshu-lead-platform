@@ -18,10 +18,10 @@ def principal(uid, company_id, role):
 
 
 def setup_assignment(db):
-    company=create_company(db,CompanyCreateBody(code="CLM1",name="领取公司",region_codes=["310100"],capabilities=[{"category_code":"OLD_RENOVATION","brand_code":None}]))
+    company=create_company(db,CompanyCreateBody(code="CLM1",name="领取公司",region_codes=["310101"],capabilities=[{"category_code":"OLD_RENOVATION","brand_code":None}]))
     company.primary_user_id="owner"
-    lead=Lead(customer_name="张先生",phone_encrypted=encrypt_text("13800138000"),phone_hash=hash_phone("13800138000"),region_code="310100",city="上海市",category_code="OLD_RENOVATION",status="QUALIFIED")
-    db.add(lead); db.add(LeadPriceRule(region_code="310100",category_code="OLD_RENOVATION",points_cost=100,priority=1,version=1,status="PUBLISHED")); db.flush()
+    lead=Lead(customer_name="张先生",phone_encrypted=encrypt_text("13800138000"),phone_hash=hash_phone("13800138000"),region_code="310101",city="上海市",category_code="OLD_RENOVATION",status="QUALIFIED")
+    db.add(lead); db.add(LeadPriceRule(region_code="310101",category_code="OLD_RENOVATION",points_cost=100,priority=1,version=1,status="PUBLISHED")); db.flush()
     change_points(db,company_id=company.id,delta=500,ledger_type="ADJUST",business_type="SEED",business_id="seed",idempotency_key="seed-claim-01",created_by=None)
     assignment=dispatch_lead(db,lead_id=lead.id,company_id=company.id,principal=principal("op",None,"OPERATION"),idempotency_key="dispatch-claim-01")
     db.commit(); return company,lead,assignment

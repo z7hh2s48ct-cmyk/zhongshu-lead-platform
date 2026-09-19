@@ -140,14 +140,16 @@ def seed_users_and_company(db: Session) -> dict[str, User | Company]:
                 owner_name="张老板",
                 contact_phone="13800138000",
                 level_code="V1",
-                region_codes=["310000"],
+                region_codes=["310000", "310104", "310115"],
                 capabilities=[{"category_code": "OLD_RENOVATION", "brand_code": "ZHONGSHU"}],
                 notes="演示加盟商，仅用于本地测试。",
             ),
         )
     else:
-        if not any(x.region_code == "310000" for x in company.service_regions):
-            db.add(CompanyServiceRegion(company_id=company.id, region_code="310000", active=True))
+        for region_code in ("310000", "310104", "310115"):
+            # 2026-09-19 S7：演示客资落到区县级，服务区域同步补齐区级行。
+            if not any(x.region_code == region_code for x in company.service_regions):
+                db.add(CompanyServiceRegion(company_id=company.id, region_code=region_code, active=True))
         if not any(x.category_code == "OLD_RENOVATION" and x.brand_code == "ZHONGSHU" for x in company.capabilities):
             db.add(CompanyCapability(company_id=company.id, category_code="OLD_RENOVATION", brand_code="ZHONGSHU", active=True))
 
@@ -283,7 +285,8 @@ def _ensure_demo_lead(db: Session, *, record_id: str, name: str, phone: str, sta
         province="上海市",
         city="上海市",
         district=district,
-        region_code="310000",
+        # 演示客资同样满足县级派发门槛（2026-09-19 S7）。
+        region_code={"徐汇区": "310104", "浦东新区": "310115"}.get(district, "310104"),
         category_code="OLD_RENOVATION",
         brand_code="ZHONGSHU",
         need_summary=summary,

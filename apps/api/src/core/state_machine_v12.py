@@ -67,6 +67,9 @@ LEAD_TRANSITIONS: Mapping[LeadV12Status, Set[LeadV12Status]] = {
     LeadV12Status.DUPLICATE: {LeadV12Status.READY_DISPATCH, LeadV12Status.CLOSED},
     LeadV12Status.CLOSED: {
         LeadV12Status.READY_DISPATCH,
+        # 退回客资修改实际区域后，若改后区域无可承接加盟商，直接转入公海池
+        # 而不是回到派发池（2026-09-19 S13 确认口径）。
+        LeadV12Status.PUBLIC_POOL,
         LeadV12Status.PENDING_TELESALES_VERIFY,
     },
 }

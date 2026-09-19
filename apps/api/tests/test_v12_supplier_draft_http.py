@@ -68,7 +68,7 @@ def _valid_lead_body(phone: str) -> dict:
         "customer_name": "接口验收客户",
         "phone": phone,
         "city": "上海市",
-        "region_code": "310000",
+        "region_code": "310101",
         "need_summary": "计划建设两层自住房，近期确认设计方案",
         "consent_confirmed": True,
     }
@@ -174,7 +174,7 @@ def _lead(
         phone_hash=hash_phone(phone),
         consent_confirmed=status is not LeadV12Status.DRAFT,
         city="上海市",
-        region_code="310000",
+        region_code="310101",
         need_summary="用于验证跨公司对象状态不可见",
         status=status.value,
         review_status=review_status,
@@ -442,7 +442,7 @@ def test_rejected_supplier_lead_can_revise_and_resubmit_over_http(api_client) ->
             headers=supplier,
             json={
                 "city": "上海市",
-                "region_code": "310000",
+                "region_code": "310101",
                 "need_summary": "已补充施工时间、地点和预算安排",
             },
         )

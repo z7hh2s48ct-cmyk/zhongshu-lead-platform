@@ -36,7 +36,9 @@ def require_unique_lead_phone(
     """Check before assigning a phone, then persist it in this same transaction.
 
     Callers retain format validation and transaction ownership. Empty drafts do
-    not reserve a number; all persisted records do, including deleted records.
+    not reserve a number. 全平台规范化手机号唯一，包含草稿和历史记录，
+    但不包含逻辑删除记录（2026-09-17 确认口径，替代 9.10 D02 的相关部分）：
+    同号仅剩已删除记录时允许新录入，旧记录及其历史仍保留可查。
     PostgreSQL uses the application's default READ COMMITTED isolation.
     """
 
@@ -45,10 +47,11 @@ def require_unique_lead_phone(
         return normalized_phone
     fingerprint = fingerprint_phone(normalized_phone)
     statement = select(Lead.id).where(
+        Lead.deleted_at.is_(None),
         or_(
             Lead.phone_fingerprint == fingerprint,
             Lead.phone_hash == hash_phone(normalized_phone),
-        )
+        ),
     )
     if exclude_lead_id is not None:
         statement = statement.where(Lead.id != exclude_lead_id)

@@ -518,6 +518,59 @@ class SupplyTerminationRequest(Base, TimestampMixin):
     terminated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SupplyPointsWithdrawal(Base, TimestampMixin):
+    """供客积分日常提现申请（2026-09-17 S1/S3）。
+
+    流程：申请 -> 审核冻结 -> 超级管理员线下付款 -> 确认付款并扣分。
+    收款资料随申请保存独立快照；已审核申请更换收款资料必须走变更申请，
+    由超级管理员审批后仅对该笔未完成付款生效。
+    """
+    __tablename__ = "supply_points_withdrawals"
+    __table_args__ = (
+        Index("ix_supply_withdrawal_company_created", "company_id", "created_at"),
+        Index("ix_supply_withdrawal_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    company_id: Mapped[str] = mapped_column(ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING_REVIEW", nullable=False, index=True)
+    points_requested: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    requested_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), nullable=False)
+    # 收款资料快照（S3）：随申请保存，审核后不随常用资料变化。
+    payee_name_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    payee_account_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    payee_qrcode_url: Mapped[str | None] = mapped_column(Text)
+    # 审核冻结快照。
+    cash_cents_per_point_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    cash_amount_cents_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    rate_config_id: Mapped[str | None] = mapped_column(ForeignKey("system_configs.id", ondelete="RESTRICT"))
+    review_note: Mapped[str | None] = mapped_column(Text)
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 线下付款登记。
+    payment_external_reference: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    payment_amount_cents: Mapped[int | None] = mapped_column(BigInteger)
+    payment_note: Mapped[str | None] = mapped_column(Text)
+    payment_proof_url: Mapped[str | None] = mapped_column(Text)
+    payment_history_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payment_recorded_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    writeoff_idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True)
+    # 收款资料变更申请（S3）：已审核申请需更换收款资料时提交超管审批。
+    change_payee_name_encrypted: Mapped[str | None] = mapped_column(Text)
+    change_payee_account_encrypted: Mapped[str | None] = mapped_column(Text)
+    change_payee_qrcode_url: Mapped[str | None] = mapped_column(Text)
+    change_payment_method: Mapped[str | None] = mapped_column(String(32))
+    change_reason: Mapped[str | None] = mapped_column(Text)
+    change_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    change_requested_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    change_reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    change_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_note: Mapped[str | None] = mapped_column(Text)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class PointsPackage(Base, TimestampMixin):
     __tablename__ = "points_packages"
     __table_args__ = (UniqueConstraint("code", "version", name="uq_points_package_version"),)

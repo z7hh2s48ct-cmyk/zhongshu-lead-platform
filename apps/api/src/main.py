@@ -46,6 +46,7 @@ from .routers import (
     users,
     v12_admin,
     v12_dispatch,
+    v12_franchise_export,
     v12_insights,
     v12_lead_supply,
     v12_pre_dispatch,
@@ -53,6 +54,7 @@ from .routers import (
     v12_returns,
     v12_rewards,
     v12_supplier_review,
+    supply_withdrawal as supply_withdrawal_router,
     verification,
 )
 from .services.rbac import require_rbac_sync_complete, seed_rbac
@@ -133,6 +135,8 @@ app.include_router(v12_supplier_review.router, prefix=api_prefix)
 app.include_router(v12_dispatch.router, prefix=api_prefix)
 app.include_router(v12_returns.router, prefix=api_prefix)
 app.include_router(v12_rewards.router, prefix=api_prefix)
+app.include_router(v12_franchise_export.router, prefix=api_prefix)
+app.include_router(supply_withdrawal_router.router, prefix=api_prefix)
 app.include_router(v12_insights.router, prefix=api_prefix)
 
 

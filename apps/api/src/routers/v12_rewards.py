@@ -44,7 +44,12 @@ def _lead_code(lead_id: str) -> str:
     return f"KZ-{lead_id.replace('-', '')[-8:].upper()}"
 
 
-def _reward_dicts(db: Session, rewards: list[SupplierLeadReward]) -> list[dict]:
+def _reward_dicts(
+    db: Session,
+    rewards: list[SupplierLeadReward],
+    *,
+    viewer: CurrentPrincipal | None = None,
+) -> list[dict]:
     if not rewards:
         return []
     lead_ids = {reward.lead_id for reward in rewards}
@@ -61,6 +66,10 @@ def _reward_dicts(db: Session, rewards: list[SupplierLeadReward]) -> list[dict]:
     companies = dict(
         db.execute(select(Company.id, Company.name).where(Company.id.in_(company_ids))).all()
     )
+    # 2026-09-17 S9：供资方不显示接收方。平台权限（reward.read/*）保留完整追溯。
+    hide_receiver = viewer is not None and not (
+        viewer.can("reward.read") or viewer.can("*")
+    )
     result = []
     for reward in rewards:
         lead = leads.get(reward.lead_id)
@@ -73,12 +82,20 @@ def _reward_dicts(db: Session, rewards: list[SupplierLeadReward]) -> list[dict]:
                 "receiver_company_name": companies.get(reward.receiver_company_id),
             }
         )
+        if hide_receiver:
+            item["receiver_company_id"] = None
+            item["receiver_company_name"] = None
         result.append(item)
     return result
 
 
-def _reward_dict(db: Session, reward: SupplierLeadReward) -> dict:
-    return _reward_dicts(db, [reward])[0]
+def _reward_dict(
+    db: Session,
+    reward: SupplierLeadReward,
+    *,
+    viewer: CurrentPrincipal | None = None,
+) -> dict:
+    return _reward_dicts(db, [reward], viewer=viewer)[0]
 
 
 def _can_read_own_rewards(principal: CurrentPrincipal) -> bool:
@@ -119,7 +136,12 @@ def list_supplier_rewards(
         .offset((page_no - 1) * page_size)
         .limit(page_size)
     ).all()
-    data = page(_reward_dicts(db, list(items)), int(total), page_no, page_size)
+    data = page(
+        _reward_dicts(db, list(items), viewer=principal),
+        int(total),
+        page_no,
+        page_size,
+    )
     if _can_read_own_rewards(principal) and not supplier_company_id:
         data["summary"] = supplier_reward_summary(db, principal.company_id or "")
     return ok(request, data)
@@ -142,7 +164,7 @@ def supplier_reward_detail(
         )
     ):
         raise AppError("FORBIDDEN", "无权查看该供应商奖励", 403)
-    return ok(request, _reward_dict(db, reward))
+    return ok(request, _reward_dict(db, reward, viewer=principal))
 
 
 @router.post("/admin/supplier-rewards/settle-due")
@@ -202,7 +224,7 @@ def settle_one_reward(
     db.commit()
     return ok(
         request,
-        _reward_dict(db, result.reward),
+        _reward_dict(db, result.reward, viewer=principal),
         "奖励存在申诉，已冻结" if result.frozen else "奖励已结算",
     )
 
@@ -241,7 +263,11 @@ def reverse_reward(
         request_id=request.state.request_id,
     )
     db.commit()
-    return ok(request, _reward_dict(db, result.reward), "奖励异常冲正已完成")
+    return ok(
+        request,
+        _reward_dict(db, result.reward, viewer=principal),
+        "奖励异常冲正已完成",
+    )
 
 
 @router.get("/admin/supplier-reward-rules")

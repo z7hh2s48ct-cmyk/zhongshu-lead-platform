@@ -43,7 +43,7 @@ def _create_lead(db, principal: Principal, *, phone: str, name: str) -> Lead:
         values={
             "customer_name": name,
             "phone": phone,
-            "region_code": "420100",
+            "region_code": "420102",
             "city": "武汉市",
             "source_channel": "OTHER",
             "source_detail": "九月十二日回归",
@@ -117,7 +117,7 @@ def test_public_pool_phone_query_rejects_incomplete_number_and_stores_only_hash(
         json={
             "customer_name": "手机号查询目标",
             "phone": "13900139811",
-            "region_code": "310000",
+            "region_code": "310101",
             "city": "上海市",
             "source_channel": "OTHER",
             "source_detail": "九月十二日接口回归",

@@ -44,7 +44,9 @@ def test_region_correction_refunds_claim_snapshot_and_preserves_old_round(db):
     assert request.status == 'APPROVED'
     assert setup['assignment'].status == 'RETURNED'
     assert setup['assignment'].lead_snapshot == old_snapshot
-    assert setup['lead'].status == 'READY_DISPATCH'
+    # 2026-09-19 S13 去向规则：工作流接收方未配置郑州服务区域，改区后无承接 → 公海池。
+    assert setup['lead'].status == 'PUBLIC_POOL'
+    assert setup['lead'].pending_reason == 'PUBLIC_POOL_NO_LOCAL_RECEIVER'
     assert setup['lead'].current_assignment_id is None
     assert (setup['lead'].province, setup['lead'].city, setup['lead'].district) == ('河南省', '郑州市', '中原区')
     assert setup['reward'].status == 'CANCELLED'

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -9,7 +11,7 @@ from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.enums import VerificationTaskStatus
 from ..core.errors import AppError
-from ..core.models import Lead, VerificationSubmission, VerificationTask
+from ..core.models import AuditLog, Lead, VerificationSubmission, VerificationTask
 from ..core.responses import ok, page
 from ..core.security import decrypt_text, mask_phone
 from ..core.v12_enums import VerificationTaskType
@@ -36,6 +38,9 @@ from ..services.pre_dispatch_v12 import (
 
 
 router = APIRouter(prefix="/v1.2", tags=["v1.2-pre-dispatch-verification"])
+
+_BEIJING_TZ = timezone(timedelta(hours=8))
+_DIAL_AUDIT_ACTIONS = ("V12_PRE_DISPATCH_DIAL_CLICK", "V12_RETURN_VERIFY_DIAL")
 
 _OPEN_TASK_STATUSES = (
     VerificationTaskStatus.PENDING.value,
@@ -283,6 +288,54 @@ def assign_pre_dispatch_verification(
     )
     db.commit()
     return ok(request, _task_to_dict(db, task, principal), "前置电销核验已派发")
+
+
+@router.get("/pre-dispatch-verifications/dial-stats")
+def get_telesales_dial_stats(
+    request: Request,
+    principal: CurrentPrincipal,
+    db: Session = Depends(get_db),
+):
+    """电销本人通话量统计：今日/本周/本月（北京时间自然周期）。
+
+    口径（2026-09-19 按常规做法确认）：
+    - dials：点击拨号的次数（前置核验 + 退回核验的拨号审计事件），含未接通；
+    - submitted：本人已提交核验结论的任务数。
+    """
+    if not (principal.can("dashboard.telesales.read") or principal.can("*")):
+        raise AppError("FORBIDDEN", "无权查看通话统计", 403)
+    now_utc = datetime.now(timezone.utc)
+    local_now = now_utc.astimezone(_BEIJING_TZ)
+    today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    bounds = {
+        "today": today_start,
+        "week": today_start - timedelta(days=today_start.weekday()),
+        "month": today_start.replace(day=1),
+    }
+    stats: dict[str, dict[str, int]] = {}
+    for key, start in bounds.items():
+        dials = int(
+            db.scalar(
+                select(func.count(AuditLog.id)).where(
+                    AuditLog.actor_user_id == principal.user_id,
+                    AuditLog.action.in_(_DIAL_AUDIT_ACTIONS),
+                    AuditLog.created_at >= start,
+                )
+            )
+            or 0
+        )
+        submitted = int(
+            db.scalar(
+                select(func.count(VerificationTask.id)).where(
+                    VerificationTask.assignee_user_id == principal.user_id,
+                    VerificationTask.submitted_at.is_not(None),
+                    VerificationTask.submitted_at >= start,
+                )
+            )
+            or 0
+        )
+        stats[key] = {"dials": dials, "submitted": submitted}
+    return ok(request, {"period": "BEIJING_NATURAL", **stats})
 
 
 @router.get("/pre-dispatch-verifications/tasks")

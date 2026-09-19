@@ -372,9 +372,8 @@ def test_item_4_service_region_select_all_is_scoped_to_current_parent() -> None:
     assert "items.map(item=>({code:item.code,label:`${cityItem.option_name} · ${item.name}`,level:'DISTRICT'}))" in markup
 
 
-def test_item_4_all_current_city_districts_accept_city_only_lead_and_claim(
-    api_client,
-) -> None:
+def test_item_4_city_only_lead_is_blocked_by_county_gate(api_client) -> None:
+    """2026-09-17 确认口径替代旧市级规则：市级客资不得派发，缺县 422。"""
     client, factory = api_client
     with factory() as db:
         company = db.scalar(select(Company).where(Company.code == "SH-DEMO"))
@@ -438,16 +437,13 @@ def test_item_4_all_current_city_districts_accept_city_only_lead_and_claim(
     assert candidate["eligible"] is True
     assert candidate["region_match"] is True
 
+    # 县级派发门槛：即使加盟商覆盖全市，缺县的市级客资也不能派发。
     dispatched = client.post(
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=payload,
     )
-    assert dispatched.status_code == 200, dispatched.text
-    assignment_id = dispatched.json()["data"]["assignment"]["id"]
-    client.post("/api/v1/auth/logout")
-    _login(client, "franchise_employee_demo", "Employee123!")
-    claimed = client.post(f"/api/v1/v1.2/assignments/{assignment_id}/claim")
-    assert claimed.status_code == 200, claimed.text
+    assert dispatched.status_code == 422, dispatched.text
+    assert dispatched.json()["code"] == "LEAD_DISTRICT_REQUIRED"
 
 
 def test_item_4_missing_one_current_city_district_does_not_expand_scope(
@@ -500,9 +496,9 @@ def test_item_4_missing_one_current_city_district_does_not_expand_scope(
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=payload,
     )
-    assert dispatched.status_code == 409, dispatched.text
-    assert dispatched.json()["code"] == "DISPATCH_CANDIDATE_INELIGIBLE"
-    assert "SERVICE_REGION_MISMATCH" in dispatched.json()["details"]["reasons"]
+    # 2026-09-17 确认口径：县级门槛先于范围扩展判断，缺县直接 422。
+    assert dispatched.status_code == 422, dispatched.text
+    assert dispatched.json()["code"] == "LEAD_DISTRICT_REQUIRED"
 
 
 def test_item_5_unassigned_platform_lead_can_be_corrected_directly(api_client) -> None:
@@ -680,7 +676,8 @@ def test_item_5_dispatched_correction_requires_reason_version_and_rechecks_recei
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
         json={
             "customer_name": "只更正姓名的客户",
-            "phone": None,
+            # 2026-09-19 确认口径：手机号只读，更正表单回填原值提交。
+            "phone": "13900139806",
             "reason": "再次核对但事实没有变化",
             "expected_snapshot_version": 9,
         },
@@ -762,7 +759,7 @@ def test_item_5_dispatched_correction_requires_reason_version_and_rechecks_recei
     assert claimed.status_code == 200, claimed.text
 
 
-def test_item_5_post_dispatch_duplicate_phone_correction_is_rejected(api_client) -> None:
+def test_item_5_post_dispatch_phone_correction_is_read_only(api_client) -> None:
     client, factory = api_client
     now = datetime.now(timezone.utc)
     duplicate_phone = "13900139816"
@@ -819,8 +816,10 @@ def test_item_5_post_dispatch_duplicate_phone_correction_is_rejected(api_client)
             "expected_snapshot_version": 3,
         },
     )
-    assert corrected.status_code == 409, corrected.text
-    assert corrected.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-19 确认口径：手机号为只读字段，更正请求在字段校验即被拒绝（无需到达查重）。
+    assert corrected.status_code == 422, corrected.text
+    assert corrected.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert corrected.json()["details"]["fields"] == ["phone"]
     with factory() as db:
         lead = db.get(Lead, lead_id)
         assignment = db.get(Assignment, assignment_id)
@@ -1208,8 +1207,10 @@ def test_item_5_completed_assignment_correction_records_warning_without_reopenin
             "expected_snapshot_version": 8,
         },
     )
-    assert duplicate.status_code == 409, duplicate.text
-    assert duplicate.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-19 确认口径：手机号只读，字段校验先于查重拒绝。
+    assert duplicate.status_code == 422, duplicate.text
+    assert duplicate.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    assert duplicate.json()["details"]["fields"] == ["phone"]
 
     corrected = client.patch(
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",

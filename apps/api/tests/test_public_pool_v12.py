@@ -80,7 +80,7 @@ def _supplier(db) -> tuple[Company, User, Principal]:
     return company, user, principal
 
 
-def _receiver(db, *, region_code: str = "420100") -> Company:
+def _receiver(db, *, region_code: str = "420102") -> Company:
     company = Company(code="REC-PUBLIC", name="当地接收加盟商", status="ACTIVE")
     db.add(company)
     db.flush()
@@ -108,6 +108,17 @@ def _receiver(db, *, region_code: str = "420100") -> Company:
 
 def _seed_region(db) -> None:
     db.add(Region(code="420100", name="武汉市", level="CITY", aliases=[], active=True))
+    # 2026-09-19 S7：派发口径落到县级，导入用例同步提供区县编码。
+    db.add(
+        Region(
+            code="420102",
+            name="江岸区",
+            level="DISTRICT",
+            parent_code="420100",
+            aliases=[],
+            active=True,
+        )
+    )
     db.flush()
 
 
@@ -117,7 +128,7 @@ def _complete_values(phone: str = "13800138000") -> dict:
         "phone": phone,
         "province": "湖北省",
         "city": "武汉市",
-        "region_code": "420100",
+        "region_code": "420102",
         "source_channel": "OTHER",
         "source_detail": "飞书客户视图",
         "consent_confirmed": True,
@@ -178,7 +189,7 @@ def test_manual_and_inline_entries_share_public_pool_and_transfer_revalidates(db
     }
     assert lead.status == LeadV12Status.DRAFT.value
 
-    lead.region_code = "420100"
+    lead.region_code = "420102"
     lead.city = "武汉市"
     lead.source_channel = "OTHER"
     lead.source_detail = "线下活动"
@@ -198,7 +209,7 @@ def test_customer_name_is_optional_when_other_dispatch_fields_are_complete(db) -
         principal=principal,
         values={
             "phone": "13800138009",
-            "region_code": "420100",
+            "region_code": "420102",
             "city": "武汉市",
             "source_channel": "OTHER",
             "source_detail": "线下活动",
@@ -254,7 +265,7 @@ def test_rework_reason_stays_until_successful_dispatch_transfer(db, source_kind)
         lead=lead,
         principal=principal,
         values={
-            "region_code": "420100",
+            "region_code": "420102",
             "city": "武汉市",
             "consent_confirmed": True,
         },
@@ -284,7 +295,7 @@ def test_editing_public_pool_lead_refreshes_completeness_immediately(db) -> None
         lead=lead,
         principal=principal,
         values={
-            "region_code": "420100",
+            "region_code": "420102",
             "city": "武汉市",
             "source_channel": "OTHER",
             "source_detail": "线下活动",
@@ -486,7 +497,7 @@ def test_feishu_dispatch_target_retains_incomplete_rows_and_is_idempotent(db, mo
                     "客户姓名": "完整客户",
                     "手机号": "+86 138-0013-8001",
                     "市": "武汉市",
-                    "地区编码": "420100",
+                    "地区编码": "420102",
                     "来源渠道": "OTHER",
                     "具体来源": "飞书转介绍",
                     "已获客户授权": True,
@@ -564,7 +575,7 @@ def test_public_pool_import_normalizes_and_rejects_duplicate_phone(db, monkeypat
                     "客户姓名": "重复手机号客户",
                     "手机号": "+86 138 0013 8003",
                     "市": "武汉市",
-                    "地区编码": "420100",
+                    "地区编码": "420102",
                     "来源渠道": "OTHER",
                     "具体来源": "飞书客户视图",
                     "已获客户授权": True,
@@ -642,7 +653,7 @@ def test_public_pool_http_is_shared_by_admin_and_operation_but_forbidden_to_fran
         json={
             "customer_name": "权限验收客户",
             "phone": "13800138011",
-            "region_code": "310000",
+            "region_code": "310101",
             "city": "上海市",
             "source_channel": "OTHER",
             "source_detail": "权限验收",
@@ -690,7 +701,7 @@ def test_public_pool_http_is_shared_by_admin_and_operation_but_forbidden_to_fran
     assert transfer_audit.metadata_json == {
         "result": "TRANSFERRED",
         "customer_source": CustomerSource.OPERATION_ENTRY.value,
-        "region_code": "310000",
+        "region_code": "310101",
         "supplier_company_id": None,
         "pending_reason": None,
         "validation_errors": {},

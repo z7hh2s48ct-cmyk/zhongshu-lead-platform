@@ -41,20 +41,31 @@ def test_disabled_approved_capability_can_be_resubmitted(db) -> None:
     assert resubmitted.reviewed_by is None
 
 
-def test_primary_service_area_must_be_city(db) -> None:
+def test_primary_service_area_accepts_district_level(db) -> None:
+    """2026-09-19 S12：主要城市支持区县级（区/县/县级市），主体归属可落到县。"""
     db.add_all(
         [
             Region(code="420100", name="武汉市", level="CITY", aliases=[], active=True),
             Region(code="420106", name="武昌区", level="DISTRICT", parent_code="420100", aliases=[], active=True),
+            Region(code="420000", name="湖北省", level="PROVINCE", aliases=[], active=True),
         ]
     )
     company, _ = _identity(db, "AREA003")
+    items = replace_service_areas(
+        db,
+        company_id=company.id,
+        region_codes=["420106"],
+        primary_city_code="420106",
+    )
+    district_rows = [item for item in items if item.region_code == "420106"]
+    assert district_rows and all(item.is_primary_city for item in district_rows)
+    # 省级行区仍不能作为主要城市。
     with pytest.raises(AppError) as exc_info:
         replace_service_areas(
             db,
             company_id=company.id,
             region_codes=["420106"],
-            primary_city_code="420106",
+            primary_city_code="420000",
         )
     assert exc_info.value.code == "PRIMARY_CITY_LEVEL_INVALID"
 

@@ -126,6 +126,10 @@ def dispatch_lead(
     company = db.get(Company, company_id)
     if not company:
         raise AppError("COMPANY_NOT_FOUND", "加盟商公司不存在", 404)
+    # 2026-09-19 S7：所有派发入口统一县级门槛，遗留路由不例外。
+    from .dispatch_v12 import ensure_lead_has_district_region
+
+    ensure_lead_has_district_region(db, lead)
     candidates = {item["company_id"]: item for item in candidate_companies(db, lead, include_balance=True)}
     candidate = candidates.get(company_id)
     if not candidate or not candidate["eligible"]:

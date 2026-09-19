@@ -78,6 +78,22 @@ EDITABLE_FIELDS = {
     "consent_confirmed",
 }
 
+# 2026-09-19 客户确认口径：运营更正仅可修改客户姓名、客户需求与所在地址；
+# 以下字段在更正中只读（提交与当前值不同即拒绝），新建/编辑客资不受影响。
+CORRECTION_READ_ONLY_FIELDS = frozenset(
+    {
+        "phone",
+        "category_code",
+        "brand_code",
+        "source_channel",
+        "source_detail",
+        "budget_min",
+        "budget_max",
+        "acquisition_cost_cents",
+        "consent_confirmed",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class LeadCorrectionResult:
@@ -218,6 +234,24 @@ def _editable_fact_snapshot(lead: Lead) -> dict[str, Any]:
     snapshot = {field: getattr(lead, field) for field in EDITABLE_FIELDS if field != "phone"}
     snapshot["phone"] = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
     return snapshot
+
+
+def _correction_read_only_conflicts(
+    values: dict[str, Any],
+    before_facts: dict[str, Any],
+    before_phone: str,
+) -> tuple[str, ...]:
+    conflicts: list[str] = []
+    for field in sorted(CORRECTION_READ_ONLY_FIELDS):
+        if field not in values:
+            continue
+        if field == "phone":
+            changed = normalize_phone(str(values[field] or "")) != before_phone
+        else:
+            changed = before_facts.get(field) != values[field]
+        if changed:
+            conflicts.append(field)
+    return tuple(conflicts)
 
 
 def _correction_audit_snapshot(lead: Lead) -> dict[str, Any]:
@@ -672,6 +706,14 @@ def correct_platform_lead(
     before_phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
     before_region_code = lead.region_code
     original_status = lead.status
+    conflicts = _correction_read_only_conflicts(values, before_facts, before_phone)
+    if conflicts:
+        raise AppError(
+            "LEAD_CORRECTION_FIELD_NOT_ALLOWED",
+            "按 2026-09-19 客户确认口径，更正仅可修改客户姓名、客户需求与所在地址",
+            422,
+            {"fields": list(conflicts)},
+        )
     _apply_editable_values(db, lead, values)
     after_facts = _editable_fact_snapshot(lead)
     changed_fields = tuple(
@@ -1626,6 +1668,21 @@ def lead_supply_to_dict(
             or lead.submitter_user_id == principal.user_id
         )
     )
+    # 2026-09-17 S9：供资方不显示接收方身份；平台权限保留完整追溯。
+    _is_platform_viewer = bool(
+        principal
+        and (
+            principal.can("*")
+            or principal.can("lead.read")
+            or principal.can("lead.supplier.review")
+        )
+    )
+    _hide_receiver = bool(
+        principal
+        and principal.company_id
+        and principal.company_id == lead.supplier_company_id
+        and not _is_platform_viewer
+    )
     result = {
         "id": lead.id,
         "source_kind": lead.source_kind,
@@ -1672,10 +1729,18 @@ def lead_supply_to_dict(
             current_assignment.get("status") if current_assignment else None
         ),
         "current_receiver_company_id": (
-            current_assignment.get("receiver_company_id") if current_assignment else None
+            None
+            if _hide_receiver
+            else (current_assignment.get("receiver_company_id") if current_assignment else None)
         ),
         "current_receiver_company_name": (
-            current_assignment.get("receiver_company_name") if current_assignment else None
+            None
+            if _hide_receiver
+            else (
+                current_assignment.get("receiver_company_name")
+                if current_assignment
+                else None
+            )
         ),
         "assigned_by_user_id": (
             current_assignment.get("assigned_by_user_id") if current_assignment else None

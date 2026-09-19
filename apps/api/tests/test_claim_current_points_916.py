@@ -45,7 +45,7 @@ def test_legacy_claim_uses_latest_global_price_and_replay_keeps_actual_charge(db
         CompanyCreateBody(
             code="CURRENT-POINTS",
             name="实时积分领取公司",
-            region_codes=["310100"],
+            region_codes=["310101"],
             capabilities=[{"category_code": "OLD_RENOVATION", "brand_code": None}],
         ),
     )
@@ -56,7 +56,7 @@ def test_legacy_claim_uses_latest_global_price_and_replay_keeps_actual_charge(db
         phone_hash=hash_phone("13900139807"),
         source_type="SUPPLIER_H5",
         source_kind="SUPPLIER_H5",
-        region_code="310100",
+        region_code="310101",
         city="上海市",
         category_code="OLD_RENOVATION",
         status="QUALIFIED",
@@ -65,7 +65,7 @@ def test_legacy_claim_uses_latest_global_price_and_replay_keeps_actual_charge(db
         [
             lead,
             LeadPriceRule(
-                region_code="310100",
+                region_code="310101",
                 category_code="OLD_RENOVATION",
                 points_cost=888,
                 priority=1,

@@ -61,7 +61,7 @@ def _operation_lead(db, *, user_id: str, phone: str, source_kind: str) -> Lead:
         phone_fingerprint=fingerprint_phone(phone),
         consent_confirmed=True,
         city="上海市",
-        region_code="310000",
+        region_code="310101",
         category_code="OLD_RENOVATION",
         brand_code="ZHONGSHU",
         need_summary="验证固定积分锁价",
@@ -91,14 +91,14 @@ def _ensure_receiver(db) -> tuple[Company, User]:
     if db.scalar(
         select(CompanyServiceAreaV12).where(
             CompanyServiceAreaV12.company_id == company.id,
-            CompanyServiceAreaV12.region_code == "310000",
+            CompanyServiceAreaV12.region_code == "310101",
         )
     ) is None:
         db.add(
             CompanyServiceAreaV12(
                 company_id=company.id,
-                region_code="310000",
-                region_level="CITY",
+                region_code="310101",
+                region_level="DISTRICT",
                 is_primary_city=True,
                 active=True,
                 review_status="APPROVED",
@@ -182,7 +182,7 @@ def test_operation_fixed_price_covers_single_batch_and_dispatch_snapshot(api_cli
             source_kind=LeadSourceKind.SUPPLIER_H5.value,
         )
         legacy_price_rule = LeadPriceRule(
-            region_code="310000",
+            region_code="310101",
             category_code="OLD_RENOVATION",
             brand_code="ZHONGSHU",
             level_code=company.level_code,
@@ -431,7 +431,7 @@ def test_legacy_dispatch_uses_one_v2_settings_snapshot_for_all_candidates(db) ->
             CompanyCreateBody(
                 code=f"LEGACY-FIXED-{index}",
                 name=f"旧派发固定积分加盟商{index}",
-                region_codes=["310100"],
+                region_codes=["310101"],
                 capabilities=[{"category_code": "OLD_RENOVATION", "brand_code": None}],
             ),
         )
@@ -454,7 +454,7 @@ def test_legacy_dispatch_uses_one_v2_settings_snapshot_for_all_candidates(db) ->
         phone_encrypted=encrypt_text("13900139805"),
         phone_hash=hash_phone("13900139805"),
         city="上海市",
-        region_code="310100",
+        region_code="310101",
         category_code="OLD_RENOVATION",
         status="QUALIFIED",
     )

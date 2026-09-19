@@ -524,3 +524,5 @@ button.metric:focus-visible{outline:3px solid rgba(199,161,96,.32);outline-offse
   .login{padding-inline:16px}
   .login-card{padding:24px 19px}
 }
+
+.callDialStats .metric small{display:block;margin-top:4px;color:var(--muted);font-size:10px}

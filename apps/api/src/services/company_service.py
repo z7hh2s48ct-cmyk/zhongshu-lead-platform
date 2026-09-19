@@ -143,15 +143,21 @@ def _simple_region_codes(db: Session, body: CompanySimpleCreateBody) -> dict[str
     if missing:
         raise AppError("REGION_NOT_FOUND", "存在无效或停用的地区", 422, {"region_codes": missing})
     primary = db.get(Region, body.primary_city_code)
-    if primary is None or primary.level != "CITY":
-        raise AppError("PRIMARY_CITY_LEVEL_INVALID", "服务城市必须选择城市级地区", 422)
-    invalid_legacy_districts = [
-        code
-        for code in body.district_codes
-        if (region := regions.get(code)) is None
-        or region.level != "DISTRICT"
-        or region.parent_code != body.primary_city_code
-    ]
+    # 主要地区支持城市或区县级（含县级市），主体归属可落到县（2026-09-19 S12）。
+    if primary is None or primary.level not in {"CITY", "DISTRICT"}:
+        raise AppError("PRIMARY_CITY_LEVEL_INVALID", "主要城市必须选择城市或区县级地区", 422)
+    invalid_legacy_districts = (
+        [
+            code
+            for code in body.district_codes
+            if (region := regions.get(code)) is None
+            or region.level != "DISTRICT"
+            or region.parent_code != body.primary_city_code
+        ]
+        # 旧的 district_codes 直派字段仅在主要城市为城市级时按隶属校验。
+        if primary.level == "CITY"
+        else []
+    )
     if invalid_legacy_districts:
         raise AppError(
             "SERVICE_AREA_HIERARCHY_INVALID",
@@ -170,7 +176,11 @@ def _simple_region_codes(db: Session, body: CompanySimpleCreateBody) -> dict[str
             422,
             {"region_codes": sorted(invalid)},
         )
-    if not any(service_region_city_code(db, region) == body.primary_city_code for region in regions.values()):
+    if not any(
+        region.code == body.primary_city_code
+        or service_region_city_code(db, region) == body.primary_city_code
+        for region in regions.values()
+    ):
         raise AppError("PRIMARY_CITY_INVALID", "主要城市必须与至少一个已选服务区域一致", 422)
     return regions
 

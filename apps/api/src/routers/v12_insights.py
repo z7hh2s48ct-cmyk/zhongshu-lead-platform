@@ -39,6 +39,7 @@ from ..core.models import (
     ReturnRequest,
     Role,
     User,
+    UserRole,
     VerificationTask,
 )
 from ..core.models_v12 import (
@@ -55,6 +56,7 @@ from ..services.audit import write_audit
 from ..services.lead_export_v12 import lead_report_to_dicts, list_lead_report_rows
 from ..services.lead_points_v12 import assignment_points_price, get_lead_points_settings
 from ..services.notification_service import visible_notification_condition
+from ..services.supplier_reward_v12 import confirmation_sql_expressions
 from ..services.return_v12 import return_request_to_dict
 from ..services.storage import create_file_access_token, get_storage
 from ..services.supplier_reward_v12 import (
@@ -1080,6 +1082,146 @@ def finance_dashboard(
             for row in reward_detail_rows
         ],
     })
+
+
+@router.get("/reports/supplier-performance")
+def supplier_performance_report(
+    request: Request,
+    principal: CurrentPrincipal,
+    db: Session = Depends(get_db),
+):
+    """员工供资业绩及积分贡献（2026-09-17 S2）。
+
+    负责人查看本公司各员工，员工仅看本人；上传数、有效数按客资计数，
+    "有效"按交易确认（接收方确认有效或系统自动确认有效，即
+    transaction_confirmed_at 非空）判定，不以电销初核通过代替；
+    积分分别展示累计入账、冲回、净贡献，公司提现不改写员工原贡献。
+    """
+    if not principal.company_id:
+        raise AppError("COMPANY_CONTEXT_REQUIRED", "当前账号未绑定公司", 403)
+    if not any(
+        principal.can(code)
+        for code in ("*", "assignment.own.read", "assignment.employee.read", "supplier.reward.own.read")
+    ):
+        raise AppError("FORBIDDEN", "无权查看供资业绩", 403)
+    company_id = principal.company_id
+    member_rows = db.execute(
+        select(User.id, User.display_name, User.status, Role.code)
+        .join(UserRole, UserRole.user_id == User.id)
+        .join(Role, Role.id == UserRole.role_id)
+        .where(
+            User.company_id == company_id,
+            Role.code.in_(["FRANCHISE_OWNER", "FRANCHISE_EMPLOYEE"]),
+        )
+    ).all()
+    # 停用成员保留行（人员停用不丢历史贡献）；双角色账号按用户去重。
+    members: list[Any] = []
+    seen_user_ids: set[str] = set()
+    for row in member_rows:
+        if row.id in seen_user_ids:
+            continue
+        seen_user_ids.add(row.id)
+        members.append(row)
+    # 员工只看本人；负责人看本公司全部成员。
+    if principal.has_any_role("FRANCHISE_EMPLOYEE") and not principal.can("assignment.own.read"):
+        members = [row for row in members if row.id == principal.user_id]
+    member_ids = [row.id for row in members]
+
+    live_leads = Lead.deleted_at.is_(None)
+    supplier_leads = [Lead.supplier_company_id == company_id, live_leads]
+    upload_rows = (
+        db.execute(
+            select(Lead.submitter_user_id, func.count(func.distinct(Lead.id)))
+            .where(*supplier_leads, Lead.submitter_user_id.in_(member_ids))
+            .group_by(Lead.submitter_user_id)
+        ).all()
+        if member_ids
+        else []
+    )
+    effective_rows = (
+        db.execute(
+            select(Lead.submitter_user_id, func.count(func.distinct(Lead.id)))
+            .select_from(Lead)
+            .join(Assignment, Assignment.lead_id == Lead.id)
+            .where(
+                *supplier_leads,
+                Lead.submitter_user_id.in_(member_ids),
+                # "有效"按交易确认判定：接收方人工确认或领取满48小时自动有效，
+                # 且确认时间须已到达（与派发单报表的口径一致）。
+                confirmation_sql_expressions(
+                    dialect_name=db.get_bind().dialect.name
+                ).effective_at
+                <= func.now(),
+            )
+            .group_by(Lead.submitter_user_id)
+        ).all()
+        if member_ids
+        else []
+    )
+    credited_expr = func.sum(
+        case(
+            (SupplierLeadReward.ledger_id.is_not(None), SupplierLeadReward.reward_points),
+            else_=0,
+        )
+    )
+    reversed_expr = func.sum(
+        case(
+            (SupplierLeadReward.reversal_ledger_id.is_not(None), SupplierLeadReward.reward_points),
+            else_=0,
+        )
+    )
+    reward_rows = (
+        db.execute(
+            select(Lead.submitter_user_id, credited_expr, reversed_expr)
+            .select_from(SupplierLeadReward)
+            .join(Assignment, Assignment.id == SupplierLeadReward.assignment_id)
+            .join(Lead, Lead.id == Assignment.lead_id)
+            .where(
+                *supplier_leads,
+                Lead.submitter_user_id.in_(member_ids),
+            )
+            .group_by(Lead.submitter_user_id)
+        ).all()
+        if member_ids
+        else []
+    )
+
+    def _int(value: Any) -> int:
+        return int(value or 0)
+
+    uploads = {row[0]: _int(row[1]) for row in upload_rows}
+    effectives = {row[0]: _int(row[1]) for row in effective_rows}
+    credited_map: dict[str, int] = {}
+    reversed_map: dict[str, int] = {}
+    for row in reward_rows:
+        credited_map[row[0]] = _int(row[1])
+        reversed_map[row[0]] = _int(row[2])
+
+    employees = []
+    totals = {"uploaded": 0, "effective": 0, "points_credited": 0, "points_reversed": 0, "points_net": 0}
+    for user_id, display_name, user_status, role_code in members:
+        credited = credited_map.get(user_id, 0)
+        reversed_points = reversed_map.get(user_id, 0)
+        row = {
+            "user_id": user_id,
+            "display_name": display_name,
+            "user_status": user_status,
+            "role_code": role_code,
+            "uploaded": uploads.get(user_id, 0),
+            "effective": effectives.get(user_id, 0),
+            "points_credited": credited,
+            "points_reversed": reversed_points,
+            "points_net": credited - reversed_points,
+        }
+        employees.append(row)
+        for key in totals:
+            totals[key] += row[key]
+
+    scope = "employee" if principal.has_any_role("FRANCHISE_EMPLOYEE") and not principal.can("assignment.own.read") else "company"
+    return ok(
+        request,
+        {"scope": scope, "summary": totals, "employees": employees},
+    )
 
 
 @router.get("/reports/own")

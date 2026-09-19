@@ -516,3 +516,39 @@ def district_by_code(city: dict[str, Any], code: str) -> dict[str, str] | None:
         (district for district in city["districts"] if district["code"] == code),
         None,
     )
+
+
+@lru_cache(maxsize=1)
+def province_index() -> dict[str, dict[str, Any]]:
+    """按编码索引省级行区，与前端 region-tree 共用同一份快照。"""
+
+    return {province["code"]: province for province in region_tree()["provinces"]}
+
+
+def match_province_city_district(
+    province_code: str,
+    city_code: str,
+    district_code: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]] | None:
+    """省/市/区县三级编码逐级隶属时返回快照节点，否则返回 None。
+
+    这是平台地区唯一权威校验源：前端下拉与后端校验共用静态快照，
+    不再读数据库 regions 表（该表仅为按需物化的服务区域行，缺省级行）。
+    """
+
+    province = province_index().get(province_code)
+    if province is None:
+        return None
+    city = next(
+        (item for item in province["cities"] if item["code"] == city_code),
+        None,
+    )
+    if city is None:
+        return None
+    district = next(
+        (item for item in city["districts"] if item["code"] == district_code),
+        None,
+    )
+    if district is None:
+        return None
+    return province, city, district

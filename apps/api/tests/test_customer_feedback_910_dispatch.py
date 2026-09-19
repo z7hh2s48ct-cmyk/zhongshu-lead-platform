@@ -69,6 +69,22 @@ def _prepare_receiver_and_lead(factory, *, phone: str) -> tuple[str, str, str, s
                     review_status="APPROVED",
                 )
             )
+        if db.scalar(
+            select(CompanyServiceAreaV12).where(
+                CompanyServiceAreaV12.company_id == company.id,
+                CompanyServiceAreaV12.region_code == "310101",
+            )
+        ) is None:
+            # 2026-09-19 S7：客资派发必须落到区县级，服务区域同步补区级行。
+            db.add(
+                CompanyServiceAreaV12(
+                    company_id=company.id,
+                    region_code="310101",
+                    region_level="DISTRICT",
+                    active=True,
+                    review_status="APPROVED",
+                )
+            )
         account = db.scalar(select(PointsAccount).where(PointsAccount.company_id == company.id))
         assert account is not None
         account.balance = 5000
@@ -83,7 +99,7 @@ def _prepare_receiver_and_lead(factory, *, phone: str) -> tuple[str, str, str, s
             phone_fingerprint=fingerprint_phone(phone),
             consent_confirmed=True,
             city="上海市",
-            region_code="310000",
+            region_code="310101",
             category_code="OLD_RENOVATION",
             brand_code="ZHONGSHU",
             need_summary="验证运营直派员工",
@@ -237,7 +253,7 @@ def test_assigned_employee_claims_once_while_owner_is_view_only(api_client) -> N
         assert claim_ledgers == 1
 
 
-def test_operation_deletes_own_draft_but_phone_remains_reserved(api_client) -> None:
+def test_operation_deletes_own_draft_then_phone_can_be_re_entered(api_client) -> None:
     client, factory = api_client
     operation_headers = _login(client, "operation", "Operation123!")
     created = client.post(
@@ -269,8 +285,9 @@ def test_operation_deletes_own_draft_but_phone_remains_reserved(api_client) -> N
         headers=operation_headers,
         json={"customer_name": "重复录入客户", "phone": "+86 13900139704"},
     )
-    assert duplicate.status_code == 409, duplicate.text
-    assert duplicate.json()["code"] == "LEAD_PHONE_DUPLICATE"
+    # 2026-09-17 确认口径：手机号唯一排除逻辑删除记录，删除后同号可新录入。
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["data"]["id"] != lead_id
     with factory() as db:
         lead = db.get(Lead, lead_id)
         assert lead is not None
@@ -315,7 +332,7 @@ def test_franchise_employee_uploads_and_only_sees_own_leads(api_client) -> None:
             "customer_name": "员工上传客户",
             "phone": "13900139705",
             "city": "上海市",
-            "region_code": "310000",
+            "region_code": "310101",
             "consent_confirmed": True,
         },
     )
