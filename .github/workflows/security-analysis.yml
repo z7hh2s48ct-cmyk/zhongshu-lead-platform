@@ -337,8 +337,8 @@ jobs:
             candidate/dist/security/app-image.tar
             candidate/dist/security/scan-subject.json
           if-no-files-found: error
-          retention-days: 7
-          compression-level: 0
+          retention-days: 3
+          compression-level: 9
 
       - name: Remove transient image archive
         if: always()
