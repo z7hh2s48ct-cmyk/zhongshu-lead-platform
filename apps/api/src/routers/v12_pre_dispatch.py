@@ -314,12 +314,15 @@ def get_telesales_dial_stats(
     }
     stats: dict[str, dict[str, int]] = {}
     for key, start in bounds.items():
+        # 2026-09-24：边界先规范化为 UTC 再入查询；北京自然窗口在
+        # sqlite（字符串比较）与 Postgres（timestamptz）下语义一致。
+        start_utc = start.astimezone(timezone.utc)
         dials = int(
             db.scalar(
                 select(func.count(AuditLog.id)).where(
                     AuditLog.actor_user_id == principal.user_id,
                     AuditLog.action.in_(_DIAL_AUDIT_ACTIONS),
-                    AuditLog.created_at >= start,
+                    AuditLog.created_at >= start_utc,
                 )
             )
             or 0
@@ -329,7 +332,7 @@ def get_telesales_dial_stats(
                 select(func.count(VerificationTask.id)).where(
                     VerificationTask.assignee_user_id == principal.user_id,
                     VerificationTask.submitted_at.is_not(None),
-                    VerificationTask.submitted_at >= start,
+                    VerificationTask.submitted_at >= start_utc,
                 )
             )
             or 0
