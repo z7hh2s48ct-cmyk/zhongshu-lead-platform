@@ -44,6 +44,8 @@ ROLE_PERMISSION_MATRIX: dict[str, tuple[str, list[str]]] = {
             "calendar.read",
             "supply.termination.read",
             "supply.termination.review",
+            # 2026-09-23 反馈 F2：运营可编辑来源渠道选项。
+            "source.channel.manage",
         ],
     ),
     "TELESALES": (

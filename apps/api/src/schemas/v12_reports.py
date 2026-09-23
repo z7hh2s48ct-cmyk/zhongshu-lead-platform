@@ -20,6 +20,8 @@ class LeadReportFilterBody(BaseModel):
     created_from: datetime | None = None
     created_to: datetime | None = None
     source_kind: str | None = Field(default=None, max_length=32)
+    source_channel: str | None = Field(default=None, max_length=32)
+    keyword: str | None = Field(default=None, max_length=64)
     supplier_company_id: str | None = Field(default=None, max_length=36)
     submitter_user_id: str | None = Field(default=None, max_length=36)
     phone: str | None = Field(default=None, max_length=32)
@@ -32,6 +34,8 @@ class LeadReportFilterBody(BaseModel):
 
     @field_validator(
         "source_kind",
+        "source_channel",
+        "keyword",
         "supplier_company_id",
         "submitter_user_id",
         "region",
@@ -49,6 +53,11 @@ class LeadReportFilterBody(BaseModel):
     @classmethod
     def normalize_codes(cls, value: str | None) -> str | None:
         return value.upper() if value else None
+
+    @field_validator("source_channel")
+    @classmethod
+    def normalize_source_channel(cls, value: str | None) -> str | None:
+        return value.strip().upper() if value and value.strip() else None
 
     @field_validator("phone")
     @classmethod
@@ -75,6 +84,8 @@ class LeadReportFilterBody(BaseModel):
             "created_from": self.created_from.isoformat() if self.created_from else None,
             "created_to": self.created_to.isoformat() if self.created_to else None,
             "source_kind": self.source_kind,
+            "source_channel": self.source_channel,
+            "keyword": self.keyword,
             "supplier_company_id": self.supplier_company_id,
             "submitter_user_id": self.submitter_user_id,
             # 完整手机号只在请求校验期间存在，查询、任务和审计只保存不可逆值。
