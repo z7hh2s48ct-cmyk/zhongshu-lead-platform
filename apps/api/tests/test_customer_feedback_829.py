@@ -372,7 +372,7 @@ def test_item_4_service_region_select_all_is_scoped_to_current_parent() -> None:
     assert "items.map(item=>({code:item.code,label:`${cityItem.option_name} · ${item.name}`,level:'DISTRICT'}))" in markup
 
 
-def test_item_4_city_only_lead_is_blocked_by_county_gate(api_client) -> None:
+def test_item_4_city_only_lead_dispatches_with_missing_district_flag(api_client) -> None:
     """2026-09-17 确认口径替代旧市级规则：市级客资不得派发，缺县 422。"""
     client, factory = api_client
     with factory() as db:
@@ -442,8 +442,11 @@ def test_item_4_city_only_lead_is_blocked_by_county_gate(api_client) -> None:
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=payload,
     )
-    assert dispatched.status_code == 422, dispatched.text
-    assert dispatched.json()["code"] == "LEAD_DISTRICT_REQUIRED"
+    # 2026-09-23 口径：缺县客资可直派，派发成功且带 missing_district_region 标记。
+    assert dispatched.status_code == 200, dispatched.text
+    payload_data = dispatched.json()["data"]
+    assert payload_data["lead"]["status"] == "DISPATCHED"
+    assert payload_data["lead"]["missing_district_region"] is True
 
 
 def test_item_4_missing_one_current_city_district_does_not_expand_scope(
@@ -496,9 +499,10 @@ def test_item_4_missing_one_current_city_district_does_not_expand_scope(
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=payload,
     )
-    # 2026-09-17 确认口径：县级门槛先于范围扩展判断，缺县直接 422。
-    assert dispatched.status_code == 422, dispatched.text
-    assert dispatched.json()["code"] == "LEAD_DISTRICT_REQUIRED"
+    # 2026-09-23 口径：缺县不再前置 422；接收方服务区域不匹配仍然拦截。
+    assert dispatched.status_code == 409, dispatched.text
+    assert dispatched.json()["code"] == "DISPATCH_CANDIDATE_INELIGIBLE"
+    assert dispatched.json()["details"]["reasons"] == ["SERVICE_REGION_MISMATCH"]
 
 
 def test_item_5_unassigned_platform_lead_can_be_corrected_directly(api_client) -> None:

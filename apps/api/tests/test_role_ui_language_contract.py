@@ -102,7 +102,7 @@ def test_unified_lead_review_explains_outcomes_without_security_or_process_jargo
     source = _read(ADMIN, "v12-operations.js")
     assert "HMAC" not in source
     assert "加盟商客资在当地暂无其他合格接收方时先进入公海池" in source
-    assert "缺少可派发地区时再分配电销核实" in source
+    assert "缺县客资可直派（系统软提醒、留缺县派发标记），也可由运营主动分配电销核实补县。" in source
     assert "运营处置电销结论" in source
 
 

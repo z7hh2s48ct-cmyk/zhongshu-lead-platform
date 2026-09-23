@@ -96,6 +96,8 @@ def normalized_lead_report_filters(filters: dict[str, Any]) -> dict[str, Any]:
         "created_from": _datetime_value(filters.get("created_from")),
         "created_to": _datetime_value(filters.get("created_to")),
         "source_kind": _upper(filters.get("source_kind")),
+        "source_channel": _upper(filters.get("source_channel")),
+        "keyword": _text(filters.get("keyword")),
         "supplier_company_id": _text(filters.get("supplier_company_id")),
         "submitter_user_id": _text(filters.get("submitter_user_id")),
         "phone_hash": phone_hash
@@ -128,6 +130,20 @@ def _conditions(filters: dict[str, Any], current_assignment) -> list[Any]:
         conditions.append(Lead.created_at < values["created_to"])
     if values["source_kind"]:
         conditions.append(Lead.source_kind == values["source_kind"])
+    if values["source_channel"]:
+        # 2026-09-23 反馈 F1(a)：来源渠道作为独立筛选维度。
+        conditions.append(Lead.source_channel == values["source_channel"])
+    if values["keyword"]:
+        # 2026-09-23 反馈 F1(c)：关键词覆盖具体来源，可捞出历史写在
+        # 「具体来源」里的 广告/抖音/直播 等词（对齐公海池能力）。
+        conditions.append(
+            or_(
+                Lead.customer_name.contains(values["keyword"], autoescape=True),
+                Lead.city.contains(values["keyword"], autoescape=True),
+                Lead.district.contains(values["keyword"], autoescape=True),
+                Lead.source_detail.contains(values["keyword"], autoescape=True),
+            )
+        )
     if values["supplier_company_id"]:
         conditions.append(Lead.supplier_company_id == values["supplier_company_id"])
     if values["submitter_user_id"]:
@@ -363,16 +379,22 @@ def lead_report_to_dicts(
             )
             .subquery("ranked_report_pre_dispatch_tasks")
         )
-        task_rows = db.scalars(
-            select(VerificationTask)
+        pre_dispatch_assignee = aliased(User, name="pre_dispatch_assignee")
+        task_rows = db.execute(
+            select(VerificationTask, pre_dispatch_assignee.display_name)
             .join(
                 ranked_tasks,
                 ranked_tasks.c.task_id == VerificationTask.id,
             )
+            .outerjoin(
+                pre_dispatch_assignee,
+                pre_dispatch_assignee.id == VerificationTask.assignee_user_id,
+            )
             .where(ranked_tasks.c.row_number == 1)
         ).all()
         latest_pre_dispatch_tasks = {
-            task.lead_id: task for task in task_rows
+            task.lead_id: (task, assignee_name)
+            for task, assignee_name in task_rows
         }
     assignment_ids = {
         row.assignment.id for row in rows if row.assignment is not None
@@ -411,7 +433,13 @@ def lead_report_to_dicts(
     for sequence, row in enumerate(rows, start=sequence_start):
         lead = row.lead
         assignment = row.assignment
-        latest_pre_dispatch_task = latest_pre_dispatch_tasks.get(lead.id)
+        latest_pre_dispatch_entry = latest_pre_dispatch_tasks.get(lead.id)
+        latest_pre_dispatch_task = (
+            latest_pre_dispatch_entry[0] if latest_pre_dispatch_entry else None
+        )
+        latest_pre_dispatch_assignee_name = (
+            latest_pre_dispatch_entry[1] if latest_pre_dispatch_entry else None
+        )
         franchise_handler_name, franchise_handler_kind = _franchise_handler(row)
         phone = decrypt_text(lead.phone_encrypted)
         source_display = (
@@ -444,6 +472,18 @@ def lead_report_to_dicts(
                 "latest_pre_dispatch_task_id": (
                     latest_pre_dispatch_task.id
                     if latest_pre_dispatch_task
+                    else None
+                ),
+                "latest_pre_dispatch_assignee_user_id": (
+                    latest_pre_dispatch_task.assignee_user_id
+                    if latest_pre_dispatch_task
+                    else None
+                ),
+                "latest_pre_dispatch_assignee_name": latest_pre_dispatch_assignee_name,
+                "latest_pre_dispatch_assigned_at": (
+                    latest_pre_dispatch_task.assigned_at.isoformat()
+                    if latest_pre_dispatch_task
+                    and latest_pre_dispatch_task.assigned_at
                     else None
                 ),
                 "latest_pre_dispatch_contact_result": (

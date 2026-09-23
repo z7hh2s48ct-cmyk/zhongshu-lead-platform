@@ -45,6 +45,7 @@ from .china_regions import region_by_code
 from .dedup_v12 import DedupResult, apply_submission_decision, evaluate_phone
 from .dispatch_v12 import (
     existing_receiver_correction_issues,
+    lead_missing_district_region,
     route_approved_lead_to_pool,
 )
 from .lead_correction_guard import (
@@ -78,8 +79,9 @@ EDITABLE_FIELDS = {
     "consent_confirmed",
 }
 
-# 2026-09-19 客户确认口径：运营更正仅可修改客户姓名、客户需求与所在地址；
-# 以下字段在更正中只读（提交与当前值不同即拒绝），新建/编辑客资不受影响。
+# 2026-09-23 客户确认口径：保留授权功能；运营端可代改客户信息授权（任何状态、
+# 不强制原因、系统自动留审计）。以下字段在更正中仍只读（提交与当前值不同即拒绝），
+# 新建/编辑客资不受影响。
 CORRECTION_READ_ONLY_FIELDS = frozenset(
     {
         "phone",
@@ -90,7 +92,6 @@ CORRECTION_READ_ONLY_FIELDS = frozenset(
         "budget_min",
         "budget_max",
         "acquisition_cost_cents",
-        "consent_confirmed",
     }
 )
 
@@ -252,6 +253,24 @@ def _correction_read_only_conflicts(
         if changed:
             conflicts.append(field)
     return tuple(conflicts)
+
+
+def _correction_changes_consent_only(
+    values: dict[str, Any],
+    before_facts: dict[str, Any],
+    before_phone: str,
+) -> bool:
+    """实际变化的字段只有客户信息授权时返回 True（代改授权不强制原因）。"""
+    for field, raw_value in values.items():
+        if field not in EDITABLE_FIELDS or field == "consent_confirmed":
+            continue
+        if field == "phone":
+            changed = normalize_phone(str(raw_value or "")) != before_phone
+        else:
+            changed = before_facts.get(field) != raw_value
+        if changed:
+            return False
+    return True
 
 
 def _correction_audit_snapshot(lead: Lead) -> dict[str, Any]:
@@ -688,8 +707,17 @@ def correct_platform_lead(
         current_assignment
         or db.scalar(select(Assignment.id).where(Assignment.lead_id == lead.id).limit(1))
     )
+    before = _correction_audit_snapshot(lead)
+    before_facts = _editable_fact_snapshot(lead)
+    before_phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
+    before_region_code = lead.region_code
+    original_status = lead.status
     clean_reason = _clean_text(reason)
-    if has_dispatch_history and not clean_reason:
+    # 2026-09-23 口径：仅代改客户信息授权时不强制填写原因（仍留审计）。
+    consent_only_change = _correction_changes_consent_only(
+        values, before_facts, before_phone
+    )
+    if has_dispatch_history and not clean_reason and not consent_only_change:
         raise AppError(
             "LEAD_CORRECTION_REASON_REQUIRED",
             "已派发客资更正必须填写原因",
@@ -701,16 +729,11 @@ def correct_platform_lead(
             "已派发客资更正必须携带当前版本",
             422,
         )
-    before = _correction_audit_snapshot(lead)
-    before_facts = _editable_fact_snapshot(lead)
-    before_phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
-    before_region_code = lead.region_code
-    original_status = lead.status
     conflicts = _correction_read_only_conflicts(values, before_facts, before_phone)
     if conflicts:
         raise AppError(
             "LEAD_CORRECTION_FIELD_NOT_ALLOWED",
-            "按 2026-09-19 客户确认口径，更正仅可修改客户姓名、客户需求与所在地址",
+            "更正暂不支持修改该字段（可改：客户姓名、客户需求、所在地址、客户信息授权）",
             422,
             {"fields": list(conflicts)},
         )
@@ -1652,6 +1675,7 @@ def lead_supply_to_dict(
     supplier_company_name: str | None = None,
     region_name: str | None = None,
     region_level: str | None = None,
+    missing_district_region: bool | None = None,
     current_assignment: dict[str, Any] | None = None,
     assignment_history: list[dict[str, Any]] | None = None,
     followup_history: list[dict[str, Any]] | None = None,
@@ -1700,6 +1724,7 @@ def lead_supply_to_dict(
         "region_code": lead.region_code,
         "region_name": region_name,
         "region_level": region_level,
+        "missing_district_region": missing_district_region,
         "category_code": lead.category_code,
         "brand_code": lead.brand_code,
         "source_channel": lead.source_channel,
@@ -1981,6 +2006,7 @@ def lead_supply_list_to_dict(
             ),
             region_name=(regions_by_code.get(lead.region_code).name if regions_by_code.get(lead.region_code) else None),
             region_level=(regions_by_code.get(lead.region_code).level if regions_by_code.get(lead.region_code) else None),
+            missing_district_region=lead_missing_district_region(db, lead),
             current_assignment=current_assignments.get(lead.current_assignment_id),
             assignment_history=(histories.get(lead.id, []) if include_assignment_history else None),
             followup_history=(followups.get(lead.id, []) if include_assignment_history else None),

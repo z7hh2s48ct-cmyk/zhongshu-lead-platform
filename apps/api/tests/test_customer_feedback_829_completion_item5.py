@@ -1149,7 +1149,7 @@ def test_legacy_verification_route_cannot_mutate_v12_task(
     "source_kind",
     [LeadSourceKind.SUPPLIER_H5, LeadSourceKind.FEISHU_LEGACY],
 )
-def test_correction_consent_is_read_only_for_every_ready_source(
+def test_correction_consent_false_rejected_on_approved_lead(
     api_client,
     source_kind: LeadSourceKind,
 ) -> None:
@@ -1177,10 +1177,13 @@ def test_correction_consent_is_read_only_for_every_ready_source(
         f"/api/v1/v1.2/platform/leads/{lead_id}/correction",
         json={"consent_confirmed": False, "expected_snapshot_version": 1},
     )
-    # 2026-09-19 确认口径：授权标记只读，字段校验先于提交校验拒绝。
+    # 2026-09-23 口径：授权可代改用于解锁（False→True）；已审核客资
+    # 不允许改回 False，由提交校验拒绝（LEAD_SUBMISSION_INVALID）。
     assert response.status_code == 422, response.text
-    assert response.json()["code"] == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
-    assert response.json()["details"]["fields"] == ["consent_confirmed"]
+    assert response.json()["code"] == "LEAD_SUBMISSION_INVALID"
+    assert response.json()["details"]["fields"] == {
+        "consent_confirmed": "必须确认已获得客户信息授权"
+    }
 
     with factory() as db:
         lead = db.get(Lead, lead_id)

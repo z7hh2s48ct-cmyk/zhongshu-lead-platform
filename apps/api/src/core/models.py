@@ -544,6 +544,9 @@ class SupplyPointsWithdrawal(Base, TimestampMixin):
     # 审核冻结快照。
     cash_cents_per_point_snapshot: Mapped[int | None] = mapped_column(BigInteger)
     cash_amount_cents_snapshot: Mapped[int | None] = mapped_column(BigInteger)
+    # 2026-09-23 D2：手续费率（万分比）与手续费金额快照；实际应付 = 现金金额 - 手续费。
+    fee_rate_bp_snapshot: Mapped[int | None] = mapped_column(Integer)
+    fee_cents_snapshot: Mapped[int | None] = mapped_column(BigInteger)
     rate_config_id: Mapped[str | None] = mapped_column(ForeignKey("system_configs.id", ondelete="RESTRICT"))
     review_note: Mapped[str | None] = mapped_column(Text)
     reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))

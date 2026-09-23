@@ -39,6 +39,9 @@ LEAD_TRANSITIONS: Mapping[LeadV12Status, Set[LeadV12Status]] = {
     LeadV12Status.PENDING_TELESALES_VERIFY: {
         LeadV12Status.PENDING_OPERATION_DISPOSITION,
         LeadV12Status.PENDING_REVIEW,
+        # 2026-09-23 口径：缺县不再硬性打回电销，电销/解卡路径可直接入池。
+        LeadV12Status.READY_DISPATCH,
+        LeadV12Status.PUBLIC_POOL,
         LeadV12Status.CLOSED,
     },
     LeadV12Status.PENDING_OPERATION_DISPOSITION: {
@@ -50,9 +53,17 @@ LEAD_TRANSITIONS: Mapping[LeadV12Status, Set[LeadV12Status]] = {
         LeadV12Status.DUPLICATE,
         LeadV12Status.CLOSED,
     },
-    LeadV12Status.READY_DISPATCH: {LeadV12Status.DISPATCHED, LeadV12Status.DUPLICATE, LeadV12Status.CLOSED},
+    LeadV12Status.READY_DISPATCH: {
+        LeadV12Status.DISPATCHED,
+        # 2026-09-23 口径：运营可把待派发客资显式转回电销核验（推荐动作）。
+        LeadV12Status.PENDING_TELESALES_VERIFY,
+        LeadV12Status.DUPLICATE,
+        LeadV12Status.CLOSED,
+    },
     LeadV12Status.PUBLIC_POOL: {
         LeadV12Status.READY_DISPATCH,
+        # 2026-09-23 口径：公海池客资可由运营显式转电销核验补县。
+        LeadV12Status.PENDING_TELESALES_VERIFY,
         LeadV12Status.DUPLICATE,
         LeadV12Status.CLOSED,
     },

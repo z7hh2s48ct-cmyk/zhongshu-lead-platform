@@ -13,7 +13,7 @@ from ..core.enums import VerificationTaskStatus
 from ..core.errors import AppError
 from ..core.models import AuditLog, Lead, VerificationSubmission, VerificationTask
 from ..core.responses import ok, page
-from ..core.security import decrypt_text, mask_phone
+from ..core.security import decrypt_text, hash_phone, mask_phone, normalize_phone
 from ..core.v12_enums import VerificationTaskType
 from ..schemas.v12_lead_supply import (
     LeadLifecycleReasonBody,
@@ -349,6 +349,13 @@ def list_pre_dispatch_tasks(
     status: str | None = Query(default=None),
     lead_id: str | None = Query(default=None),
     submitted_history: bool = False,
+    keyword: str | None = Query(default=None, max_length=64),
+    phone: str | None = Query(default=None, max_length=32),
+    assignee_user_id: str | None = Query(default=None),
+    conclusion: str | None = Query(default=None, max_length=64),
+    source_kind: str | None = Query(default=None, max_length=32),
+    due_from: datetime | None = Query(default=None),
+    due_to: datetime | None = Query(default=None),
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
@@ -360,6 +367,48 @@ def list_pre_dispatch_tasks(
     ]
     if lead_id:
         filters.append(VerificationTask.lead_id == lead_id)
+    # 2026-09-23 反馈 H1：电销页搜索与筛选。手机号精确搜索走哈希，需 lead.phone.export。
+    if phone and phone.strip():
+        if not (principal.can("lead.phone.export") or principal.can("*")):
+            raise AppError("FORBIDDEN", "手机号精确搜索需要 lead.phone.export 权限", 403)
+        normalized_phone = normalize_phone(phone.strip())
+        filters.append(
+            VerificationTask.lead_id.in_(
+                select(Lead.id).where(
+                    Lead.deleted_at.is_(None),
+                    Lead.phone_hash == hash_phone(normalized_phone),
+                )
+            )
+        )
+    if keyword and keyword.strip():
+        normalized_keyword = keyword.strip()
+        filters.append(
+            VerificationTask.lead_id.in_(
+                select(Lead.id).where(
+                    Lead.deleted_at.is_(None),
+                    Lead.customer_name.contains(normalized_keyword, autoescape=True),
+                )
+            )
+        )
+    if source_kind and source_kind.strip():
+        normalized_source = source_kind.strip().upper()
+        filters.append(
+            VerificationTask.lead_id.in_(
+                select(Lead.id).where(
+                    Lead.deleted_at.is_(None),
+                    Lead.source_kind == normalized_source,
+                )
+            )
+        )
+    if assignee_user_id and assignee_user_id.strip():
+        # 电销角色已被强制限定本人，此条件只会进一步收窄，不会越权。
+        filters.append(VerificationTask.assignee_user_id == assignee_user_id.strip())
+    if conclusion and conclusion.strip():
+        filters.append(VerificationTask.verification_conclusion == conclusion.strip().upper())
+    if due_from is not None:
+        filters.append(VerificationTask.due_at >= due_from)
+    if due_to is not None:
+        filters.append(VerificationTask.due_at <= due_to)
     if principal.has_any_role("TELESALES"):
         filters.append(VerificationTask.assignee_user_id == principal.user_id)
     if submitted_history:

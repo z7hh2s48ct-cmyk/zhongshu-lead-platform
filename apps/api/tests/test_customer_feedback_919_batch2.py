@@ -61,42 +61,70 @@ def test_district_resolution_supports_county_and_township(db):
     assert lead_district_region_code(db, lead) == "420106"
 
 
-def test_approved_pool_target_routes_missing_county_to_telesales(db):
+# 2026-09-23 客户确认口径：缺县客资可直派（运营自行担责），
+# 以下用例由"缺县硬门槛"改为验证"缺县放行 + 软提醒标记"。
+def test_approved_pool_target_no_longer_routes_missing_county_to_telesales(db):
     setup = _workflow_setup(db)
     lead = setup["lead"]
     lead.region_code = "420900"
-    assert approved_lead_pool_target(db, lead) is LeadV12Status.PENDING_TELESALES_VERIFY
+    # 加盟商客资且当地无覆盖 -> 公海池；不再转电销补县。
+    assert approved_lead_pool_target(db, lead) is LeadV12Status.PUBLIC_POOL
 
 
-def test_route_approved_lead_marks_district_pending_verify(db):
+def test_route_approved_lead_no_longer_marks_district_pending_verify(db):
     setup = _workflow_setup(db)
     lead = setup["lead"]
     lead.status = LeadV12Status.PENDING_REVIEW.value
     lead.region_code = "420900"
     target = route_approved_lead_to_pool(db, lead)
     db.commit()
-    assert target is LeadV12Status.PENDING_TELESALES_VERIFY
-    assert lead.status == LeadV12Status.PENDING_TELESALES_VERIFY.value
-    assert lead.pending_reason == "DISTRICT_PENDING_VERIFY"
+    assert target is LeadV12Status.PUBLIC_POOL
+    assert lead.status == LeadV12Status.PUBLIC_POOL.value
+    assert lead.pending_reason == "PUBLIC_POOL_NO_LOCAL_RECEIVER"
 
 
-def test_manual_dispatch_requires_district_region(db):
+def test_manual_dispatch_allows_missing_district_region(db):
     setup = _workflow_setup(db)
     lead = setup["lead"]
     lead.status = LeadV12Status.READY_DISPATCH.value
     lead.current_assignment_id = None
     lead.region_code = "420900"
+    setup["assignment"].status = AssignmentStatus.RELEASED.value
+    db.add_all(
+        [
+            CompanyLeadCapability(
+                company_id=setup["receiver"].id,
+                capability_code="LEAD_RECEIVER",
+                review_status="APPROVED",
+            ),
+            CompanyServiceAreaV12(
+                company_id=setup["receiver"].id,
+                region_code="420106",
+                region_level="DISTRICT",
+                review_status="APPROVED",
+            ),
+            # 覆盖客资所在市级区域，避免 SERVICE_REGION_MISMATCH 干扰缺县口径验证。
+            CompanyServiceAreaV12(
+                company_id=setup["receiver"].id,
+                region_code="420900",
+                region_level="CITY",
+                review_status="APPROVED",
+            ),
+        ]
+    )
     db.commit()
-    with pytest.raises(AppError) as error:
-        dispatch_manually_with_outcome(
-            db,
-            lead_id=lead.id,
-            company_id=setup["receiver"].id,
-            employee_user_id=None,
-            assigned_by=setup["receiver_user"].id,
-            idempotency_key="dispatch-district-missing-1",
-        )
-    assert error.value.code == "LEAD_DISTRICT_REQUIRED"
+    # 缺县不再抛 LEAD_DISTRICT_REQUIRED，改为派发成功并留缺县标记。
+    outcome = dispatch_manually_with_outcome(
+        db,
+        lead_id=lead.id,
+        company_id=setup["receiver"].id,
+        employee_user_id=None,
+        assigned_by=setup["receiver_user"].id,
+        idempotency_key="dispatch-district-missing-1",
+    )
+    db.commit()
+    assert outcome.created is True
+    assert outcome.assignment.lead_snapshot["district_missing"] is True
 
 
 def test_manual_dispatch_passes_district_gate(db):

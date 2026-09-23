@@ -30,7 +30,6 @@ from ..core.models_v12 import (
     SupplierLeadReward,
 )
 from ..core.security import decrypt_text, mask_phone
-from ..core.state_machine_v12 import LEAD_TRANSITIONS
 from ..core.time import as_utc
 from ..core.v12_enums import (
     DuplicateDecision,
@@ -346,24 +345,14 @@ def lead_district_region_code(db: Session, lead: Lead) -> str | None:
 
 
 def lead_missing_district_region(db: Session, lead: Lead) -> bool:
-    """2026-09-19 S7：新派发/重新派发必须具备有效县级地区（区/县/县级市）。"""
+    """客资是否缺少有效县级地区；2026-09-23 起仅用于软提醒，不再阻断派发。"""
 
     return lead_district_region_code(db, lead) is None
 
 
-def ensure_lead_has_district_region(db: Session, lead: Lead) -> None:
-    if lead_missing_district_region(db, lead):
-        raise AppError(
-            "LEAD_DISTRICT_REQUIRED",
-            "客资需补齐有效区县后才能派发，请先转电销核实补齐区域",
-            422,
-        )
-
-
 def approved_lead_pool_target(db: Session, lead: Lead) -> LeadV12Status:
-    if lead_missing_district_region(db, lead):
-        # 缺县的未派发客资转电销补县，而不是进入派发池。
-        return LeadV12Status.PENDING_TELESALES_VERIFY
+    # 2026-09-23 口径：缺县客资可入池直派（运营自行担责）；
+    # 加盟商客资当地无覆盖时仍进公海池等待匹配。
     if (
         lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
         and not has_receiver_coverage(db, lead)
@@ -374,24 +363,10 @@ def approved_lead_pool_target(db: Session, lead: Lead) -> LeadV12Status:
 
 def route_approved_lead_to_pool(db: Session, lead: Lead) -> LeadV12Status:
     target = approved_lead_pool_target(db, lead)
-    if (
-        target is LeadV12Status.PENDING_TELESALES_VERIFY
-        and LeadV12Status.PENDING_TELESALES_VERIFY
-        not in LEAD_TRANSITIONS.get(LeadV12Status(lead.status), set())
-    ):
-        # 状态机不允许直达电销核验时维持原目标，派发入口的县级硬门槛兜底。
-        target = (
-            LeadV12Status.PUBLIC_POOL
-            if lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
-            and not has_receiver_coverage(db, lead)
-            else LeadV12Status.READY_DISPATCH
-        )
     lead.status = target.value
     lead.pending_reason = (
         "PUBLIC_POOL_NO_LOCAL_RECEIVER"
         if target is LeadV12Status.PUBLIC_POOL
-        else "DISTRICT_PENDING_VERIFY"
-        if target is LeadV12Status.PENDING_TELESALES_VERIFY
         else None
     )
     return target
@@ -979,8 +954,8 @@ def dispatch_manually_with_outcome(
             409,
             {"status": lead.status, "current_assignment_id": lead.current_assignment_id},
         )
-    # 2026-09-19 S7：新派发必须具备有效县级地区（区/县/县级市）。
-    ensure_lead_has_district_region(db, lead)
+    # 2026-09-23 口径：缺县不再阻断派发，改为软提醒标记（运营自行担责）。
+    district_missing = lead_missing_district_region(db, lead)
     active = db.scalar(
         select(Assignment).where(
             Assignment.lead_id == lead.id,
@@ -1056,6 +1031,7 @@ def dispatch_manually_with_outcome(
             "need_summary": lead.need_summary,
             "source_kind": lead.source_kind,
             "duplicate_status": lead.duplicate_status,
+            "district_missing": district_missing,
             "note": note.strip() if note else None,
             "requested_employee_user_id": employee_user_id,
             "direct_recipient_role_code": recipients.assignee_role_code,
@@ -1091,6 +1067,7 @@ def dispatch_manually_with_outcome(
                 "points_price": candidate.points_price,
                 "price_rule_id": candidate.price_rule_id,
                 "manual": True,
+                "district_missing": district_missing,
                 "return_receiver_override": is_returned_receiver,
                 "return_receiver_override_reason": (
                     return_receiver_override_reason.strip()

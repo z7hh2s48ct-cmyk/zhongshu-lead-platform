@@ -253,5 +253,5 @@ def test_changed_frontend_assets_have_feedback_94_cache_busters() -> None:
     admin_index = ADMIN_INDEX.read_text(encoding="utf-8")
     call_index = CALL_INDEX.read_text(encoding="utf-8")
 
-    assert "v12-operations.js?v=20260916-feedback-current-claim-points" in admin_index
+    assert "v12-operations.js?v=20260923-feedback-922-badge-info" in admin_index
     assert "app.js?v=20260916-feedback-915" in call_index

@@ -85,7 +85,11 @@ def seed_reference_data(db: Session) -> None:
             ("DOUYIN", "抖音/信息流"),
             ("WECHAT_VIDEO", "视频号"),
             ("XIAOHONGSHU", "小红书"),
+            # 2026-09-23 反馈 F1(b)：补齐 直播/广告/其他。
+            ("LIVE", "直播"),
+            ("AD", "广告"),
             ("MANUAL", "人工录入"),
+            ("OTHER", "其他"),
         ],
     }
     for domain, values in dictionaries.items():

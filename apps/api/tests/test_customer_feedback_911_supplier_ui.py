@@ -17,7 +17,10 @@ def test_supplier_address_keeps_hierarchical_selects_and_adds_keyword_search() -
 
     assert 'id="supply-city-search"' in form
     assert 'aria-controls="supply-city"' in form
-    assert 'placeholder="搜索省份或城市"' in form
+    # 2026-09-23 反馈第 2 条（C1）：城市框统一走后端搜索，可直接搜县级并回填市+县
+    assert 'placeholder="搜索城市或区县"' in form
+    assert "renderSupplyCitySearchResults" in form
+    assert "applySupplyDistrictSelection" in form
     assert 'id="supply-district-search"' in form
     assert 'aria-controls="supply-district"' in form
     assert 'placeholder="搜索区县"' in form
@@ -83,7 +86,8 @@ def test_supplier_workbench_assets_are_cache_busted_for_feedback_911() -> None:
     html = WORKBENCH_HTML.read_text(encoding="utf-8")
 
     assert "v12-workbench.css?v=20260911-feedback-911" in html
-    assert "v12-workbench.js?v=20260916-feedback-current-claim-points" in html
+    # 2026-09-23 反馈第 2 条：版本号随 H5 地区搜索改动刷新
+    assert "v12-workbench.js?v=20260923-feedback-922-region-search" in html
 
 
 def test_supplier_customer_name_is_optional_and_blank_is_submitted_unchanged() -> None:
