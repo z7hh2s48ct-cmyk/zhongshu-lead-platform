@@ -2,7 +2,7 @@ import { amountToWan, wanToAmount } from '/h5/business-units.js';
 
 const API='/api/v1',app=document.querySelector('#app'),toastEl=document.querySelector('#toast'),modalRoot=document.querySelector('#modal-root');
 const beijingToday=()=>new Date(Date.now()+8*60*60*1000).toISOString().slice(0,10);
-const S={me:null,view:'overview',id:'',status:'',page:1,processedPage:1,processedCreatedFrom:beijingToday(),processedCreatedTo:beijingToday(),leadSource:'',leadSourceChannel:'',leadKeyword:'',sourceChannelOptions:null,leadCreatedFrom:'',leadCreatedTo:'',leadStatusFilter:'',assignmentStatusFilter:'',leadAssignerId:'',leadSubmitterId:'',leadSupplierCompanyId:'',leadPendingReason:'',leadPhone:'',leadRegion:'',leadReceiverCompanyId:'',leadFilterOptions:null,operationUsers:null,platformLeads:[],supplierLeads:[],supplementHistoryPage:1,publicPoolKeyword:'',publicPoolPhone:'',publicPoolCreatedFrom:'',publicPoolCreatedTo:'',publicPoolSubmitterId:'',publicPoolCustomerSource:'',publicPoolSource:'',publicPoolCompleteness:'',publicPoolDuplicate:'',financeRewardPage:1,financeCompanyKeyword:'',financeCompanyStatus:'',financeCompanyPage:1,financeCompanyId:'',financeLedgerType:'',financePointKind:'',financeDays:30,financeRewardStatus:'',financeSource:'',pointFlowPeriod:'day',pointFlowAnchor:beijingToday(),pointFlowPage:1,platformCities:null,platformDistricts:[],companyKeyword:'',companyLifecycleStatus:'',companyPage:1,telesalesUsers:null,calendarMonth:'',unreadNotifications:0,accountNotifications:[],supplyTerminations:[],supplyTerminationPage:1,returnKeyword:''};
+const S={me:null,view:'overview',id:'',status:'',page:1,processedPage:1,processedCreatedFrom:beijingToday(),processedCreatedTo:beijingToday(),leadSource:'',leadSourceChannel:'',leadKeyword:'',sourceChannelOptions:null,tsKeyword:'',tsPhone:'',tsStatus:'',tsAssignee:'',tsConclusion:'',tsDueFrom:'',tsDueTo:'',tsSource:'',leadCreatedFrom:'',leadCreatedTo:'',leadStatusFilter:'',assignmentStatusFilter:'',leadAssignerId:'',leadSubmitterId:'',leadSupplierCompanyId:'',leadPendingReason:'',leadPhone:'',leadRegion:'',leadReceiverCompanyId:'',leadFilterOptions:null,operationUsers:null,platformLeads:[],supplierLeads:[],supplementHistoryPage:1,publicPoolKeyword:'',publicPoolPhone:'',publicPoolCreatedFrom:'',publicPoolCreatedTo:'',publicPoolSubmitterId:'',publicPoolCustomerSource:'',publicPoolSource:'',publicPoolCompleteness:'',publicPoolDuplicate:'',financeRewardPage:1,financeCompanyKeyword:'',financeCompanyStatus:'',financeCompanyPage:1,financeCompanyId:'',financeLedgerType:'',financePointKind:'',financeDays:30,financeRewardStatus:'',financeSource:'',pointFlowPeriod:'day',pointFlowAnchor:beijingToday(),pointFlowPage:1,platformCities:null,platformDistricts:[],companyKeyword:'',companyLifecycleStatus:'',companyPage:1,telesalesUsers:null,calendarMonth:'',unreadNotifications:0,accountNotifications:[],supplyTerminations:[],supplyTerminationPage:1,returnKeyword:''};
 const P={overview:['首页','layout-dashboard',['*','dashboard.operation.read']],leads:['客资','user-check',['*','lead.manual.manage','lead.supplier.review']],supplements:['待补充','file-text',['*','lead.manual.manage']],closed:['已关闭客资','file-text',['*','lead.supplier.review']],publicPool:['公海池','file-text',['*','lead.manual.manage']],telesales:['电销','phone',['*','verification.read']],dispatch:['派发','hand-claim',['*','lead.dispatch']],companies:['加盟商','building',['*','company.profile.review','company.account.manage']],economics:['积分统计','wallet',['*','reward.read']],returns:['异常','rotate-ccw',['*','return.read']],finance:['资金','wallet',['*']],audit:['日志','search',['*','audit.read']],trace:['客资详情','file-text',['*','audit.read'],true],settings:['平台设置','settings',['*'],true],users:['内部账号','users',['*'],true],calendar:['工作日历','calendar',['*'],true],account:['账号中心','user',['*','dashboard.operation.read'],true]};
 const ADMIN_VIEW_CONTRACT={SUPER_ADMIN:['overview','leads','supplements','closed','publicPool','companies','finance'],OPERATION:['overview','leads','supplements','closed','publicPool','telesales','dispatch','companies','economics']};
 const ROLE_HOME_PRIORITY=['SUPER_ADMIN','OPERATION'];
@@ -747,8 +747,25 @@ async function assignPreDispatch(leadId,refreshView=review){
   }catch(error){toast(error.message,true)}
 }
 async function telesales(){
-  const data=await api(`/v1.2/pre-dispatch-verifications/tasks${qs({page:S.page,page_size:20})}`);
+  const data=await api(`/v1.2/pre-dispatch-verifications/tasks${qs({
+    page:S.page,
+    page_size:20,
+    status:S.tsStatus||undefined,
+    keyword:S.tsKeyword||undefined,
+    phone:S.tsPhone||undefined,
+    assignee_user_id:S.tsAssignee||undefined,
+    conclusion:S.tsConclusion||undefined,
+    source_kind:S.tsSource||undefined,
+    due_from:S.tsDueFrom?`${S.tsDueFrom}T00:00:00+08:00`:undefined,
+    due_to:S.tsDueTo?`${S.tsDueTo}T23:59:59+08:00`:undefined,
+  })}`);
   await loadTelesalesUsers();
+  const telesalesOptions=(S.telesalesUsers||[]).map(user=>`<option value="${esc(user.id)}" ${S.tsAssignee===user.id?'selected':''}>${esc(user.display_name||user.username)}</option>`).join('');
+  const tsSourceOptions=[['','全部来源'],['PLATFORM_MANUAL','平台录入'],['FEISHU_IMPORT','飞书导入'],['SUPPLIER_H5','加盟商提交'],['FEISHU_LEGACY','飞书历史导入']];
+  const tsStatusOptions=[['','进行中（全部）'],['PENDING','待分配'],['IN_PROGRESS','核验中'],['SUBMITTED','已提交'],['RELEASED','已释放']];
+  const tsConclusionOptions=[['','全部结论'],['QUALIFIED','信息合格'],['INFO_INCOMPLETE','信息不全'],['UNVERIFIABLE','无法核验'],['INVALID','无效客资'],['DUPLICATE','疑似重复']];
+  const phoneField=can('lead.phone.export')?`<input class="ops-input" id="ts-filter-phone" type="search" autocomplete="off" placeholder="完整手机号精确搜索" value="${esc(S.tsPhone||'')}">`:'';
+  const filterBar=`<form class="ops-filter" id="ts-filter-form"><input class="ops-input" id="ts-filter-keyword" type="search" autocomplete="off" placeholder="客户姓名搜索" value="${esc(S.tsKeyword||'')}">${phoneField}<select class="ops-input" id="ts-filter-status">${tsStatusOptions.map(([value,text])=>`<option value="${value}" ${S.tsStatus===value?'selected':''}>${text}</option>`).join('')}</select><select class="ops-input" id="ts-filter-assignee"><option value="">全部电销人员</option>${telesalesOptions}</select><select class="ops-input" id="ts-filter-conclusion">${tsConclusionOptions.map(([value,text])=>`<option value="${value}" ${S.tsConclusion===value?'selected':''}>${text}</option>`).join('')}</select><select class="ops-input" id="ts-filter-source">${tsSourceOptions.map(([value,text])=>`<option value="${esc(value)}" ${S.tsSource===value?'selected':''}>${esc(text)}</option>`).join('')}</select><label>参考时间从 <input class="ops-input" id="ts-filter-due-from" type="date" value="${esc(S.tsDueFrom||'')}"></label><label>到 <input class="ops-input" id="ts-filter-due-to" type="date" value="${esc(S.tsDueTo||'')}"></label><button class="ops-btn primary" type="submit">查询</button><button class="ops-btn" type="button" id="ts-filter-reset">重置</button></form>`;
   const rows=(data.items||[]).map((task,index)=>{
     const lead=task.lead||{};
     const nextStep=task.status==='SUBMITTED'?'运营处置电销结论':'电销继续完成事实核验';
@@ -757,8 +774,26 @@ async function telesales(){
       :`<button class="ops-btn" data-pre-assign="${esc(task.lead_id)}">${task.assignee_user_id?'改派':'派发'}</button>`;
     return `<tr><td>${rowSequence(data,index)}</td><td><b>${esc(lead.customer_name||'待核验客户')}</b><br><small>${esc(lead.phone||lead.phone_masked||'--')}</small></td><td>${badge(lead.source_kind)}</td><td>${verificationTaskBadge(task)}</td><td>${esc(telesalesName(task.assignee_user_id))}</td><td>${esc(label(task.conclusion))}</td><td>${esc(nextStep)}</td><td>${fmt(task.due_at)}</td><td>${action}</td></tr>`;
   });
-  shell(`<section class="ops-card"><div class="ops-card-head"><div><h2>前置电销核验</h2><p>运营在此分配或改派；未完成任务持续保留在待处理队列，参考时间不限制电销继续处理。平台来源补充资料由运营处理，加盟商来源才可退回加盟商补正。</p></div></div>${table(['序号','客户','来源','任务状态','电销人员','事实结论','下一步','核验参考时间','操作'],rows)}${pager(data)}</section>`);
+  shell(`<section class="ops-card"><div class="ops-card-head"><div><h2>前置电销核验</h2><p>运营在此分配或改派；未完成任务持续保留在待处理队列，参考时间不限制电销继续处理。平台来源补充资料由运营处理，加盟商来源才可退回加盟商补正。</p></div></div>${filterBar}${table(['序号','客户','来源','任务状态','电销人员','事实结论','下一步','核验参考时间','操作'],rows)}${pager(data)}</section>`);
   bindPager(data,telesales);
+  document.querySelector('#ts-filter-form').onsubmit=event=>{
+    event.preventDefault();
+    S.tsKeyword=document.querySelector('#ts-filter-keyword').value.trim();
+    S.tsPhone=document.querySelector('#ts-filter-phone')?.value.trim()||'';
+    S.tsStatus=document.querySelector('#ts-filter-status').value;
+    S.tsAssignee=document.querySelector('#ts-filter-assignee').value;
+    S.tsConclusion=document.querySelector('#ts-filter-conclusion').value;
+    S.tsSource=document.querySelector('#ts-filter-source').value;
+    S.tsDueFrom=document.querySelector('#ts-filter-due-from').value;
+    S.tsDueTo=document.querySelector('#ts-filter-due-to').value;
+    S.page=1;
+    telesales();
+  };
+  document.querySelector('#ts-filter-reset').onclick=()=>{
+    S.tsKeyword='';S.tsPhone='';S.tsStatus='';S.tsAssignee='';S.tsConclusion='';S.tsSource='';S.tsDueFrom='';S.tsDueTo='';
+    S.page=1;
+    telesales();
+  };
   document.querySelectorAll('[data-pre-assign]').forEach(button=>button.onclick=()=>assignPreDispatch(button.dataset.preAssign,telesales));
   document.querySelectorAll('[data-pre-disposition-task]').forEach(button=>button.onclick=()=>openPreDispatchTask(button.dataset.preDispositionTask));
   if(S.id){const taskId=S.id;S.id='';await openPreDispatchTask(taskId)}
