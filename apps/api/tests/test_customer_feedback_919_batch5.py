@@ -89,16 +89,15 @@ def test_s8_correction_rejects_read_only_fact_fields(db):
                 "category_code": "INTERIOR",
                 "source_channel": "DOUYIN",
                 "budget_min": 100,
-                "consent_confirmed": False,
             },
             reason=None,
             expected_snapshot_version=None,
         )
     assert error.value.code == "LEAD_CORRECTION_FIELD_NOT_ALLOWED"
+    # 2026-09-23 口径：consent_confirmed 改为运营可代改，不再位于只读清单
     assert set(error.value.details["fields"]) == {
         "budget_min",
         "category_code",
-        "consent_confirmed",
         "source_channel",
     }
 
@@ -144,7 +143,9 @@ def test_s8_admin_workbench_correction_lock_markers():
     # 更正模式锁字段：只读/禁用属性与口径提示。
     assert "lockAttrs" in admin_js
     assert "lockSelectAttrs" in admin_js
-    assert "本次更正仅可修改" in admin_js
+    # 2026-09-23 口径：授权勾选在更正中可代改，提示文案随之更新。
+    assert "本次更正可修改" in admin_js
     # 更正提交时锁定字段回填原值，避免 disabled 控件副作用触发后端拒绝。
     assert "phone:item?.phone||null" in admin_js
-    assert "consent_confirmed:Boolean(item?.consent_confirmed)" in admin_js
+    # 授权勾选不再被原值覆盖，跟随勾选状态提交。
+    assert "consent_confirmed:Boolean(item?.consent_confirmed)" not in admin_js
