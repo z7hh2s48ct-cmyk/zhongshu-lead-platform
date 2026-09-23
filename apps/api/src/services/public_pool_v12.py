@@ -24,7 +24,7 @@ from ..core.v12_enums import (
 from ..integrations.feishu import FeishuClient, FeishuRecord
 from .china_regions import region_by_code
 from .dedup_v12 import DedupResult, evaluate_phone
-from .dispatch_v12 import has_receiver_coverage, lead_missing_district_region
+from .dispatch_v12 import has_receiver_coverage
 from .feishu_sync_service import configured_mapping
 from .lead_service import _field, _resolve_region_code
 from .lead_supply_v12 import create_draft, submit_draft, update_draft
@@ -174,9 +174,7 @@ def public_pool_validation_errors(db: Session, lead: Lead) -> dict[str, str]:
         )
         if active_region is None and region_by_code(lead.region_code) is None:
             errors["region_code"] = "标准地区无效或已停用"
-        elif lead_missing_district_region(db, lead):
-            # 2026-09-19 S7：转入派发池前必须具备有效县级地区。
-            errors["region_code"] = "需补齐有效区县（区/县/县级市）后才能转入派发池"
+        # 2026-09-23 口径：缺县不再阻断转入派发池（运营自行担责，前端软提醒）。
     if lead.source_kind != LeadSourceKind.SUPPLIER_H5.value:
         if not _clean_text(lead.source_channel):
             errors["source_channel"] = "必须选择客资来源"
