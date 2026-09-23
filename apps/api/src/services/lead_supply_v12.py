@@ -45,6 +45,7 @@ from .china_regions import region_by_code
 from .dedup_v12 import DedupResult, apply_submission_decision, evaluate_phone
 from .dispatch_v12 import (
     existing_receiver_correction_issues,
+    lead_missing_district_region,
     route_approved_lead_to_pool,
 )
 from .lead_correction_guard import (
@@ -1674,6 +1675,7 @@ def lead_supply_to_dict(
     supplier_company_name: str | None = None,
     region_name: str | None = None,
     region_level: str | None = None,
+    missing_district_region: bool | None = None,
     current_assignment: dict[str, Any] | None = None,
     assignment_history: list[dict[str, Any]] | None = None,
     followup_history: list[dict[str, Any]] | None = None,
@@ -1722,6 +1724,7 @@ def lead_supply_to_dict(
         "region_code": lead.region_code,
         "region_name": region_name,
         "region_level": region_level,
+        "missing_district_region": missing_district_region,
         "category_code": lead.category_code,
         "brand_code": lead.brand_code,
         "source_channel": lead.source_channel,
@@ -2003,6 +2006,7 @@ def lead_supply_list_to_dict(
             ),
             region_name=(regions_by_code.get(lead.region_code).name if regions_by_code.get(lead.region_code) else None),
             region_level=(regions_by_code.get(lead.region_code).level if regions_by_code.get(lead.region_code) else None),
+            missing_district_region=lead_missing_district_region(db, lead),
             current_assignment=current_assignments.get(lead.current_assignment_id),
             assignment_history=(histories.get(lead.id, []) if include_assignment_history else None),
             followup_history=(followups.get(lead.id, []) if include_assignment_history else None),
