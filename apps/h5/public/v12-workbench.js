@@ -153,10 +153,42 @@ async function points(){
   const assignmentMetricTarget=canView('assignments')?{view:'assignments'}:{scroll:'customer-points-ledger'};
   const ledgerItems=rows=>rows.slice(0,8).map(x=>`<article class="wb-item wb-ledger"><div class="wb-item-top"><div><h3>${esc(ledgerLabel(x.type||x.ledger_type))}</h3><p>${fmt(x.created_at)} · 余额 ${num(x.balance_after)} 分</p></div><b class="${Number(x.delta||0)>=0?'plus':'minus'}">${Number(x.delta||0)>=0?'+':''}${num(x.delta)} 分</b></div></article>`).join('');
   const packageList=(packages||[]).slice(0,3).map(p=>`<article class="wb-item"><div class="wb-item-top"><div><h3>${esc(packageName(p))}</h3><p>线下实收 ¥${num(Number(p.cash_amount_cents||0)/100)} · 到账 ${num(Number(p.base_points||0)+Number(p.bonus_points||0))} 分</p></div></div></article>`).join('');
-  shell(`<section class="wb-hero wb-points-hero"><h1>积分</h1><div class="wb-kpis">${metricCard('客资积分',num(account.customer_balance??account.balance),{scroll:'customer-points-ledger',main:true})}${metricCard('供客积分',num(account.supply_balance),{scroll:'supply-points-ledger'})}${metricCard('本月客资积分变化',`${delta>=0?'+':''}${num(delta)}`,{scroll:'customer-points-ledger'})}${metricCard('可用于领取',num(account.available_for_dispatch),assignmentMetricTarget)}</div></section><div class="wb-notice">客资积分用于领取客资，供客积分来自有效供资奖励。正常合作期间两类积分独立使用，不能直接提现。</div><div class="wb-profile-grid"><section class="wb-card" id="customer-points-ledger"><div class="wb-card-head"><div><h2>客资积分流水</h2></div></div><div class="wb-list">${ledgerItems(customerRows)||'<div class="wb-empty">暂无客资积分流水</div>'}</div></section><section class="wb-card" id="supply-points-ledger"><div class="wb-card-head"><div><h2>供客积分流水</h2></div></div><div class="wb-list">${ledgerItems(supplyRows)||'<div class="wb-empty">暂无供客积分流水</div>'}</div></section><section class="wb-card" id="points-packages"><div class="wb-card-head"><h2>线下充值</h2></div><div class="wb-list wb-package-list">${packageList||'<div class="wb-empty">暂无可参考充值档位</div>'}</div>${can('supplier.reward.own.read')?'<div class="wb-actions"><button class="wb-btn" data-go="rewards">查看供客积分奖励</button></div>':''}</section></div>`);
+  shell(`<section class="wb-hero wb-points-hero"><h1>积分</h1><div class="wb-kpis">${metricCard('客资积分',num(account.customer_balance??account.balance),{scroll:'customer-points-ledger',main:true})}${metricCard('供客积分',num(account.supply_balance),{scroll:'supply-points-ledger'})}${metricCard('本月客资积分变化',`${delta>=0?'+':''}${num(delta)}`,{scroll:'customer-points-ledger'})}${metricCard('可用于领取',num(account.available_for_dispatch),assignmentMetricTarget)}</div></section><div class="wb-notice">客资积分用于领取客资，供客积分来自有效供资奖励。正常合作期间两类积分独立使用；供客积分可申请提现，平台审核后线下付款。${can('points.own.read')?'<button class="wb-btn" id="open-withdrawal">申请供客积分提现</button>':''}</div><div class="wb-profile-grid"><section class="wb-card" id="customer-points-ledger"><div class="wb-card-head"><div><h2>客资积分流水</h2></div></div><div class="wb-list">${ledgerItems(customerRows)||'<div class="wb-empty">暂无客资积分流水</div>'}</div></section><section class="wb-card" id="supply-points-ledger"><div class="wb-card-head"><div><h2>供客积分流水</h2></div></div><div class="wb-list">${ledgerItems(supplyRows)||'<div class="wb-empty">暂无供客积分流水</div>'}</div></section><section class="wb-card" id="points-packages"><div class="wb-card-head"><h2>线下充值</h2></div><div class="wb-list wb-package-list">${packageList||'<div class="wb-empty">暂无可参考充值档位</div>'}</div>${can('supplier.reward.own.read')?'<div class="wb-actions"><button class="wb-btn" data-go="rewards">查看供客积分奖励</button></div>':''}</section></div>`);
+  document.querySelector('#open-withdrawal')?.addEventListener('click',()=>{withdrawalSheet().catch(err=>toast(err.message||'暂时无法打开提现申请',true))});
 }
 
 const TERMINATION_ACTIVE_STATUSES=['REQUESTED','TERMINATION_REQUESTED','CLEARING','PENDING_REVIEW','NEED_MORE','APPROVED_PENDING_PAYMENT','PAID_PENDING_WRITE_OFF','PAYMENT_FAILED','SETTLEMENT_ERROR'];
+async function withdrawalSheet(){
+  let policy,available,withdrawals={items:[]};
+  try{
+    [policy,available]=await Promise.all([api('/v1.2/supply-withdrawals/policy'),api('/v1.2/supply-withdrawals/available')]);
+  }catch(err){toast(err.message||'暂时无法打开提现申请',true);return}
+  try{withdrawals=await api('/v1.2/supply-withdrawals?page=1&page_size=10')}catch{}
+  const rows=(withdrawals.items||[]).map(x=>`<article class="wb-item wb-ledger"><div class="wb-item-top"><div><h3>${esc(withdrawalStatusLabel(x.status))} · ${num(x.points_requested)} 分</h3><p>${fmt(x.created_at)}${x.cash_amount_cents_snapshot?` · 应付 ¥${((Number(x.cash_amount_cents_snapshot)-Number(x.fee_cents_snapshot||0))/100).toFixed(2)}`:''}</p></div></div></article>`).join('');
+  const minPoints=Number(policy?.min_withdrawal_points||100);
+  const feeRate=Number(policy?.fee_rate_bp||0);
+  const feeText=feeRate>0?`手续费率 ${(feeRate/100).toFixed(2)}%`:'暂免手续费';
+  openSheet('申请供客积分提现',`<div class="wb-notice">可提现（供客积分）：<b>${num(available?.available)}</b> 分 · 最低提现 ${num(minPoints)} 分 · ${esc(feeText)}。平台审核通过后按快照金额线下付款。</div><form class="wb-form" id="withdrawal-form"><div class="wb-field"><label>提现积分 *</label><input class="wb-input" name="points_requested" type="number" min="${minPoints}" step="1" inputmode="numeric" placeholder="≥ ${minPoints}"></div><div class="wb-field"><label>收款人 *</label><input class="wb-input" name="payee_name" maxlength="128" placeholder="银行账户户名"></div><div class="wb-field"><label>收款银行账号 *</label><input class="wb-input" name="payee_account" maxlength="256" placeholder="对公/对私银行账号"></div><small class="wb-muted">当前支持银行卡收款；二维码收款请联系平台管理员补充登记。</small><button class="wb-btn primary" id="withdrawal-submit">提交提现申请</button></form>${rows?`<div class="wb-card-head"><h2>最近申请</h2></div><div class="wb-list">${rows}</div>`:''}`,()=>{
+    const form=document.querySelector('#withdrawal-form'),submit=document.querySelector('#withdrawal-submit');
+    form.onsubmit=async event=>{
+      event.preventDefault();
+      const fields=new FormData(form);
+      const pointsRequested=Number(fields.get('points_requested')||0);
+      const payeeName=String(fields.get('payee_name')||'').trim();
+      const payeeAccount=String(fields.get('payee_account')||'').trim();
+      if(!Number.isInteger(pointsRequested)||pointsRequested<minPoints){toast(`提现积分不能低于 ${minPoints}`,true);return}
+      if(!payeeName||!payeeAccount){toast('请填写收款人与收款账号',true);return}
+      submit.disabled=true;
+      try{
+        await api('/v1.2/supply-withdrawals',{method:'POST',body:JSON.stringify({points_requested:pointsRequested,payee_name:payeeName,payee_account:payeeAccount,payment_method:'BANK'})});
+      }catch(err){if(form.isConnected)submit.disabled=false;toast(err.message,true);return}
+      toast('提现申请已提交，等待平台审核');
+      if(form.isConnected){closeSheet(form);try{await render()}catch{}}
+    };
+  });
+}
+const WITHDRAWAL_STATUS_LABEL={PENDING_REVIEW:'待平台审核',APPROVED_PENDING_PAYMENT:'审核通过待付款',PAID_PENDING_WRITE_OFF:'已付款待确认',PAID:'已完成',REJECTED:'已驳回',CANCELLED:'已取消'};
+function withdrawalStatusLabel(status){return WITHDRAWAL_STATUS_LABEL[status]||readableLabel(status)}
 function supplyCooperationAllowsUpload(state){return !state||state.cooperation_status==='ACTIVE'&&!TERMINATION_ACTIVE_STATUSES.includes(state.status)}
 function terminationMoney(cents){return `¥${(Number(cents||0)/100).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})}`}
 const TERMINATION_BLOCKER_LABEL={POINTS_SPLIT_RECONCILIATION:'历史积分分账',POINTS_RECONCILIATION:'积分账目核对',SUPPLIED_LEADS_UNFINISHED:'供资客资未完成',RETURNS_UNFINISHED:'退回申请未完成',REWARDS_UNFINISHED:'供客奖励未完成'};

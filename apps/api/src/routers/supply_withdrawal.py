@@ -14,6 +14,10 @@ from ..core.models import SupplyPointsWithdrawal
 from ..core.responses import ok, page
 from ..services.audit import write_audit
 from ..services.supply_withdrawal import (
+    get_withdrawal_policy,
+    publish_withdrawal_policy,
+)
+from ..services.supply_withdrawal import (
     available_supply_points,
     cancel_withdrawal,
     confirm_offline_payment,
@@ -74,9 +78,39 @@ def _require_owner(principal: CurrentPrincipal) -> str:
 
 
 def _can_manage_withdrawals(principal: CurrentPrincipal) -> bool:
-    return principal.can("reward.read") or principal.can("*") or principal.can(
-        "supply.termination.pay"
+    # 2026-09-23 反馈 D3：审核/付款收紧为仅超级管理员（OPERATION 只读）。
+    return principal.can("*")
+
+
+class SupplyWithdrawalPolicyBody(BaseModel):
+    min_withdrawal_points: int = Field(ge=1, le=10_000_000)
+    fee_rate_bp: int = Field(ge=0, le=10000)
+
+
+@router.get("/supply-withdrawals/policy")
+def read_withdrawal_policy(
+    request: Request,
+    principal: CurrentPrincipal,
+    db: Session = Depends(get_db),
+):
+    return ok(request, get_withdrawal_policy(db))
+
+
+@router.put("/supply-withdrawals/policy")
+def update_withdrawal_policy(
+    body: SupplyWithdrawalPolicyBody,
+    request: Request,
+    principal=Depends(require_permissions("*")),
+    db: Session = Depends(get_db),
+):
+    value = publish_withdrawal_policy(
+        db,
+        min_withdrawal_points=body.min_withdrawal_points,
+        fee_rate_bp=body.fee_rate_bp,
+        principal=principal,
     )
+    db.commit()
+    return ok(request, value, "提现策略已发布")
 
 
 @router.get("/supply-withdrawals/available")

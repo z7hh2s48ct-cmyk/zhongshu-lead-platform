@@ -1552,7 +1552,7 @@ async function economics(){
   bindPointFlowControls(economics);
 }
 async function finance(){
-  const [financeDashboard,pointFlows,companyPage,activePackages,allPackages,priceRules,ledgerPage,rewardPage,currentRewardRule,cities,leadPointsSettings,terminationPage,terminationRateConfigs]=await Promise.all([
+  const [financeDashboard,pointFlows,companyPage,activePackages,allPackages,priceRules,ledgerPage,rewardPage,currentRewardRule,cities,leadPointsSettings,terminationPage,terminationRateConfigs,withdrawalPage,withdrawalPolicy]=await Promise.all([
     api(`/v1.2/reports/finance-dashboard${qs({days:S.financeDays,status:S.financeRewardStatus||undefined,source:S.financeSource||undefined})}`),
     api(`/v1.2/reports/point-flows${qs({period:S.pointFlowPeriod,anchor:S.pointFlowAnchor,page:S.pointFlowPage,page_size:20})}`),
     api(`/companies${qs({keyword:S.financeCompanyKeyword,status:S.financeCompanyStatus,page:S.financeCompanyPage,page_size:20})}`),
@@ -1566,6 +1566,8 @@ async function finance(){
     api('/v1.2/admin/lead-points-settings'),
     api(`/v1.2/supply-terminations?page=${S.supplyTerminationPage}&page_size=20`),
     api('/system-configs?domain=supply_termination&status=PUBLISHED'),
+    api(`/v1.2/supply-withdrawals${qs({page:S.financeWithdrawalPage||1,page_size:20})}`),
+    can('*')?api('/v1.2/supply-withdrawals/policy'):Promise.resolve(null),
   ]);
   S.pointFlows=pointFlows;
   S.supplyTerminations=terminationPage.items||[];
@@ -1577,7 +1579,7 @@ async function finance(){
   const packageRows=(allPackages||[]).map(item=>`<tr><td>${esc(item.name)}<br><small>${esc(item.code)} · V${esc(item.version)}</small></td><td>${Number(item.cash_amount_cents||0)/100} 元</td><td>${esc(item.base_points)}</td><td>${esc(item.bonus_points)}</td><td>${esc(item.total_points)}</td><td>${badge(item.status)}</td></tr>`);
   const priceRows=(priceRules||[]).map(item=>`<tr><td>${esc(item.region_code?cityNames.get(item.region_code)||item.region_code:'全部地区')}</td><td>${esc(item.category_code||'全部类目')}</td><td>${esc(item.brand_code||'全部品牌')}</td><td>${esc(item.level_code||'全部等级')}</td><td>${esc(item.points_cost)}</td><td>${badge(item.status)}</td></tr>`);
   const ledgerRows=(ledgerPage.items||[]).map(ledger=>{const ledgerType=ledger.ledger_type||ledger.type;const reversible=['RECHARGE','ADJUST'].includes(ledgerType);return `<tr><td>${fmt(ledger.created_at)}</td><td>${esc(companyNames.get(ledger.company_id)||recordCode(ledger.company_id,'加盟商'))}</td><td>${esc(label(ledger.point_kind||'CUSTOMER'))}</td><td>${esc(label(ledgerType))}</td><td>${esc(ledger.delta>0?`+${ledger.delta}`:ledger.delta)}</td><td>${esc(ledger.balance_after)}</td><td>${esc(ledger.external_reference||'--')}</td><td>${reversible?`<button class="ops-btn danger" data-ledger-reverse="${esc(ledger.id)}">冲正</button>`:'业务流程处理'}</td></tr>`});
-  shell(`${leadPointsSettingsSection(leadPointsSettings)}${supplyTerminationRateSection(terminationRateConfigs,true)}${supplyTerminationSection(terminationPage)}${pointFlowSection(pointFlows)}${financeRechargeSection(financeDashboard,companies,activePackages)}<section class="ops-card ops-finance-accounts"><div class="ops-card-head"><div><h2>加盟商账户与余额</h2><p>选择一个加盟商即可充值、核对账目或查看其完整积分流水。</p></div></div><form class="ops-filter" id="finance-company-filter"><input class="ops-input" id="finance-company-keyword" value="${esc(S.financeCompanyKeyword)}" placeholder="搜索公司名称或编号"><select class="ops-input" id="finance-company-status"><option value="" ${S.financeCompanyStatus===''?'selected':''}>全部状态</option><option value="ACTIVE" ${S.financeCompanyStatus==='ACTIVE'?'selected':''}>正常</option><option value="PENDING" ${S.financeCompanyStatus==='PENDING'?'selected':''}>待审核</option><option value="DISABLED" ${S.financeCompanyStatus==='DISABLED'?'selected':''}>已停用</option></select><button class="ops-btn primary" type="submit">查询</button><button class="ops-btn" type="button" id="finance-company-reset">重置</button>${S.financeCompanyId?'<button class="ops-btn" type="button" id="finance-company-clear">查看全部账户</button>':''}</form>${table(['加盟商','状态','客资积分 / 供客积分','操作'],companyRows)}<div class="ops-pager"><button class="ops-btn" id="finance-company-prev" ${S.financeCompanyPage<=1?'disabled':''}>上一页</button><span>${S.financeCompanyPage}/${financeCompanyPages}，共 ${companyPage.total||0} 家</span><button class="ops-btn" id="finance-company-next" ${S.financeCompanyPage>=financeCompanyPages?'disabled':''}>下一页</button></div></section><details class="ops-finance-drilldown"><summary>查看奖励结算、档位与完整流水</summary><div class="ops-finance-detail-body">${financeRewardSection(financeDashboard)}<section class="ops-card"><div class="ops-card-head"><h2>充值档位</h2><button class="ops-btn primary" id="new-package">新增充值档位</button></div>${table(['档位','线下实收','基础积分','赠送积分','到账积分','状态'],packageRows)}</section><section class="ops-card"><div class="ops-card-head"><div><h2>通用领取价格规则</h2><p>上方未启用统一客资领取积分时，此处规则才用于计算领取价格。</p></div><button class="ops-btn primary" id="new-price-rule">新增价格规则</button></div>${table(['适用地区','业务类目','品牌','加盟商等级','领取积分','状态'],priceRows)}</section><section class="ops-card"><div class="ops-card-head"><div><h2>完整积分流水</h2><p>只允许冲正人工充值和人工调账；领取、退回与奖励必须通过相应业务流程处理。</p></div><select class="ops-input" id="finance-ledger-type" style="width:auto"><option value="" ${S.financeLedgerType===''?'selected':''}>全部类型</option><option value="RECHARGE" ${S.financeLedgerType==='RECHARGE'?'selected':''}>充值</option><option value="ADJUST" ${S.financeLedgerType==='ADJUST'?'selected':''}>人工调整</option><option value="REVERSE" ${S.financeLedgerType==='REVERSE'?'selected':''}>冲正</option></select><select class="ops-input" id="finance-point-kind" style="width:auto"><option value="" ${S.financePointKind===''?'selected':''}>全部积分账户</option><option value="CUSTOMER" ${S.financePointKind==='CUSTOMER'?'selected':''}>客资积分</option><option value="SUPPLY" ${S.financePointKind==='SUPPLY'?'selected':''}>供客积分</option></select></div>${table(['时间','加盟商','积分账户','类型','变化','余额','外部凭据','操作'],ledgerRows)}${pager(ledgerPage)}</section>${rewardSection(rewardPage,currentRewardRule)}</div></details>`);
+  shell(`${leadPointsSettingsSection(leadPointsSettings)}${supplyTerminationRateSection(terminationRateConfigs,true)}${supplyTerminationSection(terminationPage)}${financeWithdrawalSection(withdrawalPage,withdrawalPolicy)}${pointFlowSection(pointFlows)}${financeRechargeSection(financeDashboard,companies,activePackages)}<section class="ops-card ops-finance-accounts"><div class="ops-card-head"><div><h2>加盟商账户与余额</h2><p>选择一个加盟商即可充值、核对账目或查看其完整积分流水。</p></div></div><form class="ops-filter" id="finance-company-filter"><input class="ops-input" id="finance-company-keyword" value="${esc(S.financeCompanyKeyword)}" placeholder="搜索公司名称或编号"><select class="ops-input" id="finance-company-status"><option value="" ${S.financeCompanyStatus===''?'selected':''}>全部状态</option><option value="ACTIVE" ${S.financeCompanyStatus==='ACTIVE'?'selected':''}>正常</option><option value="PENDING" ${S.financeCompanyStatus==='PENDING'?'selected':''}>待审核</option><option value="DISABLED" ${S.financeCompanyStatus==='DISABLED'?'selected':''}>已停用</option></select><button class="ops-btn primary" type="submit">查询</button><button class="ops-btn" type="button" id="finance-company-reset">重置</button>${S.financeCompanyId?'<button class="ops-btn" type="button" id="finance-company-clear">查看全部账户</button>':''}</form>${table(['加盟商','状态','客资积分 / 供客积分','操作'],companyRows)}<div class="ops-pager"><button class="ops-btn" id="finance-company-prev" ${S.financeCompanyPage<=1?'disabled':''}>上一页</button><span>${S.financeCompanyPage}/${financeCompanyPages}，共 ${companyPage.total||0} 家</span><button class="ops-btn" id="finance-company-next" ${S.financeCompanyPage>=financeCompanyPages?'disabled':''}>下一页</button></div></section><details class="ops-finance-drilldown"><summary>查看奖励结算、档位与完整流水</summary><div class="ops-finance-detail-body">${financeRewardSection(financeDashboard)}<section class="ops-card"><div class="ops-card-head"><h2>充值档位</h2><button class="ops-btn primary" id="new-package">新增充值档位</button></div>${table(['档位','线下实收','基础积分','赠送积分','到账积分','状态'],packageRows)}</section><section class="ops-card"><div class="ops-card-head"><div><h2>通用领取价格规则</h2><p>上方未启用统一客资领取积分时，此处规则才用于计算领取价格。</p></div><button class="ops-btn primary" id="new-price-rule">新增价格规则</button></div>${table(['适用地区','业务类目','品牌','加盟商等级','领取积分','状态'],priceRows)}</section><section class="ops-card"><div class="ops-card-head"><div><h2>完整积分流水</h2><p>只允许冲正人工充值和人工调账；领取、退回与奖励必须通过相应业务流程处理。</p></div><select class="ops-input" id="finance-ledger-type" style="width:auto"><option value="" ${S.financeLedgerType===''?'selected':''}>全部类型</option><option value="RECHARGE" ${S.financeLedgerType==='RECHARGE'?'selected':''}>充值</option><option value="ADJUST" ${S.financeLedgerType==='ADJUST'?'selected':''}>人工调整</option><option value="REVERSE" ${S.financeLedgerType==='REVERSE'?'selected':''}>冲正</option></select><select class="ops-input" id="finance-point-kind" style="width:auto"><option value="" ${S.financePointKind===''?'selected':''}>全部积分账户</option><option value="CUSTOMER" ${S.financePointKind==='CUSTOMER'?'selected':''}>客资积分</option><option value="SUPPLY" ${S.financePointKind==='SUPPLY'?'selected':''}>供客积分</option></select></div>${table(['时间','加盟商','积分账户','类型','变化','余额','外部凭据','操作'],ledgerRows)}${pager(ledgerPage)}</section>${rewardSection(rewardPage,currentRewardRule)}</div></details>`);
   bindLeadPointsSettings(leadPointsSettings);
   bindSupplyTerminationRate();
   bindSupplyTerminationActions();
@@ -1602,7 +1604,59 @@ async function finance(){
   document.querySelector('#new-package').onclick=newPointsPackage;
   document.querySelector('#new-price-rule').onclick=newPriceRule;
   bindRewardActions(currentRewardRule);
+  bindWithdrawalActions(withdrawalPage,withdrawalPolicy);
 }
+
+function financeWithdrawalSection(withdrawalPage,policy){
+  const rows=(withdrawalPage.items||[]).map(item=>{
+    const actions=[];
+    if(item.status==='PENDING_REVIEW'){actions.push(`<button class="ops-btn primary" data-wd-review="${esc(item.id)}" data-decision="APPROVE">审核通过</button>`);actions.push(`<button class="ops-btn danger" data-wd-review="${esc(item.id)}" data-decision="REJECT">驳回</button>`);}
+    if(item.status==='APPROVED_PENDING_PAYMENT')actions.push(`<button class="ops-btn primary" data-wd-pay="${esc(item.id)}">记录线下付款</button>`);
+    if(item.status==='PAID_PENDING_WRITE_OFF')actions.push(`<button class="ops-btn primary" data-wd-confirm="${esc(item.id)}">确认核销扣分</button>`);
+    const payable=item.cash_amount_cents_snapshot!=null?Number(item.cash_amount_cents_snapshot)-Number(item.fee_cents_snapshot||0):null;
+    return `<tr><td>${esc(item.company_id)}<br><small>${esc(item.requested_by_name||'--')}</small></td><td>${badge(item.status,withdrawalStatusLabel(item.status))}</td><td>${Number(item.points_requested).toLocaleString('zh-CN')} 分</td><td>${payable!=null?`¥${(payable/100).toFixed(2)}${Number(item.fee_cents_snapshot||0)>0?`<br><small>含手续费 ¥${(Number(item.fee_cents_snapshot)/100).toFixed(2)}</small>`:''}`:'--'}</td><td>${esc(item.payee_name||'--')}<br><small>${esc(item.payment_method||'--')}</small></td><td>${fmt(item.created_at)}</td><td>${actions.length?`<div class="ops-actions">${actions.join('')}</div>`:'--'}</td></tr>`;
+  }).join('');
+  const policyForm=policy?`<form class="ops-filter" id="withdrawal-policy-form"><label>最低提现积分 <input class="ops-input" id="withdrawal-policy-min" type="number" min="1" step="1" value="${Number(policy.min_withdrawal_points||100)}"></label><label>手续费率%（0-100） <input class="ops-input" id="withdrawal-policy-fee" type="number" min="0" max="100" step="0.01" value="${(Number(policy.fee_rate_bp||0)/100).toFixed(2)}"></label><button class="ops-btn primary" type="submit">发布提现策略</button></form>`:`<div class="ops-notice">仅超级管理员可查看与调整提现策略。</div>`;
+  return `<section class="ops-card" id="finance-withdrawals"><div class="ops-card-head"><div><h2>供客积分提现</h2><p>加盟商负责人申请 → 超级管理员审核冻结 → 线下付款 → 确认核销扣分。实际应付 = 现金金额快照 - 手续费。</p></div></div>${policyForm}${table(['加盟商 / 申请人','状态','积分','应付金额','收款方','申请时间','操作'],rows.length?rows:['<tr><td colspan="7" class="ops-empty">暂无提现申请</td></tr>'])}${pager(withdrawalPage)}</section>`;
+}
+
+const WITHDRAWAL_STATUS_LABEL={PENDING_REVIEW:'待审核',APPROVED_PENDING_PAYMENT:'待付款',PAID_PENDING_WRITE_OFF:'待核销',PAID:'已完成',REJECTED:'已驳回',CANCELLED:'已取消'};
+const withdrawalStatusLabel=status=>WITHDRAWAL_STATUS_LABEL[status]||label(status);
+
+function bindWithdrawalActions(withdrawalPage,policy){
+  const refresh=()=>finance();
+  document.querySelectorAll('[data-wd-review]').forEach(button=>button.onclick=()=>{
+    const decision=button.dataset.decision;
+    actionForm({title:decision==='APPROVE'?'审核通过提现申请':'驳回提现申请',message:'审核通过会冻结对应供客积分并按当前兑换比例与手续费率生成金额快照。',labelText:decision==='APPROVE'?'审核说明':'驳回原因',required:true,submitLabel:decision==='APPROVE'?'确认通过':'确认驳回'},async note=>{
+      await api(`/v1.2/admin/supply-withdrawals/${encodeURIComponent(button.dataset.wdReview)}/review`,{method:'POST',body:JSON.stringify({decision,review_note:note})});
+      refresh();
+    });
+  });
+  document.querySelectorAll('[data-wd-pay]').forEach(button=>button.onclick=()=>{
+    actionForm({title:'记录线下付款',message:'登记外部付款凭据；确认前可在付款失败流程中退回。',labelText:'外部付款凭据号',required:true,submitLabel:'登记付款'},async reference=>{
+      await api(`/v1.2/admin/supply-withdrawals/${encodeURIComponent(button.dataset.wdPay)}/record-transfer`,{method:'POST',body:JSON.stringify({external_reference:reference,amount_cents:0,note:reference})});
+      refresh();
+    });
+  });
+  document.querySelectorAll('[data-wd-confirm]').forEach(button=>button.onclick=()=>{
+    actionForm({title:'确认核销扣分',message:'确认后将从该加盟商供客积分账户扣减提现积分，该操作不可撤销。',labelText:'核销说明',required:true,submitLabel:'确认核销'},async note=>{
+      await api(`/v1.2/admin/supply-withdrawals/${encodeURIComponent(button.dataset.wdConfirm)}/confirm`,{method:'POST',body:JSON.stringify({note})});
+      refresh();
+    });
+  });
+  document.querySelector('#withdrawal-policy-form')?.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const minPoints=Number(document.querySelector('#withdrawal-policy-min').value||0);
+    const feePercent=Number(document.querySelector('#withdrawal-policy-fee').value||0);
+    if(!Number.isInteger(minPoints)||minPoints<1){toast('最低提现积分必须为正整数',true);return}
+    if(!Number.isFinite(feePercent)||feePercent<0||feePercent>100){toast('手续费率须为 0-100 的百分比',true);return}
+    try{
+      await api('/v1.2/supply-withdrawals/policy',{method:'PUT',body:JSON.stringify({min_withdrawal_points:minPoints,fee_rate_bp:Math.round(feePercent*100)})});
+      toast('提现策略已发布');refresh();
+    }catch(error){toast(error.message,true)}
+  });
+}
+
 function rechargeCompanyPoints(companyId,companies,packages){
   const company=companies.find(item=>item.id===companyId);
   const options=packages.map(item=>`<option value="${esc(item.id)}" data-cash="${Number(item.cash_amount_cents)}">${esc(item.name)} · ${Number(item.total_points)} 积分</option>`).join('');

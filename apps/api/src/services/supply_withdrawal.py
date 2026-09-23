@@ -7,7 +7,10 @@
 - 可提现额排除未决退回、冻结、在途申请及仍可能冲回的供客积分；
   与既有终止合作结算互斥占用同一批积分。
 - 收款资料随申请保存独立快照；已审核申请更换收款资料必须提交变更申请给超级管理员。
-- 最低提现额度与手续费客户暂未确定（待定），本期不设置、不默认零费用。
+- 2026-09-23 反馈 D2 确认：最低提现额度与手续费率由超级管理员自行设定
+  （SystemConfig domain=supply_withdrawal_policy，版本化发布）；
+  未配置时按默认执行：最低 100 积分、手续费率 0%。手续费在审核通过时
+  与兑换比例一并快照，实际应付 = 现金金额 - 手续费。
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from ..core.models import (
     User,
 )
 from ..core.security import decrypt_text, encrypt_text
+from .audit import write_audit
 from .points_service import change_points, get_or_create_account, lock_points_account
 from .supply_termination import _published_rate
 
@@ -40,6 +44,81 @@ ACTIVE_WITHDRAWAL_STATUSES = {
 }
 REVIEWABLE_STATUSES = {"PENDING_REVIEW"}
 PAYEE_METHODS = {"BANK", "WECHAT_QR", "ALIPAY_QR"}
+
+
+WITHDRAWAL_POLICY_DOMAIN = "supply_withdrawal_policy"
+WITHDRAWAL_POLICY_KEY = "policy"
+DEFAULT_MIN_WITHDRAWAL_POINTS = 100
+DEFAULT_FEE_RATE_BP = 0  # 万分比；0 = 免手续费
+
+
+def get_withdrawal_policy(db: Session) -> dict[str, int]:
+    """最低提现额度与手续费率；未配置时按默认（100 积分 / 0%）。"""
+
+    config = db.scalar(
+        select(SystemConfig)
+        .where(
+            SystemConfig.domain == WITHDRAWAL_POLICY_DOMAIN,
+            SystemConfig.key == WITHDRAWAL_POLICY_KEY,
+            SystemConfig.status == "PUBLISHED",
+        )
+        .order_by(SystemConfig.version.desc())
+        .limit(1)
+    )
+    min_points = DEFAULT_MIN_WITHDRAWAL_POINTS
+    fee_rate_bp = DEFAULT_FEE_RATE_BP
+    if config is not None:
+        raw_min = config.value_json.get("min_withdrawal_points")
+        raw_fee = config.value_json.get("fee_rate_bp")
+        if isinstance(raw_min, int) and not isinstance(raw_min, bool) and raw_min >= 1:
+            min_points = raw_min
+        if isinstance(raw_fee, int) and not isinstance(raw_fee, bool) and 0 <= raw_fee <= 10000:
+            fee_rate_bp = raw_fee
+    return {"min_withdrawal_points": min_points, "fee_rate_bp": fee_rate_bp}
+
+
+def publish_withdrawal_policy(
+    db: Session,
+    *,
+    min_withdrawal_points: int,
+    fee_rate_bp: int,
+    principal,
+) -> dict[str, int]:
+    if not isinstance(min_withdrawal_points, int) or isinstance(min_withdrawal_points, bool) or min_withdrawal_points < 1:
+        raise AppError("WITHDRAWAL_POLICY_INVALID", "最低提现积分必须为正整数", 422)
+    if not isinstance(fee_rate_bp, int) or isinstance(fee_rate_bp, bool) or not 0 <= fee_rate_bp <= 10000:
+        raise AppError("WITHDRAWAL_POLICY_INVALID", "手续费率必须为 0-10000 的万分比", 422)
+    latest_version = db.scalar(
+        select(SystemConfig.version)
+        .where(
+            SystemConfig.domain == WITHDRAWAL_POLICY_DOMAIN,
+            SystemConfig.key == WITHDRAWAL_POLICY_KEY,
+        )
+        .order_by(SystemConfig.version.desc())
+        .limit(1)
+    )
+    value = {"min_withdrawal_points": min_withdrawal_points, "fee_rate_bp": fee_rate_bp}
+    config = SystemConfig(
+        domain=WITHDRAWAL_POLICY_DOMAIN,
+        key=WITHDRAWAL_POLICY_KEY,
+        value_json=value,
+        version=(latest_version or 0) + 1,
+        status="PUBLISHED",
+        effective_at=_now(),
+        published_by=principal.user_id if principal else None,
+    )
+    db.add(config)
+    db.flush()
+    write_audit(
+        db,
+        principal=principal,
+        action="V12_WITHDRAWAL_POLICY_UPDATE",
+        resource_type="system_config",
+        resource_id=config.id,
+        after={**value, "version": config.version},
+        reason="超级管理员更新提现策略（最低额度/手续费率）",
+    )
+    return value
 
 
 def _now() -> datetime:
@@ -135,6 +214,14 @@ def create_withdrawal(
         raise AppError("WITHDRAWAL_QRCODE_REQUIRED", "二维码收款必须上传收款二维码", 422)
     if not isinstance(points_requested, int) or points_requested <= 0:
         raise AppError("WITHDRAWAL_AMOUNT_INVALID", "提现积分必须为正整数", 422)
+    policy = get_withdrawal_policy(db)
+    if points_requested < policy["min_withdrawal_points"]:
+        raise AppError(
+            "WITHDRAWAL_BELOW_MINIMUM",
+            f"低于最低提现额度（{policy['min_withdrawal_points']} 积分）",
+            422,
+            policy,
+        )
     availability = available_supply_points(db, company_id=company_id)
     if points_requested > availability["available"]:
         raise AppError(
@@ -203,8 +290,13 @@ def review_withdrawal(
             availability,
         )
     config, rate = _published_rate(db, as_of=_now())
+    policy = get_withdrawal_policy(db)
+    cash_amount = item.points_requested * rate
+    fee_cents = cash_amount * policy["fee_rate_bp"] // 10000
     item.cash_cents_per_point_snapshot = rate
-    item.cash_amount_cents_snapshot = item.points_requested * rate
+    item.cash_amount_cents_snapshot = cash_amount
+    item.fee_rate_bp_snapshot = policy["fee_rate_bp"]
+    item.fee_cents_snapshot = fee_cents
     item.rate_config_id = config.id
     item.review_note = review_note.strip()
     item.reviewed_by = reviewed_by
@@ -257,7 +349,8 @@ def record_offline_payment(
             "收款资料变更待审核，先处理变更再付款",
             409,
         )
-    if int(amount_cents) != int(item.cash_amount_cents_snapshot or 0):
+    payable = int(item.cash_amount_cents_snapshot or 0) - int(item.fee_cents_snapshot or 0)
+    if int(amount_cents) != payable:
         raise AppError(
             "WITHDRAWAL_PAYMENT_AMOUNT_MISMATCH",
             "付款金额与审批快照不一致",
@@ -334,7 +427,9 @@ def confirm_offline_payment(
             "终止合作流程进行中，需先完成终止结算或恢复合作",
             409,
         )
-    if int(item.payment_amount_cents or 0) != int(item.cash_amount_cents_snapshot or 0):
+    # 2026-09-23 D2：按「现金金额 - 手续费」的应付口径校验。
+    payable = int(item.cash_amount_cents_snapshot or 0) - int(item.fee_cents_snapshot or 0)
+    if int(item.payment_amount_cents or 0) != payable:
         raise AppError("WITHDRAWAL_PAYMENT_AMOUNT_MISMATCH", "付款金额与审批快照不一致", 409)
     account = db.scalar(
         select(PointsAccount).where(PointsAccount.company_id == item.company_id).with_for_update()
@@ -467,6 +562,8 @@ def withdrawal_to_dict(
         "payee_qrcode_url": item.payee_qrcode_url if reveal_payee else None,
         "cash_cents_per_point_snapshot": item.cash_cents_per_point_snapshot,
         "cash_amount_cents_snapshot": item.cash_amount_cents_snapshot,
+        "fee_rate_bp_snapshot": item.fee_rate_bp_snapshot,
+        "fee_cents_snapshot": item.fee_cents_snapshot,
         "review_note": item.review_note,
         "approved_at": item.approved_at.isoformat() if item.approved_at else None,
         "payment_external_reference": item.payment_external_reference,
