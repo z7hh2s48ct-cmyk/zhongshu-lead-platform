@@ -96,6 +96,8 @@ def normalized_lead_report_filters(filters: dict[str, Any]) -> dict[str, Any]:
         "created_from": _datetime_value(filters.get("created_from")),
         "created_to": _datetime_value(filters.get("created_to")),
         "source_kind": _upper(filters.get("source_kind")),
+        "source_channel": _upper(filters.get("source_channel")),
+        "keyword": _text(filters.get("keyword")),
         "supplier_company_id": _text(filters.get("supplier_company_id")),
         "submitter_user_id": _text(filters.get("submitter_user_id")),
         "phone_hash": phone_hash
@@ -128,6 +130,20 @@ def _conditions(filters: dict[str, Any], current_assignment) -> list[Any]:
         conditions.append(Lead.created_at < values["created_to"])
     if values["source_kind"]:
         conditions.append(Lead.source_kind == values["source_kind"])
+    if values["source_channel"]:
+        # 2026-09-23 反馈 F1(a)：来源渠道作为独立筛选维度。
+        conditions.append(Lead.source_channel == values["source_channel"])
+    if values["keyword"]:
+        # 2026-09-23 反馈 F1(c)：关键词覆盖具体来源，可捞出历史写在
+        # 「具体来源」里的 广告/抖音/直播 等词（对齐公海池能力）。
+        conditions.append(
+            or_(
+                Lead.customer_name.contains(values["keyword"], autoescape=True),
+                Lead.city.contains(values["keyword"], autoescape=True),
+                Lead.district.contains(values["keyword"], autoescape=True),
+                Lead.source_detail.contains(values["keyword"], autoescape=True),
+            )
+        )
     if values["supplier_company_id"]:
         conditions.append(Lead.supplier_company_id == values["supplier_company_id"])
     if values["submitter_user_id"]:
