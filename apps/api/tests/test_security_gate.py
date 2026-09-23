@@ -675,7 +675,8 @@ def test_repository_waivers_keep_explicit_first_waived_dates() -> None:
     assert any(
         waiver["first_waived_on"] < waiver["created_on"] for waiver in payload["waivers"]
     )
-    load_waivers(Path("security/waivers.json"), today=date(2026, 9, 4))
+    # 2026-09-23 续期批次：锚点随最近一次续期顺延（created_on 必须不晚于锚点日）。
+    load_waivers(Path("security/waivers.json"), today=date(2026, 9, 23))
 
 
 def test_semgrep_scan_errors_and_schema_damage_fail_closed() -> None:
@@ -976,7 +977,8 @@ def test_security_workflow_executes_policy_from_protected_base() -> None:
     assert "--waivers ../policy/security/waivers.json" in source
     assert "if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'" in source
     assert "--event-name \"${{ github.event_name }}\"" in source
-    assert "--git-ref \"${{ github.ref }}\"" in source
+    # 2026-09-23：PR 事件传基分支 ref，使门禁的 main-only 语义在 PR 上成立。
+    assert "--git-ref \"refs/heads/${{ github.event.pull_request.base.ref || github.ref_name }}\"" in source
     assert "--candidate-sha \"$CANDIDATE_SHA\"" in source
     assert "--policy-sha \"$POLICY_SHA\"" in source
     assert "waivers-policy.json" in source

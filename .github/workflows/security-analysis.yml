@@ -316,7 +316,7 @@ jobs:
             --image-archive dist/security/app-image.tar \
             --waivers ../policy/security/waivers.json \
             --event-name "${{ github.event_name }}" \
-            --git-ref "${{ github.ref }}" \
+            --git-ref "refs/heads/${{ github.event.pull_request.base.ref || github.ref_name }}" \
             --candidate-sha "$CANDIDATE_SHA" \
             --policy-sha "$POLICY_SHA" \
             --output dist/security/security-gate.json
