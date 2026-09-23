@@ -236,6 +236,47 @@ async function searchSupplyDistricts(keyword){
   });
 }
 
+function supplyCitySearchOptions(matches){
+  const options=[];
+  (matches||[]).forEach(item=>{
+    if(item.level==='CITY')options.push({value:item.code,label:item.path_label||item.option_name||item.name,city:item,district:null});
+    else if(item.level==='DISTRICT'){
+      const path=item.path||[];
+      const city=path.find(node=>node.level==='CITY');
+      options.push({value:`DISTRICT:${item.code}`,label:item.path_label||item.name,city,district:{...item,city_code:city?.code||''}});
+    }
+  });
+  return options;
+}
+
+function renderSupplyCitySearchResults(citySelect,matches,emptyStateId){
+  const options=supplyCitySearchOptions(matches);
+  zsSetSafeHtml(citySelect,`<option value="">请选择搜索结果</option>${options.map(option=>`<option value="${esc(option.value)}">${esc(option.label)}</option>`).join('')}`);
+  const emptyState=document.querySelector(`#${emptyStateId}`);
+  if(emptyState){emptyState.textContent=options.length?'':'未找到匹配地区，请更换关键词。';emptyState.hidden=Boolean(options.length);}
+  return options;
+}
+
+async function applySupplyDistrictSelection(city,district){
+  const citySelect=document.querySelector('#supply-city');
+  const districtSelect=document.querySelector('#supply-district');
+  const townshipSelect=document.querySelector('#supply-township');
+  if(!citySelect||!districtSelect||!city?.code||!district?.code)return;
+  supplyState.districts=await loadSupplyDistricts(city.code);
+  if(!citySelect.isConnected)return;
+  filterSupplyRegionOptions(citySelect,supplyState.cities,'','暂不确定，提交后由电销补充');
+  citySelect.value=city.code;
+  zsSetSafeHtml(districtSelect,`<option value="">暂不确定 / 全市范围</option>${supplyState.districts.map(row=>`<option value="${esc(row.code)}" ${row.code===district.code?'selected':''}>${esc(row.option_name||row.name)}</option>`).join('')}`);
+  districtSelect.value=district.code;
+  const districtSearch=document.querySelector('#supply-district-search');
+  if(districtSearch)districtSearch.value='';
+  const districtEmpty=document.querySelector('#supply-district-empty');
+  if(districtEmpty)districtEmpty.hidden=true;
+  const townships=await loadSupplyTownships(district.code);
+  if(!districtSelect.isConnected||districtSelect.value!==district.code)return;
+  zsSetSafeHtml(townshipSelect,`<option value="">可选，精确到乡镇/街道</option>${townships.map(row=>`<option value="${esc(row.code)}">${esc(row.name)}</option>`).join('')}`);
+}
+
 async function loadSupplyTownships(districtCode){
   return districtCode
     ?await api(`/master-data/regions?parent_code=${encodeURIComponent(districtCode)}&level=TOWNSHIP`)
@@ -384,7 +425,7 @@ async function openSupplyForm(item=null,intent=beginSheetIntent()){
   const selectedTownship=townships.find(row=>row.code===item?.region_code);
   const title=item?'完善客资资料':'上传客资';
   const note=(item?.review_note?`<div class="wb-notice">平台修改说明：${esc(item.review_note)}</div>`:'')+supplyIdentityView();
-  openSheet(title,`${note}<form class="wb-form wb-supply-form" id="supply-form" novalidate><div class="wb-form-error" id="supply-form-error" role="alert" hidden></div><section class="wb-supply-section"><h3>客户信息</h3><div class="wb-row"><div class="wb-field"><label for="supply-name">客户姓名</label><input class="wb-input" id="supply-name" data-supply-field maxlength="64" autocomplete="name" value="${esc(item?.customer_name==='未填写'?'':item?.customer_name||'')}"></div><div class="wb-field"><label for="supply-phone">客户手机号 *</label><input class="wb-input" id="supply-phone" data-supply-field inputmode="tel" maxlength="32" autocomplete="tel" placeholder="请输入 11 位手机号" value="${esc(item?.phone||'')}"></div></div><div class="wb-row"><div class="wb-field"><label for="supply-city">所在地城市</label><input class="wb-input wb-region-search" id="supply-city-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索省份或城市" aria-controls="supply-city"><select class="wb-select" id="supply-city" data-supply-field><option value="">暂不确定，提交后由电销补充</option>${cities.map(row=>`<option value="${esc(row.code)}" ${selectedCity?.code===row.code?'selected':''}>${esc(row.option_name||row.name)}</option>`).join('')}</select></div><div class="wb-field"><label for="supply-district">所在地区县</label><input class="wb-input wb-region-search" id="supply-district-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索区县" aria-controls="supply-district"><select class="wb-select" id="supply-district"><option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}" ${selectedDistrict?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></div><div class="wb-field"><label for="supply-township">所在地乡镇/街道</label><select class="wb-select" id="supply-township"><option value="">可选，精确到乡镇/街道</option>${townships.map(row=>`<option value="${esc(row.code)}" ${selectedTownship?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></section><section class="wb-supply-section"><h3>客户需求</h3><div class="wb-row"><div class="wb-field"><label for="supply-source">获客来源</label><select class="wb-select" id="supply-source">${supplyOptions(SUPPLY_SOURCES,item?.source_channel||'供应商推荐','请选择获客来源')}</select></div><div class="wb-field"><label for="supply-category">需求类型</label><select class="wb-select" id="supply-category">${supplyOptions(SUPPLY_CATEGORIES,item?.category_code||'','请选择需求类型')}</select></div></div><div class="wb-field"><label for="supply-need">需求说明</label><textarea class="wb-textarea" id="supply-need" data-supply-field maxlength="2000" placeholder="可填写建房或装修地点、计划、时间等关键信息">${esc(item?.need_summary||'')}</textarea></div><div class="wb-row"><div class="wb-field"><label for="supply-budget-min">预算最低（万元）</label><input class="wb-input" id="supply-budget-min" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_min))}"></div><div class="wb-field"><label for="supply-budget-max">预算最高（万元）</label><input class="wb-input" id="supply-budget-max" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_max))}"></div></div></section><label class="wb-choice wb-supply-consent"><input type="checkbox" id="supply-consent" data-supply-field ${item?.consent_confirmed?'checked':''}><span><b>我确认已获得客户授权 *</b><small>客户知晓其联系方式和需求将用于业务对接。</small></span></label><div class="wb-actions"><button class="wb-btn" type="button" id="supply-save-draft">保存草稿</button><button class="wb-btn primary" type="button" id="supply-submit">提交审核</button></div></form>`,()=>{
+  openSheet(title,`${note}<form class="wb-form wb-supply-form" id="supply-form" novalidate><div class="wb-form-error" id="supply-form-error" role="alert" hidden></div><section class="wb-supply-section"><h3>客户信息</h3><div class="wb-row"><div class="wb-field"><label for="supply-name">客户姓名</label><input class="wb-input" id="supply-name" data-supply-field maxlength="64" autocomplete="name" value="${esc(item?.customer_name==='未填写'?'':item?.customer_name||'')}"></div><div class="wb-field"><label for="supply-phone">客户手机号 *</label><input class="wb-input" id="supply-phone" data-supply-field inputmode="tel" maxlength="32" autocomplete="tel" placeholder="请输入 11 位手机号" value="${esc(item?.phone||'')}"></div></div><div class="wb-row"><div class="wb-field"><label for="supply-city">所在地城市</label><input class="wb-input wb-region-search" id="supply-city-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索城市或区县" aria-controls="supply-city"><select class="wb-select" id="supply-city" data-supply-field><option value="">暂不确定，提交后由电销补充</option>${cities.map(row=>`<option value="${esc(row.code)}" ${selectedCity?.code===row.code?'selected':''}>${esc(row.option_name||row.name)}</option>`).join('')}</select></div><div class="wb-field"><label for="supply-district">所在地区县</label><input class="wb-input wb-region-search" id="supply-district-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索区县" aria-controls="supply-district"><select class="wb-select" id="supply-district"><option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}" ${selectedDistrict?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></div><div class="wb-field"><label for="supply-township">所在地乡镇/街道</label><select class="wb-select" id="supply-township"><option value="">可选，精确到乡镇/街道</option>${townships.map(row=>`<option value="${esc(row.code)}" ${selectedTownship?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></section><section class="wb-supply-section"><h3>客户需求</h3><div class="wb-row"><div class="wb-field"><label for="supply-source">获客来源</label><select class="wb-select" id="supply-source">${supplyOptions(SUPPLY_SOURCES,item?.source_channel||'供应商推荐','请选择获客来源')}</select></div><div class="wb-field"><label for="supply-category">需求类型</label><select class="wb-select" id="supply-category">${supplyOptions(SUPPLY_CATEGORIES,item?.category_code||'','请选择需求类型')}</select></div></div><div class="wb-field"><label for="supply-need">需求说明</label><textarea class="wb-textarea" id="supply-need" data-supply-field maxlength="2000" placeholder="可填写建房或装修地点、计划、时间等关键信息">${esc(item?.need_summary||'')}</textarea></div><div class="wb-row"><div class="wb-field"><label for="supply-budget-min">预算最低（万元）</label><input class="wb-input" id="supply-budget-min" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_min))}"></div><div class="wb-field"><label for="supply-budget-max">预算最高（万元）</label><input class="wb-input" id="supply-budget-max" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_max))}"></div></div></section><label class="wb-choice wb-supply-consent"><input type="checkbox" id="supply-consent" data-supply-field ${item?.consent_confirmed?'checked':''}><span><b>我确认已获得客户授权 *</b><small>客户知晓其联系方式和需求将用于业务对接。</small></span></label><div class="wb-actions"><button class="wb-btn" type="button" id="supply-save-draft">保存草稿</button><button class="wb-btn primary" type="button" id="supply-submit">提交审核</button></div></form>`,()=>{
     document.querySelector('#supply-form').onsubmit=event=>event.preventDefault();
     const citySelect=document.querySelector('#supply-city');
     const districtSelect=document.querySelector('#supply-district');
@@ -395,7 +436,21 @@ async function openSupplyForm(item=null,intent=beginSheetIntent()){
     bindSupplyRegionEmpty(districtSearch);
     filterSupplyRegionOptions(citySelect,supplyState.cities,'','暂不确定，提交后由电销补充');
     filterSupplyRegionOptions(districtSelect,supplyState.districts,'','暂不确定 / 全市范围');
-    document.querySelector('#supply-city-search').oninput=event=>filterSupplyRegionOptions(citySelect,supplyState.cities,event.target.value,'暂不确定，提交后由电销补充');
+    let citySearchMatches=[];
+    let citySearchIntent=0;
+    citySearch.oninput=async event=>{
+      const keyword=event.target.value.trim(),intent=++citySearchIntent;
+      if(!keyword){filterSupplyRegionOptions(citySelect,supplyState.cities,'','暂不确定，提交后由电销补充');return;}
+      try{
+        const matches=await api(`/master-data/regions/search?keyword=${encodeURIComponent(keyword)}&limit=30`);
+        if(intent!==citySearchIntent||!citySearch.isConnected)return;
+        citySearchMatches=renderSupplyCitySearchResults(citySelect,matches,'supply-city-empty');
+      }catch(error){
+        if(intent!==citySearchIntent)return;
+        const emptyState=document.querySelector('#supply-city-empty');
+        if(emptyState){emptyState.textContent=error.message||'地区搜索失败，请稍后重试';emptyState.hidden=false;}
+      }
+    };
     let districtSearchIntent=0;
     districtSearch.oninput=async event=>{
       const keyword=event.target.value.trim(),intent=++districtSearchIntent;
@@ -407,6 +462,12 @@ async function openSupplyForm(item=null,intent=beginSheetIntent()){
       }catch(error){if(intent===districtSearchIntent)document.querySelector('#supply-district-empty').textContent=error.message||'地区搜索失败，请稍后重试';}
     };
     citySelect.onchange=async event=>{
+      const selectedValue=event.target.value||'';
+      if(selectedValue.startsWith('DISTRICT:')){
+        const option=citySearchMatches.find(item=>item.value===selectedValue);
+        if(option?.district)await applySupplyDistrictSelection(option.city,option.district);
+        return;
+      }
       const districts=await loadSupplyDistricts(event.target.value);
       if(!citySelect.isConnected)return;
       districtSelect.value='';

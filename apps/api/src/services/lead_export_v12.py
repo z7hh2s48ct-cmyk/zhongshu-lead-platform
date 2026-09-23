@@ -363,16 +363,22 @@ def lead_report_to_dicts(
             )
             .subquery("ranked_report_pre_dispatch_tasks")
         )
-        task_rows = db.scalars(
-            select(VerificationTask)
+        pre_dispatch_assignee = aliased(User, name="pre_dispatch_assignee")
+        task_rows = db.execute(
+            select(VerificationTask, pre_dispatch_assignee.display_name)
             .join(
                 ranked_tasks,
                 ranked_tasks.c.task_id == VerificationTask.id,
             )
+            .outerjoin(
+                pre_dispatch_assignee,
+                pre_dispatch_assignee.id == VerificationTask.assignee_user_id,
+            )
             .where(ranked_tasks.c.row_number == 1)
         ).all()
         latest_pre_dispatch_tasks = {
-            task.lead_id: task for task in task_rows
+            task.lead_id: (task, assignee_name)
+            for task, assignee_name in task_rows
         }
     assignment_ids = {
         row.assignment.id for row in rows if row.assignment is not None
@@ -411,7 +417,13 @@ def lead_report_to_dicts(
     for sequence, row in enumerate(rows, start=sequence_start):
         lead = row.lead
         assignment = row.assignment
-        latest_pre_dispatch_task = latest_pre_dispatch_tasks.get(lead.id)
+        latest_pre_dispatch_entry = latest_pre_dispatch_tasks.get(lead.id)
+        latest_pre_dispatch_task = (
+            latest_pre_dispatch_entry[0] if latest_pre_dispatch_entry else None
+        )
+        latest_pre_dispatch_assignee_name = (
+            latest_pre_dispatch_entry[1] if latest_pre_dispatch_entry else None
+        )
         franchise_handler_name, franchise_handler_kind = _franchise_handler(row)
         phone = decrypt_text(lead.phone_encrypted)
         source_display = (
@@ -444,6 +456,18 @@ def lead_report_to_dicts(
                 "latest_pre_dispatch_task_id": (
                     latest_pre_dispatch_task.id
                     if latest_pre_dispatch_task
+                    else None
+                ),
+                "latest_pre_dispatch_assignee_user_id": (
+                    latest_pre_dispatch_task.assignee_user_id
+                    if latest_pre_dispatch_task
+                    else None
+                ),
+                "latest_pre_dispatch_assignee_name": latest_pre_dispatch_assignee_name,
+                "latest_pre_dispatch_assigned_at": (
+                    latest_pre_dispatch_task.assigned_at.isoformat()
+                    if latest_pre_dispatch_task
+                    and latest_pre_dispatch_task.assigned_at
                     else None
                 ),
                 "latest_pre_dispatch_contact_result": (
