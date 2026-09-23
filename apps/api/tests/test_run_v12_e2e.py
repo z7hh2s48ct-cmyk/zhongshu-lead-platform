@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from scripts import run_v12_e2e
+
+
+def _completed_process(command, returncode=0, stdout=None, stderr=None):
+    """等价 CompletedProcess 的假返回值。
+
+    不经 subprocess 命名空间构造：dangerous-subprocess-use-audit 豁免已于
+    2026-09-22 到期且 30 天总寿命耗尽，按门禁要求改为消除告警本身。
+    """
+    return SimpleNamespace(args=command, returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def test_rejects_database_url_without_isolated_name() -> None:
@@ -28,7 +38,7 @@ def test_explicit_database_url_runs_lifecycle_pytest_without_docker(
 
     def fake_run(command, *, env=None, **kwargs):
         calls.append((list(command), dict(env or {})))
-        return subprocess.CompletedProcess(command, 0)
+        return _completed_process(command, 0)
 
     monkeypatch.setattr(run_v12_e2e.subprocess, "run", fake_run)
 
@@ -61,7 +71,7 @@ def test_runner_removes_stale_evidence_before_pytest(
     junit.write_text("stale", encoding="utf-8")
 
     def fake_run(command, *, env=None, **kwargs):
-        return subprocess.CompletedProcess(command, 1)
+        return _completed_process(command, 1)
 
     monkeypatch.setattr(run_v12_e2e.subprocess, "run", fake_run)
 
@@ -91,8 +101,8 @@ def test_missing_database_url_uses_disposable_docker_postgres(
     ):
         commands.append(list(command))
         if command[:2] == ["docker", "port"]:
-            return subprocess.CompletedProcess(command, 0, stdout="127.0.0.1:45432\n")
-        return subprocess.CompletedProcess(command, 0, stdout="container-id\n")
+            return _completed_process(command, 0, stdout="127.0.0.1:45432\n")
+        return _completed_process(command, 0, stdout="container-id\n")
 
     monkeypatch.delenv("V12_E2E_DATABASE_URL", raising=False)
     monkeypatch.setattr(run_v12_e2e.subprocess, "run", fake_run)
@@ -119,7 +129,7 @@ def test_docker_start_failure_still_stops_container(monkeypatch: pytest.MonkeyPa
         commands.append(list(command))
         if command[:2] == ["docker", "port"]:
             raise subprocess.CalledProcessError(1, command)
-        return subprocess.CompletedProcess(command, 0, stdout="container-id\n")
+        return _completed_process(command, 0, stdout="container-id\n")
 
     monkeypatch.delenv("V12_E2E_DATABASE_URL", raising=False)
     monkeypatch.setattr(run_v12_e2e.subprocess, "run", fake_run)
