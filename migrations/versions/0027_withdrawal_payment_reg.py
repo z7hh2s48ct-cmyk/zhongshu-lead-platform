@@ -54,13 +54,21 @@ def upgrade() -> None:
     if INDEX_NAME not in _indexes():
         op.create_index(INDEX_NAME, TABLE, ["payment_registration_no"], unique=True)
     # 兼容历史：已登记付款但没有内部编号的记录，用原外部凭据号回填（来源 MANUAL）。
+    withdrawals = sa.table(
+        TABLE,
+        sa.column("payment_registration_no", sa.String(64)),
+        sa.column("payment_registration_no_source", sa.String(16)),
+        sa.column("payment_external_reference", sa.String(128)),
+    )
     op.execute(
-        sa.text(
-            f"UPDATE {TABLE} "
-            "SET payment_registration_no = payment_external_reference, "
-            "payment_registration_no_source = 'MANUAL' "
-            "WHERE payment_registration_no IS NULL "
-            "AND payment_external_reference IS NOT NULL"
+        withdrawals.update()
+        .where(
+            withdrawals.c.payment_registration_no.is_(None),
+            withdrawals.c.payment_external_reference.is_not(None),
+        )
+        .values(
+            payment_registration_no=withdrawals.c.payment_external_reference,
+            payment_registration_no_source="MANUAL",
         )
     )
 
