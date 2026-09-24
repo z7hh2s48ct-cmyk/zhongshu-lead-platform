@@ -60,6 +60,7 @@ services:
       APP_ENV: "production"
       AUTO_CREATE_SCHEMA: "false"
       LEGACY_WRITE_ENABLED: "false"
+      PUBLIC_POOL_AUTO_REMATCH_ENABLED: ${PUBLIC_POOL_AUTO_REMATCH_ENABLED:-0}
       # 与 api 对齐：启动校验要求该开关显式声明，不依赖部署方记得写进 .env。
       TRUST_PROXY_HEADERS: "true"
     logging: *json-logging

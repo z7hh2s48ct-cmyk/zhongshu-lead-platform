@@ -269,7 +269,22 @@ function sourceChannelName(code){
   const hit=(S.sourceChannelOptions||[]).find(item=>item[0]===code);
   return hit?hit[1]:code;
 }
-function publicPoolValidationText(item){const errors=Object.values(item.public_pool_validation_errors||{});if(errors.length)return errors.join('；');if(item.status==='DUPLICATE')return '手机号查重结论待处理';return '资料可提交复核'}
+function publicPoolRematchState(item){
+  // 仅「加盟商提交、仍在公海、因当地无接收方被卡」的客资需要区分重匹配状态。
+  // 列表接口每次实时重算 public_pool_validation_errors，receiver_coverage 消失即代表已出现合格接收方。
+  if(item.source_kind!=='SUPPLIER_H5'||item.status!=='PUBLIC_POOL')return '';
+  if(item.pending_reason!=='PUBLIC_POOL_NO_LOCAL_RECEIVER')return '';
+  return item.public_pool_validation_errors?.receiver_coverage?'NO_RECEIVER':'RECEIVER_AVAILABLE';
+}
+function publicPoolValidationText(item){
+  const rematch=publicPoolRematchState(item);
+  if(rematch==='RECEIVER_AVAILABLE')return '已找到可接收加盟商，待重新匹配转入派发池';
+  const errors=Object.values(item.public_pool_validation_errors||{});
+  if(rematch==='NO_RECEIVER')return errors.join('；')||'当地仍无可接收加盟商';
+  if(errors.length)return errors.join('；');
+  if(item.status==='DUPLICATE')return '手机号查重结论待处理';
+  return '资料可提交复核';
+}
 function publicPoolTelesalesBlockReason(item){
   if(!['PLATFORM_MANUAL','FEISHU_IMPORT'].includes(item.source_kind))return '加盟商提供的客资不走公海池直接电销入口';
   if(item.status!=='DRAFT')return '当前状态不可直接分配电销';
@@ -323,7 +338,11 @@ async function publicPool(){
       actions.push(`<button class="ops-btn primary" data-public-pool-transfer="${esc(item.id)}">转入派发池</button>`);
       if(!publicPoolTelesalesBlockReason(item))actions.push(`<button class="ops-btn" data-public-pool-telesales="${esc(item.id)}">分配电销核验</button>`);
     }
-    if(item.status==='PUBLIC_POOL')actions.push(`<button class="ops-btn primary" data-public-pool-transfer="${esc(item.id)}">重新匹配并转入派发池</button>`);
+    if(item.status==='PUBLIC_POOL'){
+      const rematch=publicPoolRematchState(item);
+      const transferLabel=rematch==='RECEIVER_AVAILABLE'?'已可接收 · 立即重新匹配转入派发池':'重新匹配并转入派发池';
+      actions.push(`<button class="ops-btn ${rematch==='RECEIVER_AVAILABLE'?'gold':'primary'}" data-public-pool-transfer="${esc(item.id)}">${transferLabel}</button>`);
+    }
     if(item.status==='DUPLICATE'&&can('lead.dedup.override'))actions.push(`<button class="ops-btn gold" data-public-pool-override="${esc(item.id)}">确认非重复并转入派发池</button>`);
     if(canDeleteOperationLead())actions.push(`<button class="ops-btn danger" data-public-pool-delete="${esc(item.id)}">删除</button>`);
     return `<tr><td>${rowSequence(data,index)}</td><td><b>${esc(item.customer_name||'未填写')}</b><br><small>${esc(item.phone||item.phone_masked||'--')}</small></td><td>${badge(item.customer_source)}</td><td>${badge(item.source_kind)}</td><td>${esc(item.city||'待补充')} ${esc(item.district||'')}</td><td>${esc(item.source_display||label(item.source_channel)||'未填写')}</td><td>${esc(item.supplier_company_name||'--')}</td><td>${esc(publicPoolValidationText(item))}</td><td>${badge(item.duplicate_status||'CLEAR')}</td><td>${esc(item.submitter_name||'后台人员')}<br><small>${fmt(item.created_at)}</small></td><td>${actions.join(' ')}</td></tr>`;
@@ -1606,6 +1625,7 @@ async function finance(){
   ]);
   S.pointFlows=pointFlows;
   S.supplyTerminations=terminationPage.items||[];
+  S.supplyWithdrawals=withdrawalPage.items||[];
   const companies=companyPage.items||[];
   const companyNames=new Map(companies.map(company=>[company.id,company.name]));
   const cityNames=new Map((cities||[]).map(city=>[city.code,city.name]));
@@ -1647,16 +1667,99 @@ function financeWithdrawalSection(withdrawalPage,policy){
     const actions=[];
     if(item.status==='PENDING_REVIEW'){actions.push(`<button class="ops-btn primary" data-wd-review="${esc(item.id)}" data-decision="APPROVE">审核通过</button>`);actions.push(`<button class="ops-btn danger" data-wd-review="${esc(item.id)}" data-decision="REJECT">驳回</button>`);}
     if(item.status==='APPROVED_PENDING_PAYMENT')actions.push(`<button class="ops-btn primary" data-wd-pay="${esc(item.id)}">记录线下付款</button>`);
-    if(item.status==='PAID_PENDING_WRITE_OFF')actions.push(`<button class="ops-btn primary" data-wd-confirm="${esc(item.id)}">确认核销扣分</button>`);
+    if(item.status==='PAID_PENDING_WRITE_OFF'){actions.push(`<button class="ops-btn primary" data-wd-confirm="${esc(item.id)}">确认核销扣分</button>`);actions.push(`<button class="ops-btn" data-wd-correct="${esc(item.id)}">更正登记</button>`);}
     const payable=item.cash_amount_cents_snapshot!=null?Number(item.cash_amount_cents_snapshot)-Number(item.fee_cents_snapshot||0):null;
-    return `<tr><td>${esc(item.company_id)}<br><small>${esc(item.requested_by_name||'--')}</small></td><td>${badge(item.status,withdrawalStatusLabel(item.status))}</td><td>${Number(item.points_requested).toLocaleString('zh-CN')} 分</td><td>${payable!=null?`¥${(payable/100).toFixed(2)}${Number(item.fee_cents_snapshot||0)>0?`<br><small>含手续费 ¥${(Number(item.fee_cents_snapshot)/100).toFixed(2)}</small>`:''}`:'--'}</td><td>${esc(item.payee_name||'--')}<br><small>${esc(item.payment_method||'--')}</small></td><td>${fmt(item.created_at)}</td><td>${actions.length?`<div class="ops-actions">${actions.join('')}</div>`:'--'}</td></tr>`;
-  }).join('');
+    const registration=item.payment_registration_no?`<br><small>登记编号 ${esc(item.payment_registration_no)}（${esc(withdrawalRegSourceLabel(item.payment_registration_no_source))}）</small>`:'';
+    const external=item.payment_external_reference?`<br><small>外部流水 ${esc(item.payment_external_reference)}</small>`:'';
+    return `<tr><td>${esc(item.company_id)}<br><small>${esc(item.requested_by_name||'--')}</small></td><td>${badge(item.status,withdrawalStatusLabel(item.status))}</td><td>${Number(item.points_requested).toLocaleString('zh-CN')} 分</td><td>${payable!=null?`¥${(payable/100).toFixed(2)}${Number(item.fee_cents_snapshot||0)>0?`<br><small>含手续费 ¥${(Number(item.fee_cents_snapshot)/100).toFixed(2)}</small>`:''}`:'--'}</td><td>${esc(item.payee_name||'--')}<br><small>${esc(item.payment_method||'--')}</small>${registration}${external}</td><td>${fmt(item.created_at)}</td><td>${actions.length?`<div class="ops-actions">${actions.join('')}</div>`:'--'}</td></tr>`;
+  });
   const policyForm=policy?`<form class="ops-filter" id="withdrawal-policy-form"><label>最低提现积分 <input class="ops-input" id="withdrawal-policy-min" type="number" min="1" step="1" value="${Number(policy.min_withdrawal_points||100)}"></label><label>手续费率%（0-100） <input class="ops-input" id="withdrawal-policy-fee" type="number" min="0" max="100" step="0.01" value="${(Number(policy.fee_rate_bp||0)/100).toFixed(2)}"></label><button class="ops-btn primary" type="submit">发布提现策略</button></form>`:`<div class="ops-notice">仅超级管理员可查看与调整提现策略。</div>`;
   return `<section class="ops-card" id="finance-withdrawals"><div class="ops-card-head"><div><h2>供客积分提现</h2><p>加盟商负责人申请，超级管理员审核冻结，线下付款后确认核销扣分。实际应付 = 现金金额快照 - 手续费。</p></div></div>${policyForm}${table(['加盟商 / 申请人','状态','积分','应付金额','收款方','申请时间','操作'],rows.length?rows:['<tr><td colspan="7" class="ops-empty">暂无提现申请</td></tr>'])}${pager(withdrawalPage)}</section>`;
 }
 
 const WITHDRAWAL_STATUS_LABEL={PENDING_REVIEW:'待审核',APPROVED_PENDING_PAYMENT:'待付款',PAID_PENDING_WRITE_OFF:'待核销',PAID:'已完成',REJECTED:'已驳回',CANCELLED:'已取消'};
 const withdrawalStatusLabel=status=>WITHDRAWAL_STATUS_LABEL[status]||label(status);
+
+// 实际应付分值 = 审批现金金额快照 - 手续费快照；快照不完整或非法时返回 null。
+function withdrawalPayableCents(item){
+  if(!item||item.cash_amount_cents_snapshot==null)return null;
+  const payable=Number(item.cash_amount_cents_snapshot)-Number(item.fee_cents_snapshot||0);
+  return Number.isSafeInteger(payable)&&payable>=0?payable:null;
+}
+
+// 系统生成平台内部付款登记编号候选值（提交前可编辑，仍需后端校验全局唯一）。
+function generateWithdrawalRegistrationNo(){
+  const now=new Date(),pad=value=>String(value).padStart(2,'0');
+  const stamp=`${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const rand=Array.from({length:6},()=> '0123456789ABCDEF'[Math.floor(Math.random()*16)]).join('');
+  return `WD-${stamp}-${rand}`;
+}
+
+const WITHDRAWAL_REG_SOURCE_LABEL={SYSTEM:'系统生成',MANUAL:'手动填写'};
+const withdrawalRegSourceLabel=source=>WITHDRAWAL_REG_SOURCE_LABEL[source]||source||'--';
+
+// 付款登记编号与外部流水共用的表单字段（登记与更正复用）。
+function withdrawalRegistrationFields(item,{correction}){
+  const source=correction?(item?.payment_registration_no_source||'MANUAL'):'SYSTEM';
+  const regNo=correction?(item?.payment_registration_no||''):generateWithdrawalRegistrationNo();
+  return `<div class="ops-field"><label for="withdrawal-payment-reg-source">平台付款登记编号来源</label><select class="ops-input" id="withdrawal-payment-reg-source"><option value="SYSTEM" ${source==='SYSTEM'?'selected':''}>系统生成</option><option value="MANUAL" ${source==='MANUAL'?'selected':''}>手动填写</option></select><small class="ops-muted">内部检索/对账标识，非银行实际交易流水。</small></div><div class="ops-field"><label for="withdrawal-payment-reg-no">平台付款登记编号</label><input class="ops-input" id="withdrawal-payment-reg-no" maxlength="64" value="${esc(regNo)}" required><small class="ops-muted">系统生成值提交前可编辑，需全局唯一。</small></div><div class="ops-field"><label for="withdrawal-payment-external">外部交易流水号（可选）</label><input class="ops-input" id="withdrawal-payment-external" maxlength="128" value="${esc(correction?item?.payment_external_reference||'':'')}"><small class="ops-muted">付款渠道实际提供时填写真实流水；没有则留空，不伪造。</small></div><div class="ops-field"><label for="withdrawal-payment-proof">付款凭证地址（可选）</label><input class="ops-input" id="withdrawal-payment-proof" type="url" maxlength="1024" value="${esc(correction?item?.payment_proof_url||'':'')}" placeholder="已上传凭证的 HTTPS 地址"></div>`;
+}
+
+function readWithdrawalRegistrationForm(){
+  const source=document.querySelector('#withdrawal-payment-reg-source').value;
+  const registrationNo=document.querySelector('#withdrawal-payment-reg-no').value.trim();
+  const externalReference=document.querySelector('#withdrawal-payment-external').value.trim();
+  const proofUrl=document.querySelector('#withdrawal-payment-proof').value.trim();
+  return {source,registrationNo,externalReference,proofUrl};
+}
+
+function recordWithdrawalPayment(id){
+  const item=(S.supplyWithdrawals||[]).find(candidate=>candidate.id===id);
+  if(!item){toast('未找到提现申请',true);return}
+  const payable=withdrawalPayableCents(item);
+  if(payable==null){
+    modal('记录线下付款',`<div class="ops-notice">该提现申请缺少完整的审核金额快照，无法登记付款。请先完成审核锁定金额后再登记。</div><div class="ops-actions"><button class="ops-btn primary" id="withdrawal-payment-close">知道了</button></div>`,()=>{document.querySelector('#withdrawal-payment-close').onclick=closeModal});
+    return;
+  }
+  const feeSnapshot=Number(item.fee_cents_snapshot||0);
+  modal('记录线下付款',`<form class="ops-form" id="withdrawal-payment-form"><div class="ops-notice">仅在已实际完成线下转账后登记。登记成功后仅进入待核销，扣分需再独立确认核销。</div><div class="ops-detail-grid"><div class="ops-detail"><small>审批金额</small><b>¥${(Number(item.cash_amount_cents_snapshot)/100).toFixed(2)}</b></div><div class="ops-detail"><small>手续费</small><b>¥${(feeSnapshot/100).toFixed(2)}</b></div><div class="ops-detail"><small>实际应付</small><b>¥${(payable/100).toFixed(2)}</b></div></div>${withdrawalRegistrationFields(item,{correction:false})}<div class="ops-actions"><button type="button" class="ops-btn" id="withdrawal-payment-cancel">取消</button><button class="ops-btn primary" id="withdrawal-payment-submit">登记付款</button></div></form>`,()=>{
+    const form=document.querySelector('#withdrawal-payment-form'),submit=document.querySelector('#withdrawal-payment-submit'),sourceSelect=document.querySelector('#withdrawal-payment-reg-source'),regInput=document.querySelector('#withdrawal-payment-reg-no');
+    document.querySelector('#withdrawal-payment-cancel').onclick=closeModal;
+    sourceSelect.onchange=()=>{if(sourceSelect.value==='SYSTEM'&&!regInput.value.trim())regInput.value=generateWithdrawalRegistrationNo()};
+    form.onsubmit=async event=>{
+      event.preventDefault();
+      const fields=readWithdrawalRegistrationForm();
+      if(fields.registrationNo.length<2){toast('平台付款登记编号至少填写 2 个字符',true);regInput.focus();return}
+      submit.disabled=true;
+      try{
+        await api(`/v1.2/admin/supply-withdrawals/${encodeURIComponent(id)}/record-transfer`,{method:'POST',body:JSON.stringify({registration_no:fields.registrationNo,registration_no_source:fields.source,external_reference:fields.externalReference||null,amount_cents:payable,note:fields.externalReference||fields.registrationNo,proof_url:fields.proofUrl||null})});
+        closeModalFor(form);toast('线下付款已登记，待确认核销');await refreshAfterSuccess(finance,'线下付款已登记');
+      }catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}
+    };
+    regInput.focus();
+  });
+}
+
+function correctWithdrawalPayment(id){
+  const item=(S.supplyWithdrawals||[]).find(candidate=>candidate.id===id);
+  if(!item){toast('未找到提现申请',true);return}
+  modal('更正付款登记',`<form class="ops-form" id="withdrawal-payment-form"><div class="ops-notice">仅待核销的付款登记可带原因更正编号或凭证；已核销记录只读。此操作不改变金额、不重复核销。</div>${withdrawalRegistrationFields(item,{correction:true})}<div class="ops-field"><label for="withdrawal-payment-reason">更正原因</label><textarea class="ops-textarea" id="withdrawal-payment-reason" minlength="2" required></textarea></div><div class="ops-actions"><button type="button" class="ops-btn" id="withdrawal-payment-cancel">取消</button><button class="ops-btn primary" id="withdrawal-payment-submit">保存更正</button></div></form>`,()=>{
+    const form=document.querySelector('#withdrawal-payment-form'),submit=document.querySelector('#withdrawal-payment-submit'),regInput=document.querySelector('#withdrawal-payment-reg-no'),reasonInput=document.querySelector('#withdrawal-payment-reason');
+    document.querySelector('#withdrawal-payment-cancel').onclick=closeModal;
+    form.onsubmit=async event=>{
+      event.preventDefault();
+      const fields=readWithdrawalRegistrationForm(),reason=reasonInput.value.trim();
+      if(fields.registrationNo.length<2){toast('平台付款登记编号至少填写 2 个字符',true);regInput.focus();return}
+      if(reason.length<2){toast('请填写更正原因',true);reasonInput.focus();return}
+      submit.disabled=true;
+      try{
+        await api(`/v1.2/admin/supply-withdrawals/${encodeURIComponent(id)}/registration-correction`,{method:'PATCH',body:JSON.stringify({reason,registration_no:fields.registrationNo,registration_no_source:fields.source,external_reference:fields.externalReference||null,proof_url:fields.proofUrl||null})});
+        closeModalFor(form);toast('付款登记已更正');await refreshAfterSuccess(finance,'付款登记已更正');
+      }catch(error){if(form.isConnected)submit.disabled=false;toast(error.message,true)}
+    };
+    regInput.focus();
+  });
+}
 
 function bindWithdrawalActions(withdrawalPage,policy){
   const refresh=()=>finance();
@@ -1667,12 +1770,8 @@ function bindWithdrawalActions(withdrawalPage,policy){
       refresh();
     });
   });
-  document.querySelectorAll('[data-wd-pay]').forEach(button=>button.onclick=()=>{
-    actionForm({title:'记录线下付款',message:'登记外部付款凭据；确认前可在付款失败流程中退回。',labelText:'外部付款凭据号',required:true,submitLabel:'登记付款'},async reference=>{
-      await api(`/v1.2/admin/supply-withdrawals/${encodeURIComponent(button.dataset.wdPay)}/record-transfer`,{method:'POST',body:JSON.stringify({external_reference:reference,amount_cents:0,note:reference})});
-      refresh();
-    });
-  });
+  document.querySelectorAll('[data-wd-pay]').forEach(button=>button.onclick=()=>recordWithdrawalPayment(button.dataset.wdPay));
+  document.querySelectorAll('[data-wd-correct]').forEach(button=>button.onclick=()=>correctWithdrawalPayment(button.dataset.wdCorrect));
   document.querySelectorAll('[data-wd-confirm]').forEach(button=>button.onclick=()=>{
     actionForm({title:'确认核销扣分',message:'确认后将从该加盟商供客积分账户扣减提现积分，该操作不可撤销。',labelText:'核销说明',required:true,submitLabel:'确认核销'},async note=>{
       await api(`/v1.2/admin/supply-withdrawals/${encodeURIComponent(button.dataset.wdConfirm)}/confirm`,{method:'POST',body:JSON.stringify({note})});
