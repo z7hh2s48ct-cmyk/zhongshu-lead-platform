@@ -552,6 +552,11 @@ class SupplyPointsWithdrawal(Base, TimestampMixin):
     reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 线下付款登记。
+    # payment_registration_no：平台内部付款登记编号（系统生成或手动填写，全局唯一），
+    #   仅用于内部检索/对账，不代表银行实际交易流水；来源见 payment_registration_no_source。
+    # payment_external_reference：付款渠道实际提供的外部交易流水号；渠道未提供时留空，不伪造。
+    payment_registration_no: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    payment_registration_no_source: Mapped[str | None] = mapped_column(String(16))
     payment_external_reference: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
     payment_amount_cents: Mapped[int | None] = mapped_column(BigInteger)
     payment_note: Mapped[str | None] = mapped_column(Text)

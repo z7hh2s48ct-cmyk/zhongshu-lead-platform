@@ -23,6 +23,7 @@ from ..core.v12_enums import (
 )
 from ..integrations.feishu import FeishuClient, FeishuRecord
 from .china_regions import region_by_code
+from .audit import write_audit
 from .dedup_v12 import DedupResult, evaluate_phone
 from .dispatch_v12 import has_receiver_coverage
 from .feishu_sync_service import configured_mapping
@@ -356,6 +357,123 @@ def transfer_public_pool_lead(
         ),
         dedup=dedup,
     )
+
+
+# 供客客资提交时当地无接收方会进入公海并记此阻断原因；加盟商后续启用接收
+# 资格/服务区域后需要重算，见 rematch_no_receiver_public_pool_leads。
+PUBLIC_POOL_NO_LOCAL_RECEIVER = "PUBLIC_POOL_NO_LOCAL_RECEIVER"
+AUTO_REMATCH_AUDIT_ACTION = "V12_PUBLIC_POOL_AUTO_REMATCH"
+
+
+def _is_auto_rematch_candidate(lead: Lead | None) -> bool:
+    """加锁后重新核对筛选条件，防御并发人工转池或其他任务已改动该客资。"""
+
+    return (
+        lead is not None
+        and lead.deleted_at is None
+        and lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
+        and lead.status == LeadV12Status.PUBLIC_POOL.value
+        and lead.pending_reason == PUBLIC_POOL_NO_LOCAL_RECEIVER
+        and lead.current_assignment_id is None
+    )
+
+
+def rematch_no_receiver_public_pool_leads(
+    db: Session,
+    *,
+    batch_size: int = 200,
+    after: tuple[datetime, str] | None = None,
+) -> dict[str, int | tuple[datetime, str] | None]:
+    """有界批处理：重匹配因当地无接收方进入公海的供客客资。
+
+    只筛选 SUPPLIER_H5、PUBLIC_POOL、pending_reason=PUBLIC_POOL_NO_LOCAL_RECEIVER、
+    无进行中派发单且未删除的客资；逐条加锁后复用 transfer_public_pool_lead
+    （含资料校验与查重规则）判断是否已出现合格的非供资方接收方。满足条件转成
+    READY_DISPATCH 并写系统审计；仍不满足者保持公海状态并保存明确阻断原因。
+
+    幂等可重复执行：转池后不再满足筛选条件；按游标轮转，避免长期阻断的旧记录
+    占满批次。每条用 SAVEPOINT 隔离，单条失败不影响整批。整个过程不生成派发单、
+    不扣积分、不通知接收方；真实派发仍由运营人工执行。
+    """
+
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    base = select(Lead.id, Lead.created_at).where(
+        Lead.source_kind == LeadSourceKind.SUPPLIER_H5.value,
+        Lead.status == LeadV12Status.PUBLIC_POOL.value,
+        Lead.pending_reason == PUBLIC_POOL_NO_LOCAL_RECEIVER,
+        Lead.current_assignment_id.is_(None),
+        Lead.deleted_at.is_(None),
+    )
+    query = base
+    if after is not None:
+        query = query.where(
+            or_(
+                Lead.created_at > after[0],
+                and_(Lead.created_at == after[0], Lead.id > after[1]),
+            )
+        )
+    order = (Lead.created_at.asc(), Lead.id.asc())
+    candidates = db.execute(query.order_by(*order).limit(batch_size)).all()
+    if not candidates and after is not None:
+        candidates = db.execute(base.order_by(*order).limit(batch_size)).all()
+    next_cursor = (candidates[-1].created_at, candidates[-1].id) if candidates else None
+    transferred = 0
+    blocked = 0
+    errors = 0
+    for lead_id, _ in candidates:
+        try:
+            # 逐条 SAVEPOINT：单条异常只回滚该条，不污染整批调度事务。
+            with db.begin_nested():
+                lead = db.scalar(
+                    select(Lead)
+                    .where(Lead.id == lead_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if not _is_auto_rematch_candidate(lead):
+                    continue
+                before = {"status": lead.status, "pending_reason": lead.pending_reason}
+                # SUPPLIER_H5 分支不依赖 principal；系统任务以 principal=None 复用校验与查重。
+                result = transfer_public_pool_lead(db, lead=lead, principal=None)
+                if result.transferred:
+                    transferred += 1
+                    write_audit(
+                        db,
+                        principal=None,
+                        action=AUTO_REMATCH_AUDIT_ACTION,
+                        resource_type="lead",
+                        resource_id=lead.id,
+                        company_id=lead.supplier_company_id,
+                        before=before,
+                        after={"status": lead.status, "pending_reason": lead.pending_reason},
+                        metadata={
+                            "result": "TRANSFERRED",
+                            "region_code": lead.region_code,
+                            "supplier_company_id": lead.supplier_company_id,
+                            "reason_code": PUBLIC_POOL_NO_LOCAL_RECEIVER,
+                        },
+                    )
+                else:
+                    blocked += 1
+        except Exception:
+            errors += 1
+            logger.exception("public pool auto-rematch failed lead_id=%s", lead_id)
+    if transferred or blocked or errors:
+        logger.info(
+            "public pool auto-rematch scanned=%s transferred=%s blocked=%s errors=%s",
+            len(candidates),
+            transferred,
+            blocked,
+            errors,
+        )
+    return {
+        "scanned": len(candidates),
+        "transferred": transferred,
+        "blocked": blocked,
+        "errors": errors,
+        "next_cursor": next_cursor,
+    }
 
 
 def _check_draft_duplicate(db: Session, lead: Lead, *, checkpoint: str) -> DedupResult | None:

@@ -46,6 +46,41 @@ def _delivered_outbox(db):
     return item.id
 
 
+def test_public_pool_rematch_requires_explicit_enable(monkeypatch) -> None:
+    monkeypatch.delenv("PUBLIC_POOL_AUTO_REMATCH_ENABLED", raising=False)
+    assert scheduler.public_pool_auto_rematch_enabled() is False
+    monkeypatch.setenv("PUBLIC_POOL_AUTO_REMATCH_ENABLED", "1")
+    assert scheduler.public_pool_auto_rematch_enabled() is True
+
+
+def test_public_pool_cursor_advances_only_after_cycle_commit(scheduler_session, monkeypatch) -> None:
+    cursor = (datetime.now(timezone.utc), "lead-1")
+    monkeypatch.setenv("PUBLIC_POOL_AUTO_REMATCH_ENABLED", "1")
+    monkeypatch.setattr(scheduler, "public_pool_rematch_cursor", None)
+    monkeypatch.setattr(scheduler, "process_outbox", lambda db, **kwargs: {"sent": 0, "failed": 0})
+    monkeypatch.setattr(scheduler, "process_storage_cleanup", lambda db, **kwargs: {"deleted": 0, "failed": 0})
+    monkeypatch.setattr(scheduler, "drain_assignment_timeouts_active", lambda db: 0)
+    monkeypatch.setattr(scheduler, "run_followup_overdue", lambda db: 0)
+    monkeypatch.setattr(scheduler, "run_low_points_warnings", lambda db: 0)
+    monkeypatch.setattr(scheduler, "expire_unsubmitted_return_drafts", lambda db, **kwargs: 0)
+    monkeypatch.setattr(
+        scheduler,
+        "rematch_no_receiver_public_pool_leads",
+        lambda db, **kwargs: {
+            "scanned": 1, "transferred": 1, "blocked": 0,
+            "errors": 0, "next_cursor": cursor,
+        },
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "drain_due_supplier_reward_settlement_notified",
+        lambda db, **kwargs: (_ for _ in ()).throw(RuntimeError("reward task failed")),
+    )
+
+    assert scheduler.run_cycle(run_slow_jobs=True, run_hourly_jobs=False) is False
+    assert scheduler.public_pool_rematch_cursor is None
+
+
 def test_slow_job_failure_does_not_roll_back_outbox_progress(scheduler_session, monkeypatch) -> None:
     """N10：outbox 进度必须先落库——慢任务异常不得回滚已发送状态，
     否则下一轮会向用户重发同一条通知。"""
