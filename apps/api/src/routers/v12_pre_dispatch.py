@@ -23,6 +23,7 @@ from ..schemas.v12_lead_supply import (
     PreDispatchSubmitBody,
 )
 from ..services.audit import write_audit
+from ..services.source_channel_options import get_source_channel_options
 from ..services.pre_dispatch_v12 import (
     assign_pre_dispatch_task,
     decide_pre_dispatch_disposition,
@@ -72,6 +73,7 @@ def _task_to_dict(
     include_phone: bool = False,
     include_verification_info: bool = False,
     leads_by_id: dict[str, Lead] | None = None,
+    source_channel_labels: dict[str, str] | None = None,
 ) -> dict:
     lead = (
         leads_by_id.get(task.lead_id)
@@ -122,6 +124,10 @@ def _task_to_dict(
         ),
         "lead": {
             "source_kind": lead.source_kind if lead else None,
+            "source_channel": lead.source_channel if lead else None,
+            "source_channel_label": (
+                source_channel_labels.get(lead.source_channel) if lead and lead.source_channel else None
+            ) if source_channel_labels is not None else None,
             "customer_name": lead.customer_name if lead else None,
             "phone": phone,
             "phone_masked": mask_phone(phone or decrypt_text(lead.phone_encrypted)) if lead else None,
@@ -135,6 +141,16 @@ def _task_to_dict(
     if include_verification_info:
         result["verification_info"] = pre_dispatch_verification_info(db, task)
     return result
+
+
+def _source_channel_labels(db: Session) -> dict[str, str]:
+    """来源选项 code→label（运营自定义即时生效；一次加载整页共用）。"""
+
+    try:
+        items = get_source_channel_options(db)
+    except AppError:
+        return {}
+    return {str(item.get("code") or ""): str(item.get("label") or "") for item in items}
 
 
 def _task_list_to_dict(
@@ -151,6 +167,7 @@ def _task_list_to_dict(
         else []
     )
     leads_by_id = {lead.id: lead for lead in leads}
+    source_channel_labels = _source_channel_labels(db)
     return [
         _task_to_dict(
             db,
@@ -158,6 +175,7 @@ def _task_list_to_dict(
             principal,
             include_phone=include_phone,
             leads_by_id=leads_by_id,
+            source_channel_labels=source_channel_labels,
         )
         for task in tasks
     ]
@@ -354,6 +372,7 @@ def list_pre_dispatch_tasks(
     assignee_user_id: str | None = Query(default=None),
     conclusion: str | None = Query(default=None, max_length=64),
     source_kind: str | None = Query(default=None, max_length=32),
+    source_channel: str | None = Query(default=None, max_length=32),
     due_from: datetime | None = Query(default=None),
     due_to: datetime | None = Query(default=None),
     page_no: int = Query(default=1, alias="page", ge=1),
@@ -382,11 +401,34 @@ def list_pre_dispatch_tasks(
         )
     if keyword and keyword.strip():
         normalized_keyword = keyword.strip()
+        # 2026-09-28 反馈第 2 条：4 位纯数字按手机号后四位等值匹配（脱敏展示本就
+        # 含后四位，不扩大暴露面），其余按客户姓名模糊匹配。
+        if len(normalized_keyword) == 4 and normalized_keyword.isdigit():
+            filters.append(
+                VerificationTask.lead_id.in_(
+                    select(Lead.id).where(
+                        Lead.deleted_at.is_(None),
+                        Lead.phone_tail4 == normalized_keyword,
+                    )
+                )
+            )
+        else:
+            filters.append(
+                VerificationTask.lead_id.in_(
+                    select(Lead.id).where(
+                        Lead.deleted_at.is_(None),
+                        Lead.customer_name.contains(normalized_keyword, autoescape=True),
+                    )
+                )
+            )
+    # 2026-09-28 反馈第 2 条：按来源渠道筛选（直播/广告等），电销优先处理直播客资。
+    if source_channel and source_channel.strip():
+        normalized_channel = source_channel.strip().upper()
         filters.append(
             VerificationTask.lead_id.in_(
                 select(Lead.id).where(
                     Lead.deleted_at.is_(None),
-                    Lead.customer_name.contains(normalized_keyword, autoescape=True),
+                    Lead.source_channel == normalized_channel,
                 )
             )
         )

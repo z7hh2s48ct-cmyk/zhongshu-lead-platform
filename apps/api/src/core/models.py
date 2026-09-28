@@ -292,6 +292,8 @@ class Lead(Base, TimestampMixin):
     customer_name: Mapped[str] = mapped_column(String(64), nullable=False)
     phone_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
     phone_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # 2026-09-28 反馈第 2 条：脱敏展示本就含后四位，明文存后四位支持电销侧等值搜索。
+    phone_tail4: Mapped[str | None] = mapped_column(String(4), index=True)
     province: Mapped[str | None] = mapped_column(String(64))
     city: Mapped[str | None] = mapped_column(String(64), index=True)
     district: Mapped[str | None] = mapped_column(String(64))

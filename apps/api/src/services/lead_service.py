@@ -10,7 +10,7 @@ from ..core.auth import Principal
 from ..core.enums import ImportIssueType, LeadStatus
 from ..core.errors import AppError
 from ..core.models import Lead, LeadDuplicateRelation, LeadImportIssue, Region, SyncBatch
-from ..core.security import decrypt_text, encrypt_text, hash_phone, mask_phone, normalize_phone
+from ..core.security import decrypt_text, encrypt_text, hash_phone, mask_phone, normalize_phone, phone_tail4
 from ..integrations.feishu import FeishuRecord
 from .phone_uniqueness import require_unique_lead_phone
 
@@ -143,6 +143,7 @@ def import_records(
                 customer_name=name or "未填写",
                 phone_encrypted=encrypt_text(placeholder_phone),
                 phone_hash=hash_phone(placeholder_phone),
+                phone_tail4=phone_tail4(placeholder_phone),
                 province=province,
                 city=city,
                 district=district,
@@ -232,6 +233,7 @@ def update_staging_lead(db: Session, lead: Lead, changes: dict[str, Any]) -> Lea
             raise AppError("LEAD_PHONE_INVALID", "手机号格式错误", 422)
         lead.phone_encrypted = encrypt_text(normalized)
         lead.phone_hash = hash_phone(normalized)
+        lead.phone_tail4 = phone_tail4(normalized)
     unresolved = db.scalar(
         select(func.count(LeadImportIssue.id)).where(LeadImportIssue.lead_id == lead.id, LeadImportIssue.resolved_at.is_(None))
     ) or 0

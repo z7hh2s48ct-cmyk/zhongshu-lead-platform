@@ -203,10 +203,26 @@ function renderLogin(message = '') {
   };
 }
 
-async function loadTasks(status = '') {
+// 2026-09-28 反馈第 2 条：来源选项（运营可自定义），筛选下拉与任务卡标签共用。
+let sourceChannelOptions = null;
+async function loadSourceChannelOptions() {
+  if (sourceChannelOptions) return sourceChannelOptions;
+  try {
+    const payload = await api('/v1.2/source-channel/options');
+    sourceChannelOptions = (payload.items || []).filter((item) => item.enabled !== false);
+  } catch (error) {
+    sourceChannelOptions = []; // 选项加载失败不阻塞任务列表。
+  }
+  return sourceChannelOptions;
+}
+
+async function loadTasks(status = '', filters = {}) {
   const query = `?page=1&page_size=200${status ? `&status=${encodeURIComponent(status)}` : ''}`;
+  const extras = [];
+  if (filters.q) extras.push(`&keyword=${encodeURIComponent(filters.q)}`);
+  if (filters.channel) extras.push(`&source_channel=${encodeURIComponent(filters.channel)}`);
   const [preDispatch, returns] = await Promise.all([
-    api(`${TASK_KIND.PRE_DISPATCH.listPath}${query}`),
+    api(`${TASK_KIND.PRE_DISPATCH.listPath}${query}${extras.join('')}`),
     api(`${TASK_KIND.RETURN.listPath}${query}&mine=true`),
   ]);
   const rank = { IN_PROGRESS: 0, ASSIGNED: 1, SUBMITTED: 2 };
@@ -303,7 +319,11 @@ function taskCard(task) {
   const displayStatus = task.display_status || task.status;
   const typeFact = task.task_kind === 'RETURN' ? `退回原因：${returnReasonLabels[request.reason_code] || '待确认'} · 证据 ${evidenceCount(request)} 份` : '资料不全，等待电话事实核验';
   const deadline = task.due_at || request.appeal_deadline_at;
-  return `<article class="task" data-task-kind="${task.task_kind}" data-task="${task.id}" tabindex="0"><div class="row"><h3>${esc(lead.customer_name || '待核验客户')}</h3><span class="badge ${statusClass(displayStatus)}">${esc(statusLabel(displayStatus))}</span></div><p class="task-meta">${esc(TASK_KIND[task.task_kind].label)} · ${esc(lead.city || '')} ${esc(lead.district || '')}</p><dl class="task-facts"><div><dt>任务说明</dt><dd>${esc(typeFact)}</dd></div><div><dt>处理参考时间</dt><dd>${fmt(deadline)}</dd></div></dl><p>${esc(taskDescription(task))}</p></article>`;
+  // 2026-09-28 反馈第 2 条：任务卡显示来源（直播/广告等）与脱敏手机号，电销可优先打直播客资。
+  const sourceLabel = lead.source_channel_label || lead.source_channel || '';
+  const sourceBadge = sourceLabel ? `<span class="badge source">${esc(sourceLabel)}</span>` : '';
+  const phoneMeta = lead.phone_masked ? ` · ${esc(lead.phone_masked)}` : '';
+  return `<article class="task" data-task-kind="${task.task_kind}" data-task="${task.id}" tabindex="0"><div class="row"><h3>${esc(lead.customer_name || '待核验客户')}</h3><span class="badge-group">${sourceBadge}<span class="badge ${statusClass(displayStatus)}">${esc(statusLabel(displayStatus))}</span></span></div><p class="task-meta">${esc(TASK_KIND[task.task_kind].label)} · ${esc(lead.city || '')} ${esc(lead.district || '')}${phoneMeta}</p><dl class="task-facts"><div><dt>任务说明</dt><dd>${esc(typeFact)}</dd></div><div><dt>处理参考时间</dt><dd>${fmt(deadline)}</dd></div></dl><p>${esc(taskDescription(task))}</p></article>`;
 }
 
 function callHomeGreeting() {
@@ -350,15 +370,34 @@ async function home() {
   bindTaskCards();
 }
 
+function buildVerifyHash(status, q, channel) {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (q) params.set('q', q);
+  if (channel) params.set('channel', channel);
+  const text = params.toString();
+  return `#/verify${text ? `?${text}` : ''}`;
+}
+
 async function verify() {
   if (!await auth()) return;
   const query = new URLSearchParams(location.hash.split('?')[1] || '');
   const status = query.get('status') || '';
-  const items = (await loadTasks(status)).filter((item) => item.status !== 'SUBMITTED');
-  zsSetSafeHtml(app, shell(`<h1>核验任务</h1><div class="filters" role="tablist">${[['', '全部'], ['ASSIGNED', '待开始'], ['IN_PROGRESS', '核验中']].map(([value, label]) => `<button class="btn small ${status === value ? 'primary' : 'outline'}" data-filter="${value}">${label}</button>`).join('')}</div>${items.length ? items.map(taskCard).join('') : emptyState('暂无符合条件的任务', '这里只显示运营已派发给您的任务。')}`, 'verify', '核验任务'));
+  const filters = { q: (query.get('q') || '').trim(), channel: query.get('channel') || '' };
+  const [tasks, channels] = await Promise.all([loadTasks(status, filters), loadSourceChannelOptions()]);
+  const items = tasks.filter((item) => item.status !== 'SUBMITTED');
+  const searchBar = `<form class="task-search" id="verify-search"><input id="verify-q" type="search" autocomplete="off" placeholder="客户姓名 / 手机号后四位" value="${esc(filters.q)}"><select id="verify-channel"><option value="">全部来源</option>${channels.map((channel) => `<option value="${esc(channel.code)}" ${filters.channel === channel.code ? 'selected' : ''}>${esc(channel.label)}</option>`).join('')}</select><button class="btn small primary" type="submit">查询</button></form>`;
+  zsSetSafeHtml(app, shell(`<h1>核验任务</h1>${searchBar}<div class="filters" role="tablist">${[['', '全部'], ['ASSIGNED', '待开始'], ['IN_PROGRESS', '核验中']].map(([value, label]) => `<button class="btn small ${status === value ? 'primary' : 'outline'}" data-filter="${value}">${label}</button>`).join('')}</div>${items.length ? items.map(taskCard).join('') : emptyState('暂无符合条件的任务', filters.q || filters.channel ? '换个关键词或来源再试。' : '这里只显示运营已派发给您的任务。')}`, 'verify', '核验任务'));
   bind();
   bindTaskCards();
-  document.querySelectorAll('[data-filter]').forEach((node) => { node.onclick = () => { location.hash = `#/verify${node.dataset.filter ? `?status=${node.dataset.filter}` : ''}`; }; });
+  const searchForm = document.querySelector('#verify-search');
+  if (searchForm) {
+    searchForm.onsubmit = (event) => {
+      event.preventDefault();
+      location.hash = buildVerifyHash(status, (document.querySelector('#verify-q').value || '').trim(), document.querySelector('#verify-channel').value);
+    };
+  }
+  document.querySelectorAll('[data-filter]').forEach((node) => { node.onclick = () => { location.hash = buildVerifyHash(node.dataset.filter, filters.q, filters.channel); }; });
 }
 
 async function loadDialStats() {

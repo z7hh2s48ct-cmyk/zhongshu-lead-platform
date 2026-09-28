@@ -26,7 +26,7 @@ from ..core.models import (
     VerificationTask,
 )
 from ..core.models_v12 import DedupOverride, LeadDedupEvent, SupplierLeadReward
-from ..core.security import decrypt_text, encrypt_text, fingerprint_phone, hash_phone, mask_phone, normalize_phone
+from ..core.security import decrypt_text, encrypt_text, fingerprint_phone, hash_phone, mask_phone, normalize_phone, phone_tail4
 from ..core.state_machine_v12 import assert_return_transition, assert_reward_transition
 from ..core.v12_enums import (
     CustomerSource,
@@ -168,6 +168,7 @@ def create_draft(
         customer_name="未填写",
         phone_encrypted=encrypt_text(placeholder_phone),
         phone_hash=hash_phone(placeholder_phone),
+        phone_tail4=phone_tail4(placeholder_phone),
         phone_fingerprint=None,
         consent_confirmed=False,
         is_test=is_test,
@@ -213,6 +214,7 @@ def _apply_editable_values(db: Session, lead: Lead, values: dict[str, Any]) -> N
                 raise AppError("LEAD_PHONE_INVALID", "手机号格式错误", 422)
             lead.phone_encrypted = encrypt_text(normalized)
             lead.phone_hash = hash_phone(normalized)
+            lead.phone_tail4 = phone_tail4(normalized)
             lead.phone_fingerprint = fingerprint_phone(normalized) if normalized else None
             continue
         if field in {"budget_min", "budget_max", "acquisition_cost_cents"}:

@@ -22,7 +22,7 @@ from ..core.models import (
     VerificationTemplate,
     WechatIdentity,
 )
-from ..core.security import encrypt_text, hash_phone
+from ..core.security import encrypt_text, hash_phone, phone_tail4
 from .auth_service import create_internal_user
 from .claim_service import claim_assignment
 from .company_service import create_company
@@ -286,6 +286,7 @@ def _ensure_demo_lead(db: Session, *, record_id: str, name: str, phone: str, sta
         customer_name=name,
         phone_encrypted=encrypt_text(phone),
         phone_hash=hash_phone(phone),
+        phone_tail4=phone_tail4(phone),
         province="上海市",
         city="上海市",
         district=district,
