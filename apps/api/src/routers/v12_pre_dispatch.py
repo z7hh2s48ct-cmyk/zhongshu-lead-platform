@@ -126,8 +126,10 @@ def _task_to_dict(
             "source_kind": lead.source_kind if lead else None,
             "source_channel": lead.source_channel if lead else None,
             "source_channel_label": (
-                source_channel_labels.get(lead.source_channel) if lead and lead.source_channel else None
-            ) if source_channel_labels is not None else None,
+                (source_channel_labels or _source_channel_labels(db)).get(lead.source_channel)
+                if lead and lead.source_channel
+                else None
+            ),
             "customer_name": lead.customer_name if lead else None,
             "phone": phone,
             "phone_masked": mask_phone(phone or decrypt_text(lead.phone_encrypted)) if lead else None,
