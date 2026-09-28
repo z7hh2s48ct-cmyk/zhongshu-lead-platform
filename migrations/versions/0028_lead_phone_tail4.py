@@ -1,7 +1,7 @@
 """电销后四位搜索（2026-09-28 反馈第 2 条）。
 
-Revision ID: 0027_lead_phone_tail4
-Revises: 0026_telesales_filter_indexes
+Revision ID: 0028_lead_phone_tail4
+Revises: 0027_withdrawal_payment_reg
 
 leads 新增 phone_tail4 列（明文后四位，等值搜索用）。脱敏格式
 `138****8000` 本就向任务指派对象展示后四位，存储后四位不扩大暴露面；
@@ -13,8 +13,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0027_lead_phone_tail4"
-down_revision = "0026_telesales_filter_indexes"
+revision = "0028_lead_phone_tail4"
+down_revision = "0027_withdrawal_payment_reg"
 branch_labels = None
 depends_on = None
 

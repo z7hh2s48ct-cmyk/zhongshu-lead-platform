@@ -23,13 +23,34 @@ from apps.api.src.services.notification_v12 import (
 )
 from apps.api.src.services.outbox_worker import process_outbox
 from apps.api.src.services.points_service import run_low_points_warnings
+from apps.api.src.services.public_pool_v12 import (
+    rematch_no_receiver_public_pool_leads,
+)
 from apps.api.src.services.return_v12 import expire_unsubmitted_return_drafts
 from apps.api.src.services.storage_cleanup_worker import process_storage_cleanup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("scheduler")
 running = True
+public_pool_rematch_cursor = None
 DEFAULT_HEARTBEAT_FILE = "/tmp/zhongshu-scheduler-heartbeat"
+
+
+def public_pool_auto_rematch_enabled() -> bool:
+    """公海自动重匹配开关。
+
+    默认关闭；发布顺序要求先在数据快照上预览受影响记录及原因，再对生产启用
+    定时任务。需要灰度/暂停时设 PUBLIC_POOL_AUTO_REMATCH_ENABLED=0（或 false/no）。
+    """
+
+    return os.environ.get("PUBLIC_POOL_AUTO_REMATCH_ENABLED", "0").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 SLOW_JOB_TICKS = 10
 HOURLY_JOB_TICKS = 120
 DAILY_JOB_TICKS = 24 * 60 * 2
@@ -57,6 +78,8 @@ def publish_heartbeat(path: Path | None = None) -> None:
 
 
 def run_cycle(run_slow_jobs: bool, run_hourly_jobs: bool, run_daily_jobs: bool = False) -> bool:
+    global public_pool_rematch_cursor
+    next_rematch_cursor = public_pool_rematch_cursor
     with SessionLocal() as db:
         try:
             outbox = process_outbox(db, limit=200, commit_batches=True)
@@ -80,6 +103,14 @@ def run_cycle(run_slow_jobs: bool, run_hourly_jobs: bool, run_daily_jobs: bool =
                         "return_drafts": expire_unsubmitted_return_drafts(db, batch_size=200),
                     }
                 )
+                if public_pool_auto_rematch_enabled():
+                    # 公海自动重匹配：加盟商启用接收资格/区域后，把历史因当地
+                    # 无接收方进入公海的供客客资重算为待派发；有界、幂等、失败下轮续跑。
+                    rematch = rematch_no_receiver_public_pool_leads(
+                        db, batch_size=200, after=public_pool_rematch_cursor
+                    )
+                    next_rematch_cursor = rematch.pop("next_cursor")
+                    metrics["public_pool_rematch"] = rematch
             if run_slow_jobs or run_hourly_jobs:
                 metrics["supplier_rewards"] = drain_due_supplier_reward_settlement_notified(
                     db,
@@ -112,6 +143,7 @@ def run_cycle(run_slow_jobs: bool, run_hourly_jobs: bool, run_daily_jobs: bool =
             ):
                 logger.info("cycle metrics=%s", metrics)
             db.commit()
+            public_pool_rematch_cursor = next_rematch_cursor
             return True
         except Exception:
             db.rollback()

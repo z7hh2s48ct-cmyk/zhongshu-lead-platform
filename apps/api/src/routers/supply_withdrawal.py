@@ -21,6 +21,7 @@ from ..services.supply_withdrawal import (
     available_supply_points,
     cancel_withdrawal,
     confirm_offline_payment,
+    correct_payment_registration,
     create_withdrawal,
     fail_offline_payment,
     record_offline_payment,
@@ -47,8 +48,22 @@ class SupplyWithdrawalReviewBody(BaseModel):
 
 
 class SupplyWithdrawalPaymentBody(BaseModel):
-    external_reference: str = Field(min_length=2, max_length=128)
+    # 平台内部付款登记编号：留空则后端系统生成；手动填写需全局唯一。
+    registration_no: str | None = Field(default=None, max_length=64)
+    # 编号来源：SYSTEM / MANUAL；系统生成值即使被编辑仍保留 SYSTEM。
+    registration_no_source: str | None = Field(default=None, max_length=16)
+    # 外部交易流水号：付款渠道实际提供时填写，可空；不得伪造。
+    external_reference: str | None = Field(default=None, max_length=128)
     amount_cents: int = Field(ge=0)
+    note: str | None = Field(default=None, max_length=1000)
+    proof_url: str | None = Field(default=None, max_length=1024)
+
+
+class SupplyWithdrawalPaymentCorrectionBody(BaseModel):
+    reason: str = Field(min_length=2, max_length=1000)
+    registration_no: str | None = Field(default=None, max_length=64)
+    registration_no_source: str | None = Field(default=None, max_length=16)
+    external_reference: str | None = Field(default=None, max_length=128)
     note: str | None = Field(default=None, max_length=1000)
     proof_url: str | None = Field(default=None, max_length=1024)
 
@@ -287,7 +302,7 @@ def review_supply_withdrawal(
     withdrawal_id: str,
     body: SupplyWithdrawalReviewBody,
     request: Request,
-    principal=Depends(require_permissions("reward.read")),
+    principal=Depends(require_permissions("*")),
     db: Session = Depends(get_db),
 ):
     item = review_withdrawal(
@@ -317,13 +332,15 @@ def record_supply_withdrawal_payment(
     withdrawal_id: str,
     body: SupplyWithdrawalPaymentBody,
     request: Request,
-    principal=Depends(require_permissions("reward.read")),
+    principal=Depends(require_permissions("*")),
     db: Session = Depends(get_db),
 ):
     item = record_offline_payment(
         db,
         withdrawal_id=withdrawal_id,
         recorded_by=principal.user_id,
+        registration_no=body.registration_no,
+        registration_no_source=body.registration_no_source,
         external_reference=body.external_reference,
         amount_cents=body.amount_cents,
         note=body.note,
@@ -336,11 +353,64 @@ def record_supply_withdrawal_payment(
         resource_type="supply_withdrawal",
         resource_id=item.id,
         company_id=item.company_id,
-        after={"status": item.status, "amount_cents": item.payment_amount_cents},
+        after={
+            "status": item.status,
+            "amount_cents": item.payment_amount_cents,
+            "registration_no": item.payment_registration_no,
+            "registration_no_source": item.payment_registration_no_source,
+            "external_reference": item.payment_external_reference,
+        },
         request_id=request.state.request_id,
     )
     db.commit()
     return ok(request, withdrawal_to_dict(db, item, reveal_payee=True), "线下付款已登记")
+
+
+@router.patch("/admin/supply-withdrawals/{withdrawal_id}/registration-correction")
+def correct_supply_withdrawal_payment_registration(
+    withdrawal_id: str,
+    body: SupplyWithdrawalPaymentCorrectionBody,
+    request: Request,
+    principal=Depends(require_permissions("*")),
+    db: Session = Depends(get_db),
+):
+    item = correct_payment_registration(
+        db,
+        withdrawal_id=withdrawal_id,
+        corrected_by=principal.user_id,
+        reason=body.reason,
+        registration_no=body.registration_no,
+        registration_no_source=body.registration_no_source,
+        external_reference=body.external_reference,
+        note=body.note,
+        proof_url=body.proof_url,
+        clear_external_reference=(
+            "external_reference" in body.model_fields_set and body.external_reference is None
+        ),
+        clear_proof_url=("proof_url" in body.model_fields_set and body.proof_url is None),
+    )
+    write_audit(
+        db,
+        principal=principal,
+        action="V12_SUPPLY_WITHDRAWAL_PAYMENT_REGISTRATION_CORRECTED",
+        resource_type="supply_withdrawal",
+        resource_id=item.id,
+        company_id=item.company_id,
+        after={
+            "status": item.status,
+            "registration_no": item.payment_registration_no,
+            "registration_no_source": item.payment_registration_no_source,
+            "external_reference": item.payment_external_reference,
+        },
+        reason=body.reason,
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    return ok(
+        request,
+        withdrawal_to_dict(db, item, reveal_payee=True),
+        "付款登记信息已更正",
+    )
 
 
 @router.post("/admin/supply-withdrawals/{withdrawal_id}/fail")
@@ -348,7 +418,7 @@ def fail_supply_withdrawal_payment(
     withdrawal_id: str,
     body: SupplyWithdrawalNoteBody,
     request: Request,
-    principal=Depends(require_permissions("reward.read")),
+    principal=Depends(require_permissions("*")),
     db: Session = Depends(get_db),
 ):
     item = fail_offline_payment(
@@ -373,7 +443,7 @@ def fail_supply_withdrawal_payment(
 def confirm_supply_withdrawal_payment(
     withdrawal_id: str,
     request: Request,
-    principal=Depends(require_permissions("reward.read")),
+    principal=Depends(require_permissions("*")),
     db: Session = Depends(get_db),
 ):
     item = confirm_offline_payment(
@@ -405,7 +475,7 @@ def review_supply_withdrawal_payment_change(
     withdrawal_id: str,
     body: SupplyWithdrawalChangeReviewBody,
     request: Request,
-    principal=Depends(require_permissions("reward.read")),
+    principal=Depends(require_permissions("*")),
     db: Session = Depends(get_db),
 ):
     item = review_payment_change(

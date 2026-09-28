@@ -133,7 +133,7 @@ def test_phone_tail4_backfill_migration(db, monkeypatch) -> None:
 
     path = (
         Path(__file__).resolve().parents[3]
-        / "migrations/versions/0027_lead_phone_tail4.py"
+        / "migrations/versions/0028_lead_phone_tail4.py"
     )
     spec = importlib.util.spec_from_file_location("lead_phone_tail4_migration", path)
     module = importlib.util.module_from_spec(spec)

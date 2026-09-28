@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import datetime, timezone
 from typing import Any
 
@@ -44,6 +45,14 @@ ACTIVE_WITHDRAWAL_STATUSES = {
 }
 REVIEWABLE_STATUSES = {"PENDING_REVIEW"}
 PAYEE_METHODS = {"BANK", "WECHAT_QR", "ALIPAY_QR"}
+
+# 付款登记编号来源：系统生成 / 手动填写（内部检索标识，非银行流水）。
+REGISTRATION_NO_SOURCE_SYSTEM = "SYSTEM"
+REGISTRATION_NO_SOURCE_MANUAL = "MANUAL"
+REGISTRATION_NO_SOURCES = {
+    REGISTRATION_NO_SOURCE_SYSTEM,
+    REGISTRATION_NO_SOURCE_MANUAL,
+}
 
 
 WITHDRAWAL_POLICY_DOMAIN = "supply_withdrawal_policy"
@@ -123,6 +132,24 @@ def publish_withdrawal_policy(
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _yuan(cents: int) -> str:
+    """分值转元显示，仅用于错误提示，不参与金额计算。"""
+
+    return f"¥{int(cents) / 100:.2f}"
+
+
+def withdrawal_payable_cents(item: SupplyPointsWithdrawal) -> int | None:
+    """审核快照锁定的实际应付分值 = 现金金额快照 - 手续费快照。
+
+    快照缺失时返回 None：付款登记与核销都必须在快照完整时才允许进行，
+    避免用默认 0 掩盖“尚未审核锁定金额”的真实状态。
+    """
+
+    if item.cash_amount_cents_snapshot is None:
+        return None
+    return int(item.cash_amount_cents_snapshot) - int(item.fee_cents_snapshot or 0)
 
 
 def _require_owner(db: Session, company_id: str) -> Company:
@@ -330,13 +357,90 @@ def cancel_withdrawal(
     return item
 
 
+def generate_payment_registration_no(db: Session) -> str:
+    """系统生成全局唯一的平台内部付款登记编号（非银行交易流水）。"""
+
+    stamp = _now().strftime("%Y%m%d%H%M%S")
+    for _ in range(12):
+        candidate = f"WD-{stamp}-{secrets.token_hex(3).upper()}"
+        exists = db.scalar(
+            select(SupplyPointsWithdrawal.id).where(
+                SupplyPointsWithdrawal.payment_registration_no == candidate
+            )
+        )
+        if exists is None:
+            return candidate
+    raise AppError(
+        "WITHDRAWAL_REGISTRATION_NO_GENERATION_FAILED",
+        "无法生成唯一的付款登记编号，请重试或手动填写",
+        409,
+    )
+
+
+def _ensure_registration_no_available(
+    db: Session, registration_no: str, *, exclude_id: str | None = None
+) -> None:
+    statement = select(SupplyPointsWithdrawal.id).where(
+        SupplyPointsWithdrawal.payment_registration_no == registration_no
+    )
+    if exclude_id is not None:
+        statement = statement.where(SupplyPointsWithdrawal.id != exclude_id)
+    if db.scalar(statement) is not None:
+        raise AppError(
+            "WITHDRAWAL_REGISTRATION_NO_DUPLICATE",
+            f"付款登记编号 {registration_no} 已存在，请更换",
+            409,
+            {"registration_no": registration_no},
+        )
+
+
+def _ensure_external_reference_available(
+    db: Session, external_reference: str, *, exclude_id: str | None = None
+) -> None:
+    statement = select(SupplyPointsWithdrawal.id).where(
+        SupplyPointsWithdrawal.payment_external_reference == external_reference
+    )
+    if exclude_id is not None:
+        statement = statement.where(SupplyPointsWithdrawal.id != exclude_id)
+    if db.scalar(statement) is not None:
+        raise AppError(
+            "WITHDRAWAL_EXTERNAL_REFERENCE_DUPLICATE",
+            f"外部交易流水号 {external_reference} 已被其他提现登记占用",
+            409,
+            {"external_reference": external_reference},
+        )
+
+
+def _resolve_registration_no(
+    db: Session,
+    item: SupplyPointsWithdrawal,
+    registration_no: str | None,
+    registration_no_source: str | None = None,
+) -> tuple[str, str]:
+    """手动填写则校验非空与唯一；未填则系统生成。返回（编号, 来源）。
+
+    来源以调用方显式声明为准（系统生成值即使被编辑仍保留 SYSTEM），
+    未声明时默认按手动填写处理。
+    """
+
+    manual = (registration_no or "").strip()
+    if manual:
+        _ensure_registration_no_available(db, manual, exclude_id=item.id)
+        hint = (registration_no_source or "").strip().upper()
+        source = hint if hint in REGISTRATION_NO_SOURCES else REGISTRATION_NO_SOURCE_MANUAL
+        return manual, source
+    return generate_payment_registration_no(db), REGISTRATION_NO_SOURCE_SYSTEM
+
+
 def record_offline_payment(
     db: Session,
     *,
     withdrawal_id: str,
     recorded_by: str,
-    external_reference: str,
     amount_cents: int,
+    registration_no: str | None = None,
+    registration_no_source: str | None = None,
+    external_reference: str | None = None,
     note: str | None = None,
     proof_url: str | None = None,
 ) -> SupplyPointsWithdrawal:
@@ -349,14 +453,37 @@ def record_offline_payment(
             "收款资料变更待审核，先处理变更再付款",
             409,
         )
-    payable = int(item.cash_amount_cents_snapshot or 0) - int(item.fee_cents_snapshot or 0)
-    if int(amount_cents) != payable:
+    payable = withdrawal_payable_cents(item)
+    if payable is None:
         raise AppError(
-            "WITHDRAWAL_PAYMENT_AMOUNT_MISMATCH",
-            "付款金额与审批快照不一致",
+            "WITHDRAWAL_PAYMENT_SNAPSHOT_MISSING",
+            "审核金额快照缺失，不能登记付款，请先完成审核",
             409,
         )
-    item.payment_external_reference = external_reference.strip()
+    if payable < 0:
+        raise AppError(
+            "WITHDRAWAL_PAYMENT_SNAPSHOT_INVALID",
+            "审核快照计算出的应付金额为负，禁止登记付款",
+            409,
+            {"payable_cents": payable},
+        )
+    if int(amount_cents) != payable:
+        # 明确告知期望金额与当前提交金额，操作员无需靠改凭据号绕过校验。
+        raise AppError(
+            "WITHDRAWAL_PAYMENT_AMOUNT_MISMATCH",
+            f"付款金额与审批快照不一致：应付 {_yuan(payable)}，当前提交 {_yuan(int(amount_cents))}",
+            409,
+            {"expected_cents": payable, "submitted_cents": int(amount_cents)},
+        )
+    external = (external_reference or "").strip() or None
+    if external:
+        _ensure_external_reference_available(db, external, exclude_id=item.id)
+    resolved_no, source = _resolve_registration_no(
+        db, item, registration_no, registration_no_source
+    )
+    item.payment_registration_no = resolved_no
+    item.payment_registration_no_source = source
+    item.payment_external_reference = external
     item.payment_amount_cents = int(amount_cents)
     item.payment_note = (note or "").strip() or None
     item.payment_proof_url = (proof_url or "").strip() or None
@@ -367,9 +494,85 @@ def record_offline_payment(
     history.append(
         {
             "at": item.paid_at.isoformat(),
-            "external_reference": item.payment_external_reference,
+            "event": "PAYMENT_RECORDED",
+            "registration_no": resolved_no,
+            "registration_no_source": source,
+            "external_reference": external,
             "amount_cents": int(amount_cents),
             "recorded_by": recorded_by,
+        }
+    )
+    item.payment_history_json = history
+    db.flush()
+    return item
+
+
+def correct_payment_registration(
+    db: Session,
+    *,
+    withdrawal_id: str,
+    corrected_by: str,
+    reason: str,
+    registration_no: str | None = None,
+    registration_no_source: str | None = None,
+    external_reference: str | None = None,
+    proof_url: str | None = None,
+    note: str | None = None,
+    clear_external_reference: bool = False,
+    clear_proof_url: bool = False,
+) -> SupplyPointsWithdrawal:
+    """待核销阶段带原因更正付款登记编号/外部流水/凭证；已核销记录只读。
+
+    仅修正登记信息，不改变金额、不重复核销；保留修改前后值与操作者。
+    """
+
+    item = _lock_withdrawal(db, withdrawal_id)
+    if item.status != "PAID_PENDING_WRITE_OFF":
+        raise AppError(
+            "WITHDRAWAL_CORRECTION_NOT_ALLOWED",
+            "仅待核销的付款登记可更正；已核销或未登记记录不可修改",
+            409,
+        )
+    if not (reason or "").strip():
+        raise AppError("WITHDRAWAL_CORRECTION_REASON_REQUIRED", "更正必须填写原因", 422)
+    before = {
+        "registration_no": item.payment_registration_no,
+        "registration_no_source": item.payment_registration_no_source,
+        "external_reference": item.payment_external_reference,
+        "proof_url": item.payment_proof_url,
+        "note": item.payment_note,
+    }
+    if registration_no is not None:
+        resolved_no, source = _resolve_registration_no(
+            db, item, registration_no, registration_no_source
+        )
+        item.payment_registration_no = resolved_no
+        item.payment_registration_no_source = source
+    if external_reference is not None or clear_external_reference:
+        external = (external_reference or "").strip() or None
+        if external:
+            _ensure_external_reference_available(db, external, exclude_id=item.id)
+        item.payment_external_reference = external
+    if proof_url is not None or clear_proof_url:
+        item.payment_proof_url = (proof_url or "").strip() or None
+    if note is not None:
+        item.payment_note = note.strip() or None
+    after = {
+        "registration_no": item.payment_registration_no,
+        "registration_no_source": item.payment_registration_no_source,
+        "external_reference": item.payment_external_reference,
+        "proof_url": item.payment_proof_url,
+        "note": item.payment_note,
+    }
+    history = list(item.payment_history_json or [])
+    history.append(
+        {
+            "at": _now().isoformat(),
+            "event": "PAYMENT_REGISTRATION_CORRECTED",
+            "reason": reason.strip(),
+            "before": before,
+            "after": after,
+            "corrected_by": corrected_by,
         }
     )
     item.payment_history_json = history
@@ -389,6 +592,8 @@ def fail_offline_payment(
         raise AppError("WITHDRAWAL_FAIL_NOT_ALLOWED", "当前状态不能登记付款失败", 409)
     # 付款失败不核销积分、不显示为已完成；释放冻结回到待处理，可重新发起付款或取消。
     item.status = "APPROVED_PENDING_PAYMENT"
+    item.payment_registration_no = None
+    item.payment_registration_no_source = None
     item.payment_external_reference = None
     item.payment_amount_cents = None
     item.payment_note = f"付款失败：{note.strip()}"
@@ -418,7 +623,7 @@ def confirm_offline_payment(
     item = _lock_withdrawal(db, withdrawal_id)
     if item.status == "PAID":
         return item
-    if item.status != "PAID_PENDING_WRITE_OFF" or not item.payment_external_reference or item.paid_at is None:
+    if item.status != "PAID_PENDING_WRITE_OFF" or not item.payment_registration_no or item.paid_at is None:
         raise AppError("WITHDRAWAL_PAYMENT_NOT_RECORDED", "请先登记并核实线下付款", 409)
     company = db.get(Company, item.company_id)
     if company.supplier_cooperation_status in {"TERMINATION_PENDING", "TERMINATED"}:
@@ -428,9 +633,14 @@ def confirm_offline_payment(
             409,
         )
     # 2026-09-23 D2：按「现金金额 - 手续费」的应付口径校验。
-    payable = int(item.cash_amount_cents_snapshot or 0) - int(item.fee_cents_snapshot or 0)
-    if int(item.payment_amount_cents or 0) != payable:
-        raise AppError("WITHDRAWAL_PAYMENT_AMOUNT_MISMATCH", "付款金额与审批快照不一致", 409)
+    payable = withdrawal_payable_cents(item)
+    if payable is None or int(item.payment_amount_cents or 0) != payable:
+        raise AppError(
+            "WITHDRAWAL_PAYMENT_AMOUNT_MISMATCH",
+            "付款金额与审批快照不一致，不能核销",
+            409,
+            {"expected_cents": payable, "submitted_cents": int(item.payment_amount_cents or 0)},
+        )
     account = db.scalar(
         select(PointsAccount).where(PointsAccount.company_id == item.company_id).with_for_update()
     ) or get_or_create_account(db, item.company_id)
@@ -445,11 +655,13 @@ def confirm_offline_payment(
         business_type="SUPPLY_WITHDRAWAL",
         business_id=item.id,
         idempotency_key=f"{writeoff_key}:supply",
-        external_reference=item.payment_external_reference,
+        external_reference=item.payment_registration_no or item.payment_external_reference,
         created_by=confirmed_by,
         metadata={
             "withdrawal_id": item.id,
             "cash_amount_cents": item.cash_amount_cents_snapshot,
+            "payment_registration_no": item.payment_registration_no,
+            "payment_external_reference": item.payment_external_reference,
             "client_idempotency_key": idempotency_key,
         },
         point_kind="SUPPLY",
@@ -566,8 +778,11 @@ def withdrawal_to_dict(
         "fee_cents_snapshot": item.fee_cents_snapshot,
         "review_note": item.review_note,
         "approved_at": item.approved_at.isoformat() if item.approved_at else None,
+        "payment_registration_no": item.payment_registration_no,
+        "payment_registration_no_source": item.payment_registration_no_source,
         "payment_external_reference": item.payment_external_reference,
         "payment_amount_cents": item.payment_amount_cents,
+        "payment_note": item.payment_note,
         "payment_proof_url": item.payment_proof_url if reveal_payee else None,
         "paid_at": item.paid_at.isoformat() if item.paid_at else None,
         "change_status": item.change_status,
