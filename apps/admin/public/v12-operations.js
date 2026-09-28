@@ -2,7 +2,7 @@ import { amountToWan, wanToAmount } from '/h5/business-units.js';
 
 const API='/api/v1',app=document.querySelector('#app'),toastEl=document.querySelector('#toast'),modalRoot=document.querySelector('#modal-root');
 const beijingToday=()=>new Date(Date.now()+8*60*60*1000).toISOString().slice(0,10);
-const S={me:null,view:'overview',id:'',status:'',page:1,processedPage:1,processedCreatedFrom:beijingToday(),processedCreatedTo:beijingToday(),leadSource:'',leadSourceChannel:'',leadKeyword:'',sourceChannelOptions:null,tsKeyword:'',tsPhone:'',tsStatus:'',tsAssignee:'',tsConclusion:'',tsDueFrom:'',tsDueTo:'',tsSource:'',leadCreatedFrom:'',leadCreatedTo:'',leadStatusFilter:'',assignmentStatusFilter:'',leadAssignerId:'',leadSubmitterId:'',leadSupplierCompanyId:'',leadPendingReason:'',leadPhone:'',leadRegion:'',leadReceiverCompanyId:'',leadFilterOptions:null,operationUsers:null,platformLeads:[],supplierLeads:[],supplementHistoryPage:1,publicPoolKeyword:'',publicPoolPhone:'',publicPoolCreatedFrom:'',publicPoolCreatedTo:'',publicPoolSubmitterId:'',publicPoolCustomerSource:'',publicPoolSource:'',publicPoolCompleteness:'',publicPoolDuplicate:'',financeRewardPage:1,financeCompanyKeyword:'',financeCompanyStatus:'',financeCompanyPage:1,financeCompanyId:'',financeLedgerType:'',financePointKind:'',financeDays:30,financeRewardStatus:'',financeSource:'',pointFlowPeriod:'day',pointFlowAnchor:beijingToday(),pointFlowPage:1,platformCities:null,platformDistricts:[],companyKeyword:'',companyLifecycleStatus:'',companyPage:1,telesalesUsers:null,calendarMonth:'',unreadNotifications:0,accountNotifications:[],supplyTerminations:[],supplyTerminationPage:1,returnKeyword:''};
+const S={me:null,view:'overview',id:'',status:'',page:1,processedPage:1,processedCreatedFrom:beijingToday(),processedCreatedTo:beijingToday(),leadSource:'',leadSourceChannel:'',leadKeyword:'',sourceChannelOptions:null,tsKeyword:'',tsPhone:'',tsStatus:'',tsAssignee:'',tsConclusion:'',tsDueFrom:'',tsDueTo:'',tsSource:'',leadCreatedFrom:'',leadCreatedTo:'',leadStatusFilter:'',assignmentStatusFilter:'',leadAssignerId:'',leadSubmitterId:'',leadSupplierCompanyId:'',leadPendingReason:'',leadPhone:'',leadRegion:'',leadReceiverCompanyId:'',leadFilterOptions:null,operationUsers:null,platformLeads:[],supplierLeads:[],supplementHistoryPage:1,publicPoolKeyword:'',publicPoolPhone:'',publicPoolCreatedFrom:'',publicPoolCreatedTo:'',publicPoolSubmitterId:'',publicPoolCustomerSource:'',publicPoolSource:'',publicPoolCompleteness:'',publicPoolDuplicate:'',financeRewardPage:1,financeCompanyKeyword:'',financeCompanyStatus:'',financeCompanyPage:1,financeCompanyId:'',financeLedgerType:'',financePointKind:'',financeDays:30,financeRewardStatus:'',financeSource:'',pointFlowPeriod:'day',pointFlowAnchor:beijingToday(),pointFlowPage:1,platformCities:null,platformDistricts:[],companyKeyword:'',companyLifecycleStatus:'',companyPage:1,telesalesUsers:null,calendarMonth:'',unreadNotifications:0,accountNotifications:[],supplyTerminations:[],supplyTerminationPage:1,returnKeyword:'',poolKeyword:''};
 const P={overview:['首页','layout-dashboard',['*','dashboard.operation.read']],leads:['客资','user-check',['*','lead.manual.manage','lead.supplier.review']],supplements:['待补充','file-text',['*','lead.manual.manage']],closed:['已关闭客资','file-text',['*','lead.supplier.review']],publicPool:['公海池','file-text',['*','lead.manual.manage']],telesales:['电销','phone',['*','verification.read']],dispatch:['派发','hand-claim',['*','lead.dispatch']],companies:['加盟商','building',['*','company.profile.review','company.account.manage']],economics:['积分统计','wallet',['*','reward.read']],returns:['异常','rotate-ccw',['*','return.read']],finance:['资金','wallet',['*']],audit:['日志','search',['*','audit.read']],trace:['客资详情','file-text',['*','audit.read'],true],settings:['平台设置','settings',['*'],true],users:['内部账号','users',['*'],true],calendar:['工作日历','calendar',['*'],true],account:['账号中心','user',['*','dashboard.operation.read'],true]};
 const ADMIN_VIEW_CONTRACT={SUPER_ADMIN:['overview','leads','supplements','closed','publicPool','companies','finance'],OPERATION:['overview','leads','supplements','closed','publicPool','telesales','dispatch','companies','economics']};
 const ROLE_HOME_PRIORITY=['SUPER_ADMIN','OPERATION'];
@@ -1326,18 +1326,36 @@ function showInitialPassword(password,onClose){
     document.querySelector('#initial-password-close').onclick=()=>{closeModal();onClose?.()};
   });
 }
+function poolDispatchableCell(x){
+  const names=x.dispatchable_names||[];
+  const count=Number(x.dispatchable_count||0);
+  if(!count)return '<span class="ops-status bad">无可承接加盟商</span>';
+  const suffix=count>names.length?` 等 ${count} 家`:'';
+  return `<span class="ops-status ok">${esc(names.join('、'))}${suffix}</span>`;
+}
 async function dispatch(){
-  const d=await api(`/v1.2/dispatch-pool${qs({page:S.page,page_size:20})}`);
+  const d=await api(`/v1.2/dispatch-pool${qs({page:S.page,page_size:20,keyword:S.poolKeyword||undefined})}`);
   const canCorrect=can('lead.manual.manage')&&primaryRole()!=='SUPER_ADMIN';
   const byId=Object.fromEntries((d.items||[]).map(x=>[x.id,x]));
   const rows=(d.items||[]).map((x,index)=>{
     const actions=[`<button class="ops-btn primary" data-candidate="${esc(x.id)}">选择接收公司</button>`];
     if(canCorrect)actions.push(`<button class="ops-btn" data-dispatch-correction="${esc(x.id)}">修改信息</button>`);
     const verificationFlag=x.has_verification_info?`<button class="ops-btn" data-verification-info="${esc(x.id)}">有核验信息</button>`:'';
-    return `<tr><td>${rowSequence(d,index)}</td><td><b>${esc(x.customer_name)}</b><br>${esc(x.phone||x.phone_masked||'--')}</td><td>${esc(x.city||'--')} ${esc(x.district||'')}</td><td>${esc(label(x.source_kind))}</td><td>${esc(x.supplier_company_name||'平台客资')}<br><small>${esc(x.submitter_name||'未知录入人')}</small></td><td>${esc(x.need_summary||'--')}</td><td><div class="ops-actions">${actions.join(' ')}${verificationFlag}</div></td></tr>`;
+    return `<tr><td>${rowSequence(d,index)}</td><td><b>${esc(x.customer_name)}</b><br>${esc(x.phone||x.phone_masked||'--')}</td><td>${esc(x.city||'--')} ${esc(x.district||'')}</td><td>${esc(label(x.source_kind))}</td><td>${esc(x.supplier_company_name||'平台客资')}<br><small>${esc(x.submitter_name||'未知录入人')}</small></td><td>${esc(x.need_summary||'--')}</td><td>${poolDispatchableCell(x)}</td><td><div class="ops-actions">${actions.join(' ')}${verificationFlag}</div></td></tr>`;
   });
-  shell(`<section class="ops-card"><div class="ops-card-head"><div><h2>待人工派发池</h2><p>运营可核对完整手机号、客资提供方和录入人员；有在职员工时选择具体员工；无在职员工时自动派发给负责人。点击“有核验信息”可查看电销核验内容并据此修改客户资料。</p></div></div>${table(['序号','客户','所在地','客资来源','提供方 / 录入人','客户需求','操作'],rows)}${pager(d)}</section>`);
+  shell(`<section class="ops-card"><div class="ops-card-head"><div><h2>待人工派发池</h2><p>“可承接加盟商”列直接显示当前可派对象，标红表示暂无公司可承接；点击“选择接收公司”查看全部候选与判断说明。</p></div></div><form class="ops-filter" id="pool-filter-form"><input class="ops-input" id="pool-filter-keyword" type="search" autocomplete="off" placeholder="搜索客户姓名或完整手机号" value="${esc(S.poolKeyword||'')}"><button class="ops-btn primary" type="submit">查询</button><button class="ops-btn" type="button" id="pool-filter-reset">重置</button></form>${table(['序号','客户','所在地','客资来源','提供方 / 录入人','客户需求','可承接加盟商','操作'],rows)}${pager(d)}</section>`);
   bindPager(d,dispatch);
+  document.querySelector('#pool-filter-form').onsubmit=event=>{
+    event.preventDefault();
+    S.poolKeyword=document.querySelector('#pool-filter-keyword').value.trim();
+    S.page=1;
+    dispatch();
+  };
+  document.querySelector('#pool-filter-reset').onclick=()=>{
+    S.poolKeyword='';
+    S.page=1;
+    dispatch();
+  };
   document.querySelectorAll('[data-candidate]').forEach(button=>button.onclick=()=>candidates(button.dataset.candidate));
   document.querySelectorAll('[data-dispatch-correction]').forEach(button=>button.onclick=()=>openDispatchCorrection(byId[button.dataset.dispatchCorrection]));
   document.querySelectorAll('[data-verification-info]').forEach(button=>button.onclick=()=>openDispatchCorrection(byId[button.dataset.verificationInfo]));

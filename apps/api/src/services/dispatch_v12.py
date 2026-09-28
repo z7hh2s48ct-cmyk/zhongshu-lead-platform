@@ -29,7 +29,7 @@ from ..core.models_v12 import (
     CompanyServiceAreaV12,
     SupplierLeadReward,
 )
-from ..core.security import decrypt_text, mask_phone
+from ..core.security import decrypt_text, hash_phone, mask_phone, normalize_phone
 from ..core.time import as_utc
 from ..core.v12_enums import (
     DuplicateDecision,
@@ -880,6 +880,7 @@ def list_dispatch_pool(
     *,
     region_code: str | None = None,
     source_kind: str | None = None,
+    keyword: str | None = None,
     page_no: int = 1,
     page_size: int = 20,
 ) -> tuple[list[Lead], int]:
@@ -892,6 +893,13 @@ def list_dispatch_pool(
         filters.append(Lead.region_code == region_code)
     if source_kind:
         filters.append(Lead.source_kind == source_kind)
+    # 2026-09-28 反馈第 3 条：完整 11 位号码走哈希精确匹配，其余按客户姓名模糊。
+    normalized_keyword = (keyword or "").strip()
+    if normalized_keyword:
+        if len(normalized_keyword) == 11 and normalized_keyword.isdigit():
+            filters.append(Lead.phone_hash == hash_phone(normalize_phone(normalized_keyword)))
+        else:
+            filters.append(Lead.customer_name.contains(normalized_keyword, autoescape=True))
     total = db.scalar(select(func.count(Lead.id)).where(*filters)) or 0
     items = db.scalars(
         select(Lead)
@@ -901,6 +909,81 @@ def list_dispatch_pool(
         .limit(page_size)
     ).all()
     return list(items), int(total)
+
+
+def _region_candidate_company_ids(db: Session, lead: Lead) -> set[str]:
+    """粗筛服务区域在地理上可能覆盖该客资的公司（evaluate_candidate 精算兜底）。
+
+    粗筛集合必须覆盖 _region_matches 的两条路径：直接命中（县/市/省配置）
+    与"覆盖全市所有区"（公司按区配置，客资为市级），因此市级客资要并入
+    其全部在册区县。
+    """
+
+    if not lead.region_code:
+        return set()
+    region_codes = {lead.region_code}
+    lead_region = db.get(Region, lead.region_code)
+    if lead_region is not None:
+        parent_code = db.scalar(
+            select(Region.parent_code).where(Region.code == lead.region_code)
+        )
+        if parent_code:
+            region_codes.add(parent_code)
+            grandparent_code = db.scalar(
+                select(Region.parent_code).where(Region.code == parent_code)
+            )
+            if grandparent_code:
+                region_codes.add(grandparent_code)
+        if lead_region.level == "CITY":
+            region_codes |= set(
+                db.scalars(
+                    select(Region.code).where(
+                        Region.parent_code == lead.region_code,
+                        Region.level == "DISTRICT",
+                        Region.active.is_(True),
+                    )
+                ).all()
+            )
+    return {
+        str(company_id)
+        for company_id in db.scalars(
+            select(CompanyServiceAreaV12.company_id).where(
+                CompanyServiceAreaV12.region_code.in_(region_codes),
+                CompanyServiceAreaV12.active.is_(True),
+                _service_area_dispatchable(),
+            )
+        ).all()
+    }
+
+
+def summarize_dispatchable_companies(
+    db: Session,
+    *,
+    leads: list[Lead],
+    top: int = 3,
+) -> dict[str, dict[str, Any]]:
+    """2026-09-28 反馈第 1 条：按页批量给出每条客资的可承接加盟商摘要。
+
+    地理粗筛（每客资一次查询）→ 候选公司逐个走 evaluate_candidate 精算，
+    与候选弹窗共用同一判断口径，避免摘要与弹窗结论分叉。
+    """
+
+    if not leads:
+        return {}
+    summaries: dict[str, dict[str, Any]] = {}
+    for lead in leads:
+        eligible_names: list[str] = []
+        for company_id in _region_candidate_company_ids(db, lead):
+            company = db.get(Company, company_id)
+            if company is None or company.status != "ACTIVE":
+                continue
+            if evaluate_candidate(db, lead=lead, company=company).eligible:
+                eligible_names.append(company.name)
+        summaries[lead.id] = {
+            "names": eligible_names[:top],
+            "count": len(eligible_names),
+        }
+    return summaries
 
 
 def dispatch_manually_with_outcome(

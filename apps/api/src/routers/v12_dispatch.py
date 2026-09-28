@@ -36,6 +36,7 @@ from ..services.dispatch_v12 import (
     list_dispatch_pool,
     manual_dispatch_idempotency_guard,
     refuse_pending_assignment,
+    summarize_dispatchable_companies,
 )
 from ..services.lead_points_v12 import assignment_points_price, get_lead_points_settings
 from ..services.pre_dispatch_v12 import latest_submitted_pre_dispatch_task_ids
@@ -341,6 +342,7 @@ def dispatch_pool(
     db: Session = Depends(get_db),
     region_code: str | None = Query(default=None),
     source_kind: str | None = Query(default=None),
+    keyword: str | None = Query(default=None, max_length=64),
     page_no: int = Query(default=1, alias="page", ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
 ):
@@ -348,9 +350,12 @@ def dispatch_pool(
         db,
         region_code=region_code,
         source_kind=source_kind.strip().upper() if source_kind else None,
+        keyword=keyword,
         page_no=page_no,
         page_size=page_size,
     )
+    # 2026-09-28 反馈第 1 条：列表内联可承接加盟商摘要，免逐条点开排查。
+    dispatch_summaries = summarize_dispatchable_companies(db, leads=items)
     verification_task_ids = latest_submitted_pre_dispatch_task_ids(
         db,
         [item.id for item in items],
@@ -373,10 +378,13 @@ def dispatch_pool(
             submitter_name=submitter_names.get(item.submitter_user_id),
         )
         task_id = verification_task_ids.get(item.id)
+        summary = dispatch_summaries.get(item.id) or {"names": [], "count": 0}
         item_payload.update(
             {
                 "has_verification_info": task_id is not None,
                 "pre_dispatch_task_id": task_id,
+                "dispatchable_names": summary["names"],
+                "dispatchable_count": summary["count"],
             }
         )
         payload.append(item_payload)
