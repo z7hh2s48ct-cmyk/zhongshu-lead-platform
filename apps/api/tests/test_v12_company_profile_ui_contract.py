@@ -27,7 +27,7 @@ def test_v12_workbench_shows_platform_managed_company_profile() -> None:
     assert "data-capability-request" not in js
     assert "service-area-edit" not in js
     assert "申请/更新服务区域" not in js
-    assert "v12-workbench.js?v=20260923-feedback-922-region-search" in html
+    assert "v12-workbench.js?v=20260928-feedback-928" in html
 
 
 def test_v12_operations_exposes_company_detail_and_platform_configuration() -> None:

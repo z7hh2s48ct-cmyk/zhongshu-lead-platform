@@ -636,7 +636,9 @@ async function assignments(){
   }).join('');
   const title=followMode?'跟进':'接收';
   const exportVisible=(isFranchiseOwner()&&can('assignment.own.read'))||(can('assignment.employee.read')&&!isFranchiseOwner());
-  const exportLink=exportVisible?`<a class="wb-btn" href="/api/v1/v1.2/company/claimed-leads/export" download>导出已领取客资</a>`:'';
+  // 2026-09-28 反馈第 4 条（方案 A）：跟进列表含"退回处理中"而导出排除之，
+  // 在导出入口就地说明差异，避免"已领取却导不出"的反复反馈。
+  const exportLink=exportVisible?`<div class="wb-export-wrap"><a class="wb-btn" href="/api/v1/v1.2/company/claimed-leads/export" download>导出已领取客资</a><span>退回处理中的客资不包含在导出内</span></div>`:'';
   shell(`<section class="wb-page-head"><div><h1>${title}</h1></div>${exportLink}</section><div class="wb-list">${list||`<div class="wb-empty">暂无${title==='接收'?'待领取':'待跟进'}客资</div>`}</div>${workbenchPager([page])}`);
   bindWorkbenchPager(assignments);
   document.querySelectorAll('[data-assignment]').forEach(b=>b.onclick=()=>assignmentDetail(b.dataset.assignment));
