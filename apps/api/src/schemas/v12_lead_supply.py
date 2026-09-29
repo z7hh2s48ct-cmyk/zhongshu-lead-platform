@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class LeadDraftBody(BaseModel):
     customer_name: str | None = Field(default=None, max_length=64)
     phone: str | None = Field(default=None, max_length=32)
+    customer_wechat: str | None = Field(default=None, max_length=64)
     province: str | None = Field(default=None, max_length=64)
     city: str | None = Field(default=None, max_length=64)
     district: str | None = Field(default=None, max_length=64)
@@ -48,6 +49,7 @@ class PlatformLeadPreDispatchBody(PlatformLeadDraftBody):
 class LeadDraftUpdateBody(BaseModel):
     customer_name: str | None = Field(default=None, max_length=64)
     phone: str | None = Field(default=None, max_length=32)
+    customer_wechat: str | None = Field(default=None, max_length=64)
     province: str | None = Field(default=None, max_length=64)
     city: str | None = Field(default=None, max_length=64)
     district: str | None = Field(default=None, max_length=64)

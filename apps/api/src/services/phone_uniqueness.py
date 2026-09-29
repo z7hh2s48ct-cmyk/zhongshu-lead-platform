@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 
 from sqlalchemy import func, or_, select
@@ -8,11 +9,28 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..core.errors import AppError
+from ..core.config import get_settings
 from ..core.models_v12 import Lead
 from ..core.security import fingerprint_phone, hash_phone, normalize_phone
 
 
 logger = logging.getLogger("zhongshu.phone_uniqueness")
+settings = get_settings()
+
+
+def normalize_customer_wechat(value: str) -> str:
+    """Normalize a customer WeChat ID for exact, case-insensitive lookup."""
+
+    return value.strip().casefold()
+
+
+def hash_customer_wechat(value: str) -> str:
+    normalized = normalize_customer_wechat(value)
+    return hmac.new(
+        settings.effective_phone_fingerprint_secret.encode("utf-8"),
+        f"customer-wechat:{normalized}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def acquire_phone_identity_lock(db: Session, fingerprint: str) -> None:
@@ -69,3 +87,34 @@ def require_unique_lead_phone(
     if duplicate_id is not None:
         raise AppError("LEAD_PHONE_DUPLICATE", "该手机号已存在客资，请勿重复录入", 409)
     return normalized_phone
+
+
+def require_unique_customer_wechat(
+    db: Session,
+    *,
+    customer_wechat: str,
+    exclude_lead_id: str | None = None,
+) -> str:
+    normalized = normalize_customer_wechat(customer_wechat)
+    if not normalized:
+        return normalized
+    fingerprint = hash_customer_wechat(normalized)
+    statement = select(Lead.id).where(
+        Lead.deleted_at.is_(None),
+        Lead.customer_wechat_hash == fingerprint,
+    )
+    if exclude_lead_id is not None:
+        statement = statement.where(Lead.id != exclude_lead_id)
+    try:
+        with db.no_autoflush:
+            acquire_phone_identity_lock(db, fingerprint)
+            duplicate_id = db.scalar(statement.limit(1))
+    except SQLAlchemyError:
+        logger.exception(
+            "lead customer WeChat uniqueness query failed exclude_lead_id=%s",
+            exclude_lead_id,
+        )
+        raise
+    if duplicate_id is not None:
+        raise AppError("LEAD_WECHAT_DUPLICATE", "该客户微信号已存在客资，请勿重复录入", 409)
+    return normalized

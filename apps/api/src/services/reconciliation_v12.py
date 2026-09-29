@@ -11,7 +11,7 @@ from ..core.models import Assignment, Lead, PointsAccount, PointsLedger, ReturnE
 from ..core.models_v12 import SupplierLeadReward, V12MigrationCheckpoint
 from ..core.state_machine_v12 import LEGACY_LEAD_STATUS_MAP, LEGACY_RETURN_STATUS_MAP
 from ..core.v12_enums import LeadV12Status, ReturnV12Status, RewardStatus
-from .migration_v12 import PHONE_FINGERPRINT_CHECKPOINT
+from .migration_v12 import PHONE_FINGERPRINT_CHECKPOINT, phone_fingerprint_missing_condition
 
 _ACTIVE_ASSIGNMENT_STATUSES = ("PENDING_CLAIM", "CLAIMED", "FOLLOWING", "RETURN_PENDING")
 _MAX_SEMANTIC_SAMPLES = 50
@@ -231,7 +231,7 @@ def reconcile_v12(db: Session, *, require_completed_backfill: bool = True) -> Re
 
     report = ReconciliationReport()
     total_leads = _count(db, Lead)
-    missing_fingerprints = _count(db, Lead, Lead.phone_fingerprint.is_(None))
+    missing_fingerprints = _count(db, Lead, phone_fingerprint_missing_condition())
     report.metrics.update(
         {
             "leads_total": total_leads,

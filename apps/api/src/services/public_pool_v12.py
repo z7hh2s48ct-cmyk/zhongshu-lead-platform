@@ -44,6 +44,7 @@ PUBLIC_POOL_OPERATION_STATUSES = frozenset(
     {
         LeadV12Status.DRAFT.value,
         LeadV12Status.DUPLICATE.value,
+        LeadV12Status.PUBLIC_POOL.value,
     }
 )
 KNOWN_SOURCE_CHANNELS = frozenset(
@@ -159,21 +160,34 @@ def _feishu_values(
     }
 
 
-def public_pool_validation_errors(db: Session, lead: Lead) -> dict[str, str]:
+def public_pool_validation_errors(
+    db: Session,
+    lead: Lead,
+    *,
+    receiver_coverage: bool | None = None,
+    active_region_codes: set[str] | None = None,
+) -> dict[str, str]:
     errors: dict[str, str] = {}
     phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
-    if len(phone) != 11 or not phone.startswith("1"):
-        errors["phone"] = "手机号必填且必须为 11 位有效号码"
+    customer_wechat = (decrypt_text(lead.customer_wechat_encrypted) or "").strip()
+    if phone and (len(phone) != 11 or not phone.startswith("1")):
+        errors["phone"] = "手机号必须为 11 位有效号码"
+    elif not phone and not customer_wechat:
+        errors["phone"] = "手机号或客户微信号至少填写一项"
     if not lead.region_code:
         errors["region_code"] = "必须选择标准地区"
     else:
-        active_region = db.scalar(
-            select(Region.code).where(
-                Region.code == lead.region_code,
-                Region.active.is_(True),
+        active_region = (
+            lead.region_code in active_region_codes
+            if active_region_codes is not None
+            else db.scalar(
+                select(Region.code).where(
+                    Region.code == lead.region_code,
+                    Region.active.is_(True),
+                )
             )
         )
-        if active_region is None and region_by_code(lead.region_code) is None:
+        if not active_region and region_by_code(lead.region_code) is None:
             errors["region_code"] = "标准地区无效或已停用"
         # 2026-09-23 口径：缺县不再阻断转入派发池（运营自行担责，前端软提醒）。
     if lead.source_kind != LeadSourceKind.SUPPLIER_H5.value:
@@ -191,9 +205,15 @@ def public_pool_validation_errors(db: Session, lead: Lead) -> dict[str, str]:
         errors["budget_max"] = "预算上限不能低于预算下限"
     if (
         lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
-        and not has_receiver_coverage(db, lead)
+        or lead.status == LeadV12Status.PUBLIC_POOL.value
     ):
-        errors["receiver_coverage"] = "当地暂无可接收加盟商"
+        covered = (
+            has_receiver_coverage(db, lead)
+            if receiver_coverage is None
+            else receiver_coverage
+        )
+        if not covered:
+            errors["receiver_coverage"] = "当地暂无可接收加盟商"
     return errors
 
 
@@ -259,10 +279,7 @@ def require_public_pool_lead(lead: Lead | None) -> Lead:
         lead.source_kind in PUBLIC_POOL_OPERATION_SOURCE_KINDS
         and lead.status in PUBLIC_POOL_OPERATION_STATUSES
     )
-    supplier_waiting = (
-        lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
-        and lead.status == LeadV12Status.PUBLIC_POOL.value
-    )
+    supplier_waiting = lead.source_kind == LeadSourceKind.SUPPLIER_H5.value and lead.status == LeadV12Status.PUBLIC_POOL.value
     if not operation_entry and not supplier_waiting:
         raise AppError("LEAD_NOT_IN_PUBLIC_POOL", "客资当前不在公海池", 409)
     return lead
@@ -275,7 +292,7 @@ def transfer_public_pool_lead(
     principal: Principal,
 ) -> PublicPoolTransferResult:
     require_public_pool_lead(lead)
-    if lead.source_kind == LeadSourceKind.SUPPLIER_H5.value:
+    if lead.status == LeadV12Status.PUBLIC_POOL.value:
         errors = public_pool_validation_errors(db, lead)
         _store_validation_errors(lead, errors)
         if errors:
@@ -293,7 +310,7 @@ def transfer_public_pool_lead(
         dedup = _check_draft_duplicate(
             db,
             lead,
-            checkpoint="PUBLIC_POOL_SUPPLIER_RECHECK",
+            checkpoint="PUBLIC_POOL_RECEIVER_RECHECK",
         )
         if dedup and dedup.decision in {
             DuplicateDecision.HARD_DUPLICATE,
@@ -346,6 +363,16 @@ def transfer_public_pool_lead(
     transferred = lead.status == LeadV12Status.READY_DISPATCH.value
     if transferred:
         _store_validation_errors(lead, {})
+    elif lead.status == LeadV12Status.PUBLIC_POOL.value:
+        errors = public_pool_validation_errors(db, lead)
+        _store_validation_errors(lead, errors)
+        db.flush()
+        return PublicPoolTransferResult(
+            lead=lead,
+            transferred=False,
+            validation_errors=errors,
+            dedup=dedup,
+        )
     db.flush()
     return PublicPoolTransferResult(
         lead=lead,
@@ -359,8 +386,7 @@ def transfer_public_pool_lead(
     )
 
 
-# 供客客资提交时当地无接收方会进入公海并记此阻断原因；加盟商后续启用接收
-# 资格/服务区域后需要重算，见 rematch_no_receiver_public_pool_leads。
+# 正式客资当地无接收方时进入公海；加盟商后续启用接收资格或服务区域后重算。
 PUBLIC_POOL_NO_LOCAL_RECEIVER = "PUBLIC_POOL_NO_LOCAL_RECEIVER"
 AUTO_REMATCH_AUDIT_ACTION = "V12_PUBLIC_POOL_AUTO_REMATCH"
 
@@ -371,7 +397,10 @@ def _is_auto_rematch_candidate(lead: Lead | None) -> bool:
     return (
         lead is not None
         and lead.deleted_at is None
-        and lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
+        and lead.source_kind in (
+            LeadSourceKind.SUPPLIER_H5.value,
+            *PUBLIC_POOL_OPERATION_SOURCE_KINDS,
+        )
         and lead.status == LeadV12Status.PUBLIC_POOL.value
         and lead.pending_reason == PUBLIC_POOL_NO_LOCAL_RECEIVER
         and lead.current_assignment_id is None
@@ -384,9 +413,9 @@ def rematch_no_receiver_public_pool_leads(
     batch_size: int = 200,
     after: tuple[datetime, str] | None = None,
 ) -> dict[str, int | tuple[datetime, str] | None]:
-    """有界批处理：重匹配因当地无接收方进入公海的供客客资。
+    """有界批处理：重匹配因当地无接收方进入公海的正式客资。
 
-    只筛选 SUPPLIER_H5、PUBLIC_POOL、pending_reason=PUBLIC_POOL_NO_LOCAL_RECEIVER、
+    只筛选正式来源、PUBLIC_POOL、pending_reason=PUBLIC_POOL_NO_LOCAL_RECEIVER、
     无进行中派发单且未删除的客资；逐条加锁后复用 transfer_public_pool_lead
     （含资料校验与查重规则）判断是否已出现合格的非供资方接收方。满足条件转成
     READY_DISPATCH 并写系统审计；仍不满足者保持公海状态并保存明确阻断原因。
@@ -399,7 +428,7 @@ def rematch_no_receiver_public_pool_leads(
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
     base = select(Lead.id, Lead.created_at).where(
-        Lead.source_kind == LeadSourceKind.SUPPLIER_H5.value,
+        Lead.source_kind.in_((LeadSourceKind.SUPPLIER_H5.value, *PUBLIC_POOL_OPERATION_SOURCE_KINDS)),
         Lead.status == LeadV12Status.PUBLIC_POOL.value,
         Lead.pending_reason == PUBLIC_POOL_NO_LOCAL_RECEIVER,
         Lead.current_assignment_id.is_(None),
@@ -434,7 +463,7 @@ def rematch_no_receiver_public_pool_leads(
                 if not _is_auto_rematch_candidate(lead):
                     continue
                 before = {"status": lead.status, "pending_reason": lead.pending_reason}
-                # SUPPLIER_H5 分支不依赖 principal；系统任务以 principal=None 复用校验与查重。
+                # 已入公海的正式客资不依赖 principal；系统任务复用校验与查重。
                 result = transfer_public_pool_lead(db, lead=lead, principal=None)
                 if result.transferred:
                     transferred += 1
@@ -689,7 +718,7 @@ def public_pool_lead_conditions(
     submitter_user_id: str | None = None,
 ) -> list[Any]:
     incomplete_condition = or_(
-        Lead.phone_fingerprint.is_(None),
+        and_(Lead.phone_fingerprint.is_(None), Lead.customer_wechat_hash.is_(None)),
         Lead.region_code.is_(None),
         Lead.region_code == "",
         and_(

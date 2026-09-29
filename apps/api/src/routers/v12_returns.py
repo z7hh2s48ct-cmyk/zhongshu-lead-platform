@@ -20,6 +20,7 @@ from ..core.security import hash_phone
 from ..core.v12_enums import LeadV12Status, ReturnV12Status, VerificationTaskType
 from ..schemas.v12_returns import (
     ReturnDirectInvalidBody,
+    ReturnCorrectionRedispatchBody,
     ReturnDraftV12Body,
     ReturnFinalReviewBody,
     ReturnRegionRedispatchBody,
@@ -35,6 +36,7 @@ from ..services.return_v12 import (
     claim_return_verification_task,
     create_or_update_return_draft,
     correct_region_and_redispatch,
+    correct_and_redispatch_return,
     direct_invalid_return,
     final_review_return,
     prepare_return_evidence_upload,
@@ -862,6 +864,59 @@ def correct_return_region(
         else "原领取积分已退还，区域已修改，客资可重新分配"
     )
     return ok(request, data, message)
+
+
+@router.post("/returns/{return_id}/correct-and-redispatch")
+def correct_return_and_redispatch(
+    return_id: str,
+    body: ReturnCorrectionRedispatchBody,
+    request: Request,
+    principal=Depends(require_permissions("return.review")),
+    db: Session = Depends(get_db),
+):
+    result = correct_and_redispatch_return(
+        db,
+        return_id=return_id,
+        principal=principal,
+        company_id=body.company_id,
+        employee_user_id=body.employee_user_id,
+        idempotency_key=body.idempotency_key,
+        expected_snapshot_version=body.expected_snapshot_version,
+        customer_name=body.customer_name,
+        need_summary=body.need_summary,
+        consent_confirmed=body.consent_confirmed,
+        province_code=body.province_code,
+        city_code=body.city_code,
+        district_code=body.district_code,
+        reason=body.reason,
+    )
+    write_audit(
+        db,
+        principal=principal,
+        action="V12_RETURN_CORRECTED_REDISPATCH",
+        resource_type="return_request",
+        resource_id=result.request.id,
+        company_id=result.request.company_id,
+        after={
+            "lead_id": result.request.lead_id,
+            "new_assignment_id": result.assignment.id,
+            "new_receiver_company_id": result.assignment.company_id,
+            "refund_ledger_id": result.refund_ledger.id,
+            "idempotent": result.idempotent,
+        },
+        reason=body.reason,
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    data = return_request_to_dict(db, result.request, include_evidence=True)
+    data.update(
+        {
+            "new_assignment_id": result.assignment.id,
+            "new_receiver_company_id": result.assignment.company_id,
+            "idempotent": result.idempotent,
+        }
+    )
+    return ok(request, data, "客户信息已更正并改派给其他加盟商")
 
 
 @router.post("/returns/{return_id}/final-review")

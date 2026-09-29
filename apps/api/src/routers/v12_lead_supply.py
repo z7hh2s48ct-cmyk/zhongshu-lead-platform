@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -11,7 +11,15 @@ from sqlalchemy.orm import Session
 from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.errors import AppError
-from ..core.models import Assignment, Company, Lead, Region, VerificationTask
+from ..core.models import (
+    Assignment,
+    Company,
+    Lead,
+    Region,
+    User,
+    VerificationSubmission,
+    VerificationTask,
+)
 from ..core.models_v12 import CompanyLeadCapability, CompanyServiceAreaV12
 from ..core.responses import ok, page
 from ..core.v12_enums import LeadSourceKind, VerificationTaskType
@@ -37,6 +45,11 @@ from ..schemas.v12_lead_supply import (
 )
 from ..services.lead_deletion_v12 import delete_operation_lead, preview_lead_deletion, require_lead_not_deleted
 from ..services.supply_termination import require_supply_write_enabled
+from ..services.supplier_lead_import_v12 import (
+    MAX_IMPORT_FILE_BYTES,
+    build_supplier_import_template,
+    import_supplier_leads,
+)
 from ..services.audit import write_audit
 from ..services.company_profile_v12 import (
     list_capabilities,
@@ -292,12 +305,83 @@ def _platform_lead_or_raise(db: Session, lead_id: str, *, lock: bool = False) ->
 
 
 def _lead_detail_dict(db: Session, lead: Lead, principal) -> dict:
-    return lead_supply_list_to_dict(
+    result = lead_supply_list_to_dict(
         db,
         [lead],
         principal,
         include_assignment_history=True,
     )[0]
+    tasks = list(
+        db.scalars(
+            select(VerificationTask)
+            .where(
+                VerificationTask.lead_id == lead.id,
+                VerificationTask.task_type
+                == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+            )
+            .order_by(VerificationTask.created_at, VerificationTask.id)
+        ).all()
+    )
+    submissions = (
+        list(
+            db.scalars(
+                select(VerificationSubmission)
+                .where(
+                    VerificationSubmission.task_id.in_([task.id for task in tasks])
+                )
+                .order_by(
+                    VerificationSubmission.created_at,
+                    VerificationSubmission.id,
+                )
+            ).all()
+        )
+        if tasks
+        else []
+    )
+    latest_submission = {item.task_id: item for item in submissions}
+    user_ids = {
+        value
+        for value in (
+            *(task.assignee_user_id for task in tasks),
+            *(item.submitted_by for item in submissions),
+        )
+        if value
+    }
+    users = {
+        user.id: user
+        for user in db.scalars(select(User).where(User.id.in_(user_ids))).all()
+    }
+
+    def display_name(user_id: str | None) -> str | None:
+        user = users.get(user_id)
+        return (user.display_name or user.username) if user else None
+
+    result["pre_dispatch_history"] = [
+        {
+            "task_id": task.id,
+            "status": task.status,
+            "assignee_user_id": task.assignee_user_id,
+            "assignee_name": display_name(task.assignee_user_id),
+            "contact_result": task.contact_result,
+            "conclusion": task.verification_conclusion,
+            "note": (
+                latest_submission[task.id].note
+                if task.id in latest_submission
+                else None
+            ),
+            "submitted_by_name": display_name(
+                latest_submission[task.id].submitted_by
+                if task.id in latest_submission
+                else None
+            ),
+            "created_at": task.created_at.isoformat(),
+            "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "submitted_at": task.submitted_at.isoformat() if task.submitted_at else None,
+        }
+        for task in tasks
+    ]
+    return result
 
 
 @router.post("/platform/leads")
@@ -475,7 +559,11 @@ def preview_platform_lead_quick_dispatch_candidates(
             principal=principal,
             checkpoint="QUICK_DISPATCH_PREVIEW",
         )
-        if lead.status != "READY_DISPATCH" or lead.current_assignment_id:
+        no_receiver = (
+            lead.status == "PUBLIC_POOL"
+            and lead.pending_reason == "PUBLIC_POOL_NO_LOCAL_RECEIVER"
+        )
+        if not no_receiver and (lead.status != "READY_DISPATCH" or lead.current_assignment_id):
             raise AppError(
                 "LEAD_NOT_READY_DISPATCH",
                 "当前客资无法直接派发",
@@ -486,7 +574,7 @@ def preview_platform_lead_quick_dispatch_candidates(
                     "dedup": _dedup_dict(dedup),
                 },
             )
-        candidates = list_candidates(
+        candidates = [] if no_receiver else list_candidates(
             db,
             lead=lead,
             keyword=keyword,
@@ -504,10 +592,50 @@ def preview_platform_lead_quick_dispatch_candidates(
             "page_size": page_size,
             "page_eligible_count": len(eligible),
             "total_companies": count_candidates(db, keyword=keyword),
+            "pool_target": "PUBLIC_POOL" if no_receiver else "READY_DISPATCH",
         }
     finally:
         db.rollback()
     return ok(request, data)
+
+
+@router.post("/platform/leads/quick-dispatch/public-pool")
+def save_quick_dispatch_without_receiver(
+    body: PlatformLeadDraftBody,
+    request: Request,
+    principal=Depends(require_permissions("lead.manual.manage", "lead.dispatch")),
+    db: Session = Depends(get_db),
+):
+    try:
+        lead = create_draft(
+            db,
+            principal=principal,
+            source_kind=LeadSourceKind.PLATFORM_MANUAL,
+            values=body.model_dump(exclude_none=True),
+        )
+        dedup = submit_draft(db, lead=lead, principal=principal)
+        if lead.status != "PUBLIC_POOL" or lead.pending_reason != "PUBLIC_POOL_NO_LOCAL_RECEIVER":
+            raise AppError(
+                "LEAD_NO_RECEIVER_CHANGED",
+                "接收条件已变化，请重新选择加盟商或处理客资",
+                409,
+                {"status": lead.status, "duplicate_status": lead.duplicate_status},
+            )
+        write_audit(
+            db,
+            principal=principal,
+            action="V12_PLATFORM_QUICK_DISPATCH_PUBLIC_POOL",
+            resource_type="lead",
+            resource_id=lead.id,
+            after={"status": lead.status, "pending_reason": lead.pending_reason},
+            reason=dedup.decision.value,
+            request_id=request.state.request_id,
+        )
+        db.commit()
+        return ok(request, {"lead": lead_supply_to_dict(lead, principal)})
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.post("/platform/leads/quick-dispatch")
@@ -1098,6 +1226,49 @@ def create_supplier_lead(
     )
     db.commit()
     return ok(request, lead_supply_to_dict(lead, principal), "供应商客资草稿已创建")
+
+
+@router.get("/supplier/leads/import-template")
+def download_supplier_lead_import_template(
+    principal=Depends(require_permissions("supplier.lead.manage")),
+    db: Session = Depends(get_db),
+):
+    require_active_company(db, principal.company_id)
+    return Response(
+        content=build_supplier_import_template(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="supplier-leads-import-template.xlsx"'
+            )
+        },
+    )
+
+
+@router.post("/supplier/leads/import")
+def import_supplier_lead_workbook(
+    request: Request,
+    file: UploadFile = File(...),
+    principal=Depends(require_permissions("supplier.lead.manage")),
+    db: Session = Depends(get_db),
+):
+    require_supply_write_enabled(db, principal.company_id)
+    filename = (file.filename or "").strip().lower()
+    if not filename.endswith(".xlsx"):
+        raise AppError(
+            "SUPPLIER_IMPORT_FILE_INVALID",
+            "仅支持 .xlsx 格式的 Excel 文件",
+            422,
+        )
+    content = file.file.read(MAX_IMPORT_FILE_BYTES + 1)
+    result = import_supplier_leads(
+        db,
+        principal=principal,
+        content=content,
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    return ok(request, result, "批量导入已完成")
 
 
 @router.patch("/supplier/leads/{lead_id}")

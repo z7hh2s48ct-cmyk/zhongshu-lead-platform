@@ -285,14 +285,14 @@ console.log(JSON.stringify({
     )
     assert result == {
         "submitted": False,
-        "unsupported": False,
+        "unsupported": True,
         "supported": True,
         "corrected": "已返还 100 积分，区域已更正并重新入池",
         "invalid": "已返还 100 积分，客资已关闭",
     }
     detail = ADMIN.read_text(encoding="utf-8")
     detail = detail[detail.index("async function returnDetail") : detail.index("async function correctReturnRegionAndRedispatch")]
-    assert "请先完成退回核验" in detail
+    assert "等待电销提交事实核验结论" in detail
 
 
 def test_single_evidence_in_active_task_can_be_selected_for_verification() -> None:

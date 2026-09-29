@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any
 
-from sqlalchemy import Index, and_, case, func, literal, or_, select
+from sqlalchemy import Index, and_, case, false, func, literal, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from ..core.config import get_settings
@@ -316,6 +316,91 @@ def has_receiver_coverage(db: Session, lead: Lead) -> bool:
     return db.scalar(full_city_coverage) is not None
 
 
+def receiver_coverage_for_leads(
+    db: Session, leads: list[Lead]
+) -> dict[tuple[str | None, str | None], bool]:
+    """Resolve a public-pool page's local coverage with bounded database reads."""
+
+    keys = {(lead.region_code, lead.supplier_company_id) for lead in leads}
+    requested_codes = {region_code for region_code, _ in keys if region_code}
+    if not requested_codes:
+        return {key: False for key in keys}
+
+    regions = {
+        row.code: row
+        for row in db.scalars(select(Region).where(Region.code.in_(requested_codes))).all()
+    }
+    parent_codes = {row.parent_code for row in regions.values() if row.parent_code}
+    parents = {
+        row.code: row
+        for row in db.scalars(select(Region).where(Region.code.in_(parent_codes))).all()
+    } if parent_codes else {}
+    city_codes = {row.code for row in regions.values() if row.level == "CITY"}
+    districts_by_city: dict[str, set[str]] = {code: set() for code in city_codes}
+    if city_codes:
+        for code, parent_code in db.execute(
+            select(Region.code, Region.parent_code).where(
+                Region.parent_code.in_(city_codes),
+                Region.level == "DISTRICT",
+                Region.active.is_(True),
+            )
+        ):
+            districts_by_city[parent_code].add(code)
+
+    area_codes = set(requested_codes) | parent_codes
+    area_codes.update(row.parent_code for row in parents.values() if row.parent_code)
+    for district_codes in districts_by_city.values():
+        area_codes.update(district_codes)
+
+    companies_by_area: dict[str, set[str]] = {}
+    ordered_area_codes = sorted(area_codes)
+    for offset in range(0, len(ordered_area_codes), 500):
+        rows = db.execute(
+            select(Company.id, CompanyServiceAreaV12.region_code)
+            .join(CompanyLeadCapability, CompanyLeadCapability.company_id == Company.id)
+            .join(CompanyServiceAreaV12, CompanyServiceAreaV12.company_id == Company.id)
+            .where(
+                Company.status == "ACTIVE",
+                CompanyLeadCapability.capability_code == "LEAD_RECEIVER",
+                CompanyLeadCapability.active.is_(True),
+                CompanyLeadCapability.review_status == "APPROVED",
+                CompanyServiceAreaV12.active.is_(True),
+                _service_area_dispatchable(),
+                CompanyServiceAreaV12.region_code.in_(ordered_area_codes[offset:offset + 500]),
+            )
+        )
+        for company_id, area_code in rows:
+            companies_by_area.setdefault(area_code, set()).add(company_id)
+
+    coverage: dict[tuple[str | None, str | None], bool] = {}
+    for region_code, supplier_company_id in keys:
+        if not region_code:
+            coverage[(region_code, supplier_company_id)] = False
+            continue
+        region = regions.get(region_code)
+        parent_code = region.parent_code if region else None
+        parent = parents.get(parent_code) if parent_code else None
+        direct_codes = {region_code, parent_code, parent.parent_code if parent else None}
+        direct_receivers = set().union(
+            *(companies_by_area.get(code, set()) for code in direct_codes if code)
+        )
+        direct_receivers.discard(supplier_company_id)
+        if direct_receivers:
+            coverage[(region_code, supplier_company_id)] = True
+            continue
+        district_codes = districts_by_city.get(region_code, set())
+        if not district_codes:
+            coverage[(region_code, supplier_company_id)] = False
+            continue
+        district_iter = iter(district_codes)
+        full_city_receivers = companies_by_area.get(next(district_iter), set()).copy()
+        for district_code in district_iter:
+            full_city_receivers.intersection_update(companies_by_area.get(district_code, set()))
+        full_city_receivers.discard(supplier_company_id)
+        coverage[(region_code, supplier_company_id)] = bool(full_city_receivers)
+    return coverage
+
+
 def lead_district_region_code(db: Session, lead: Lead) -> str | None:
     """解析客资的县级地区编码；静态快照为权威源。
 
@@ -351,12 +436,8 @@ def lead_missing_district_region(db: Session, lead: Lead) -> bool:
 
 
 def approved_lead_pool_target(db: Session, lead: Lead) -> LeadV12Status:
-    # 2026-09-23 口径：缺县客资可入池直派（运营自行担责）；
-    # 加盟商客资当地无覆盖时仍进公海池等待匹配。
-    if (
-        lead.source_kind == LeadSourceKind.SUPPLIER_H5.value
-        and not has_receiver_coverage(db, lead)
-    ):
+    # 缺县仍可由运营直派；当地无人承接时，所有正式客资先进入公海等待匹配。
+    if not has_receiver_coverage(db, lead):
         return LeadV12Status.PUBLIC_POOL
     return LeadV12Status.READY_DISPATCH
 
@@ -407,9 +488,15 @@ def _receiver_duplicate_assignment(
     current = as_utc(now) or datetime.now(timezone.utc)
     rule = reward_rule or resolve_supplier_reward_rule(db, as_of=current)
     cutoff = current - timedelta(days=rule.historical_suspect_days)
-    match_clauses = [Lead.phone_hash == lead.phone_hash]
+    match_clauses = []
     if lead.phone_fingerprint:
-        match_clauses.insert(0, Lead.phone_fingerprint == lead.phone_fingerprint)
+        match_clauses.append(Lead.phone_fingerprint == lead.phone_fingerprint)
+    if lead.phone_hash:
+        match_clauses.append(Lead.phone_hash == lead.phone_hash)
+    if lead.customer_wechat_hash:
+        match_clauses.append(Lead.customer_wechat_hash == lead.customer_wechat_hash)
+    if not match_clauses:
+        return None
     filters = [
         Assignment.company_id == company_id,
         Assignment.status.in_(RECEIVER_HISTORY_STATUSES),
@@ -625,9 +712,13 @@ def list_candidates(
     )
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=reward_rule.historical_suspect_days)
-    match_clauses = [Lead.phone_hash == lead.phone_hash]
+    match_clauses = []
     if lead.phone_fingerprint:
-        match_clauses.insert(0, Lead.phone_fingerprint == lead.phone_fingerprint)
+        match_clauses.append(Lead.phone_fingerprint == lead.phone_fingerprint)
+    if lead.phone_hash:
+        match_clauses.append(Lead.phone_hash == lead.phone_hash)
+    if lead.customer_wechat_hash:
+        match_clauses.append(Lead.customer_wechat_hash == lead.customer_wechat_hash)
     duplicate_receiver_companies = (
         select(Assignment.company_id)
         .join(Lead, Lead.id == Assignment.lead_id)
@@ -636,7 +727,7 @@ def list_candidates(
             Assignment.claimed_at.is_not(None),
             Assignment.claimed_at >= cutoff,
             Assignment.lead_id != lead.id,
-            or_(*match_clauses),
+            or_(*match_clauses) if match_clauses else false(),
         )
         .distinct()
         .subquery()
@@ -1106,6 +1197,7 @@ def dispatch_manually_with_outcome(
         lead_snapshot={
             "customer_name": lead.customer_name,
             "phone_masked": mask_phone(phone),
+            "has_customer_wechat": bool(lead.customer_wechat_encrypted),
             "region_code": lead.region_code,
             "city": lead.city,
             "district": lead.district,

@@ -447,6 +447,9 @@ def test_deleted_lead_cannot_receive_a_task_from_a_stale_create_request(db):
 
 
 def test_operation_reopens_closed_lead_for_a_new_assignment_round_without_reusing_old_assignment(db):
+    from apps.api.tests.test_public_pool_v12 import _receiver
+
+    _receiver(db, region_code="310101")
     operator = User(display_name="运营", status="ACTIVE")
     company = Company(code="CF914-R", name="原接收方", status="ACTIVE")
     db.add_all([operator, company])

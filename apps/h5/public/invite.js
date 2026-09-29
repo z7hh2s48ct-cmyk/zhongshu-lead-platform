@@ -49,7 +49,10 @@ async function loadInvite(){
     ownerEl.textContent=invite.owner_name||'待确认';
     expiresEl.textContent=formatTime(invite.expires_at);
     detailsEl.hidden=false;
-    statusEl.textContent='邀请有效，请确认绑定。';
+    const replacing=invite.purpose==='OWNER_WECHAT_REBIND';
+    statusEl.textContent=replacing?'邀请有效。请使用新的微信确认换绑；成功前原微信仍可登录。':'邀请有效，请确认绑定。';
+    confirmButton.textContent=replacing?'确认更换微信':'确认绑定';
+    if(replacing)document.querySelector('#invite-tip').textContent='换绑成功后，原微信将无法继续登录；负责人账号、历史记录和权限保持不变。';
     statusEl.className='invite-status success';
     confirmButton.disabled=false;
   }catch(error){

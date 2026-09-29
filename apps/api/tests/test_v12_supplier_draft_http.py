@@ -75,7 +75,12 @@ def _valid_lead_body(phone: str) -> dict:
 
 
 def test_platform_lead_exposes_creator_and_supports_controlled_pre_dispatch_correction(api_client) -> None:
-    client, _factory = api_client
+    from apps.api.tests.test_public_pool_v12 import _receiver
+
+    client, factory = api_client
+    with factory() as db:
+        _receiver(db, region_code="310101")
+        db.commit()
     operation = _login(client, "operation", "Operation123!")
     me = _data(client.get("/api/v1/auth/me", headers=operation))
     created = _data(
@@ -116,6 +121,9 @@ def test_platform_lead_exposes_creator_and_supports_controlled_pre_dispatch_corr
 def test_platform_lead_can_submit_a_township_region_and_keeps_its_hierarchy(api_client) -> None:
     client, factory = api_client
     with factory() as db:
+        from apps.api.tests.test_public_pool_v12 import _receiver
+
+        _receiver(db, region_code="310115001")
         db.add(
             Region(
                 code="310115001",
@@ -854,7 +862,7 @@ def test_platform_draft_without_phone_cannot_enter_telesales_verification(api_cl
     )
 
     assert blocked.status_code == 422
-    assert blocked.json()["code"] == "PRE_DISPATCH_PHONE_REQUIRED"
+    assert blocked.json()["code"] == "PRE_DISPATCH_CONTACT_REQUIRED"
 
 
 def test_platform_create_and_telesales_assignment_is_atomic_and_idempotent(api_client) -> None:
@@ -1105,7 +1113,7 @@ def test_public_pool_draft_with_invalid_phone_cannot_enter_telesales_verificatio
     )
 
     assert blocked.status_code == 422
-    assert blocked.json()["code"] == "PRE_DISPATCH_PHONE_REQUIRED"
+    assert blocked.json()["code"] == "PRE_DISPATCH_CONTACT_REQUIRED"
 
 
 def test_public_pool_draft_with_unresolved_duplicate_cannot_enter_telesales_verification(api_client) -> None:

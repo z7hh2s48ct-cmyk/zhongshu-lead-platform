@@ -162,6 +162,9 @@ def test_public_pool_phone_query_rejects_incomplete_number_and_stores_only_hash(
 
 
 def test_historical_operation_rework_stays_visible_until_successful_transfer(db) -> None:
+    from apps.api.tests.test_public_pool_v12 import _receiver
+
+    _receiver(db)
     _, principal = _operation(db)
     rework = _create_lead(db, principal, phone="13800138124", name="历史待补客户")
     other = _create_lead(db, principal, phone="13800138125", name="普通公海客户")

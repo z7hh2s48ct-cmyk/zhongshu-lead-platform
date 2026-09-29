@@ -119,7 +119,7 @@ def test_supplier_h5_validates_before_creating_a_submission_draft() -> None:
     assert "errors.phone" in validation
     assert "errors.consent_confirmed" in validation
     assert "errors.customer_name" not in validation
-    assert "errors.city" not in validation
+    assert "if(payload.province&&!payload.city)errors.city" in validation
     assert "errors.need_summary" not in validation
     assert "暂不确定，提交后由电销补充" in js
 

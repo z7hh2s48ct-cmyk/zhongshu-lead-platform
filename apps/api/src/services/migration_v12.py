@@ -4,18 +4,27 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from ..core.config import get_settings
 from ..core.models import Lead
 from ..core.models_v12 import V12MigrationCheckpoint
-from ..core.security import decrypt_text, fingerprint_phone, normalize_phone
+from ..core.security import decrypt_text, fingerprint_phone, hash_phone, normalize_phone
 
 settings = get_settings()
 
 PHONE_FINGERPRINT_CHECKPOINT = "t30_phone_fingerprint_backfill_v1"
 _MAX_ERROR_SAMPLES = 50
+
+
+def phone_fingerprint_missing_condition():
+    # Earlier drafts could store an encrypted empty string as a missing phone.
+    return and_(
+        Lead.phone_fingerprint.is_(None),
+        Lead.phone_encrypted.is_not(None),
+        or_(Lead.phone_hash.is_(None), Lead.phone_hash != hash_phone("")),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +84,7 @@ def _select_missing_batch(
 ) -> list[Lead]:
     if batch_size < 1 or batch_size > 5000:
         raise ValueError("batch_size 必须在 1 到 5000 之间")
-    statement = select(Lead).where(Lead.phone_fingerprint.is_(None))
+    statement = select(Lead).where(phone_fingerprint_missing_condition())
     if cursor:
         statement = statement.where(Lead.id > cursor)
     statement = statement.order_by(Lead.id).limit(batch_size)
@@ -137,7 +146,9 @@ def backfill_phone_fingerprints_batch(
     checkpoint = _get_or_create_checkpoint(db, reset=reset)
 
     if checkpoint.status == "COMPLETED":
-        missing = db.scalar(select(func.count()).select_from(Lead).where(Lead.phone_fingerprint.is_(None))) or 0
+        missing = db.scalar(select(func.count()).select_from(Lead).where(
+            phone_fingerprint_missing_condition()
+        )) or 0
         if missing == 0:
             return FingerprintBatchResult(
                 scanned=0,
@@ -202,7 +213,7 @@ def backfill_phone_fingerprints_batch(
 
     has_more = db.scalar(
         select(func.count()).select_from(Lead).where(
-            Lead.phone_fingerprint.is_(None),
+            phone_fingerprint_missing_condition(),
             Lead.id > last_cursor,
         )
     ) or 0
@@ -266,7 +277,7 @@ def preview_phone_fingerprint_backfill(
         truncated = bool(
             db.scalar(
                 select(func.count()).select_from(Lead).where(
-                    Lead.phone_fingerprint.is_(None),
+                    phone_fingerprint_missing_condition(),
                     Lead.id > (cursor or ""),
                 )
             )

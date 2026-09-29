@@ -5,6 +5,7 @@ import pytest
 from apps.api.src.core.models import Assignment, Company, Lead, PointsAccount, PointsLedger
 from apps.api.src.core.models_v12 import SupplierLeadReward, V12MigrationCheckpoint
 from apps.api.src.core.security import encrypt_text, hash_phone
+from apps.api.src.services.phone_uniqueness import hash_customer_wechat
 from apps.api.src.core.state_machine_v12 import (
     UnknownLegacyStatus,
     map_legacy_lead_status,
@@ -55,6 +56,39 @@ def test_phone_fingerprint_backfill_is_bounded_resumable_and_idempotent(db) -> N
     assert checkpoint is not None
     assert checkpoint.processed_count == 2
     assert checkpoint.error_count == 0
+
+
+def test_wechat_only_lead_does_not_require_phone_fingerprint(db) -> None:
+    db.add_all([
+        Lead(
+            id="wechat-only-backfill",
+            customer_name="仅微信客户",
+            customer_wechat_encrypted=encrypt_text("wx-backfill-929"),
+            customer_wechat_hash=hash_customer_wechat("wx-backfill-929"),
+            status="PUBLIC_POOL",
+            raw_payload={},
+        ),
+        Lead(
+            id="wechat-legacy-empty-phone",
+            customer_name="旧版空号码客户",
+            phone_encrypted=encrypt_text(""),
+            phone_hash=hash_phone(""),
+            customer_wechat_encrypted=encrypt_text("wx-legacy-empty-929"),
+            customer_wechat_hash=hash_customer_wechat("wx-legacy-empty-929"),
+            status="PUBLIC_POOL",
+            raw_payload={},
+        ),
+    ])
+    db.flush()
+
+    preview = preview_phone_fingerprint_backfill(db, secret="F" * 40)
+    assert preview.scanned == 0
+    result = backfill_phone_fingerprints_batch(db, secret="F" * 40)
+    assert result.scanned == 0
+    assert result.errors == 0
+    report = reconcile_v12(db)
+    assert report.metrics["leads_missing_phone_fingerprint"] == 0
+    assert "PHONE_FINGERPRINT_INCOMPLETE" not in {item["code"] for item in report.errors}
 
 
 def test_preview_is_read_only_and_row_errors_never_include_plaintext(db) -> None:

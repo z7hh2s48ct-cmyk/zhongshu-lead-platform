@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 from dataclasses import dataclass
@@ -46,7 +48,7 @@ from ..core.v12_enums import (
 )
 from .china_regions import match_province_city_district
 from .company_assignment_v12 import require_return_request_access
-from .dispatch_v12 import has_receiver_coverage
+from .dispatch_v12 import dispatch_manually_with_outcome, has_receiver_coverage
 from .lead_correction_guard import require_correction_review_resolved
 from .points_service import change_points
 from .return_clock import appeal_deadline
@@ -92,6 +94,14 @@ class ReturnFinalReviewResult:
     idempotent: bool = False
     # 修改实际区域重新入池时的去向：READY_DISPATCH（有承接）或 PUBLIC_POOL（无承接）。
     pool_target: str = LeadV12Status.READY_DISPATCH.value
+
+
+@dataclass(frozen=True, slots=True)
+class ReturnCorrectionRedispatchResult:
+    request: ReturnRequest
+    refund_ledger: PointsLedger
+    assignment: Assignment
+    idempotent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1031,17 +1041,6 @@ def _final_review_return(
         raise AppError("RETURN_FINAL_DECISION_INVALID", "终审决定无效", 422)
 
     task = _current_verification_task(db, request) if require_verification else None
-    required_conclusion = {
-        "APPROVE": "SUPPORT_RETURN",
-        "REJECT": "DOES_NOT_SUPPORT_RETURN",
-    }.get(normalized_decision)
-    if required_conclusion and task is not None and task.verification_conclusion != required_conclusion:
-        raise AppError(
-            "RETURN_FINAL_DECISION_CONFLICT",
-            "终审决定必须与电销核实结论一致；客资可用时仍由原领取人继续跟进",
-            409,
-            {"decision": normalized_decision, "verification_conclusion": task.verification_conclusion},
-        )
     reward = db.scalar(
         select(SupplierLeadReward)
         .where(SupplierLeadReward.assignment_id == assignment.id)
@@ -1296,16 +1295,9 @@ def correct_region_and_redispatch(
         lead.pending_reason = "RETURN_REGION_CORRECTED"
         pool_target = LeadV12Status.READY_DISPATCH.value
     else:
-        # 公海池当前只承载加盟商供资来源客资；其他来源保持待派发并标记
-        # 无承接原因，由派发入口的候选资格校验兜底（评审 Issue 3）。
-        if lead.source_kind == LeadSourceKind.SUPPLIER_H5.value:
-            assert_lead_transition(lead.status, LeadV12Status.PUBLIC_POOL)
-            lead.status = LeadV12Status.PUBLIC_POOL.value
-            pool_target = LeadV12Status.PUBLIC_POOL.value
-        else:
-            assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
-            lead.status = LeadV12Status.READY_DISPATCH.value
-            pool_target = LeadV12Status.READY_DISPATCH.value
+        assert_lead_transition(lead.status, LeadV12Status.PUBLIC_POOL)
+        lead.status = LeadV12Status.PUBLIC_POOL.value
+        pool_target = LeadV12Status.PUBLIC_POOL.value
         lead.pending_reason = "PUBLIC_POOL_NO_LOCAL_RECEIVER"
     lead.review_status = "APPROVED"
     lead.review_note = reason.strip()
@@ -1324,6 +1316,169 @@ def correct_region_and_redispatch(
     return ReturnFinalReviewResult(request=result.request,
         refund_ledger=result.refund_ledger, idempotent=result.idempotent,
         pool_target=pool_target)
+
+
+def correct_and_redispatch_return(
+    db: Session,
+    *,
+    return_id: str,
+    principal: Principal,
+    company_id: str,
+    employee_user_id: str | None,
+    idempotency_key: str,
+    expected_snapshot_version: int | None = None,
+    customer_name: str | None,
+    need_summary: str | None,
+    consent_confirmed: bool | None,
+    province_code: str | None,
+    city_code: str | None,
+    district_code: str | None,
+    reason: str,
+) -> ReturnCorrectionRedispatchResult:
+    """Approve the return, correct facts and dispatch a new round atomically."""
+    if not principal.has_any_role("OPERATION", "SUPER_ADMIN") or not (
+        principal.can("return.review") or principal.can("*")
+    ):
+        raise AppError("FORBIDDEN", "仅运营或管理员可更正并改派退回客资", 403)
+    normalized_reason = reason.strip()
+    if len(normalized_reason) < 2:
+        raise AppError("RETURN_REDISPATCH_REASON_REQUIRED", "请填写更正与改派原因", 422)
+
+    signature = hashlib.sha256(json.dumps(
+        [company_id, employee_user_id, customer_name, need_summary, consent_confirmed,
+         province_code, city_code, district_code, normalized_reason],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    assignment, lead, request = _lock_return_context(db, return_id)
+    previous = db.scalar(
+        select(AssignmentEvent).where(
+            AssignmentEvent.assignment_id == assignment.id,
+            AssignmentEvent.event_type == "V12_RETURN_CORRECTED_REDISPATCH",
+        )
+    )
+    if previous is not None:
+        payload = previous.payload or {}
+        if payload.get("idempotency_key") != idempotency_key or payload.get("request_signature") != signature:
+            raise AppError("RETURN_ALREADY_REDISPATCHED", "此退回已完成更正改派，请刷新后查看", 409)
+        new_assignment = db.get(Assignment, payload.get("new_assignment_id"))
+        refund_ledger = db.get(PointsLedger, request.refund_ledger_id)
+        if new_assignment is None or refund_ledger is None:
+            raise AppError("RETURN_REDISPATCH_RECORD_INCOMPLETE", "更正改派记录不完整", 500)
+        return ReturnCorrectionRedispatchResult(
+            request=request,
+            refund_ledger=refund_ledger,
+            assignment=new_assignment,
+            idempotent=True,
+        )
+
+    if expected_snapshot_version is not None and lead.snapshot_version != expected_snapshot_version:
+        raise AppError("LEAD_SNAPSHOT_CONFLICT", "客资信息已变化，请刷新后重新处理", 409)
+
+    if company_id == (assignment.receiver_company_id or assignment.company_id):
+        raise AppError("RETURN_REDISPATCH_SAME_RECEIVER", "请选择其他加盟商接收客资", 422)
+
+    region_codes = (province_code, city_code, district_code)
+    if any(region_codes) and not all(region_codes):
+        raise AppError("RETURN_REDISPATCH_REGION_INCOMPLETE", "修改地址时请选择完整省、市、区县", 422)
+    matched = None
+    if all(region_codes):
+        matched = match_province_city_district(
+            province_code.strip(), city_code.strip(), district_code.strip()
+        )
+        if matched is None:
+            raise AppError("RETURN_REDISPATCH_REGION_INVALID", "请选择有效且相互匹配的省、市、区县", 422)
+
+    clean_name = customer_name.strip() if customer_name is not None else None
+    clean_need = need_summary.strip() if need_summary is not None else None
+    if customer_name is not None and not clean_name:
+        raise AppError("RETURN_REDISPATCH_CUSTOMER_NAME_REQUIRED", "客户姓名不能为空", 422)
+    before = {
+        "customer_name": lead.customer_name,
+        "need_summary": lead.need_summary,
+        "consent_confirmed": lead.consent_confirmed,
+        "province": lead.province,
+        "city": lead.city,
+        "district": lead.district,
+        "region_code": lead.region_code,
+    }
+
+    review = _final_review_return(
+        db,
+        return_id=return_id,
+        principal=principal,
+        decision="APPROVE",
+        note=normalized_reason,
+    )
+    if review.refund_ledger is None:
+        raise AppError("RETURN_REFUND_MISSING", "退回返分记录缺失，无法改派", 500)
+
+    if customer_name is not None:
+        lead.customer_name = clean_name
+    if need_summary is not None:
+        lead.need_summary = clean_need or None
+    if consent_confirmed is not None:
+        lead.consent_confirmed = consent_confirmed
+    if matched is not None:
+        province, city, district = matched
+        lead.province = province["name"]
+        lead.city = city["name"]
+        lead.district = district["name"]
+        lead.region_code = district["code"]
+    if not lead.consent_confirmed:
+        raise AppError("LEAD_CONSENT_REQUIRED", "必须确认已获得客户信息授权", 422)
+
+    assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
+    lead.status = LeadV12Status.READY_DISPATCH.value
+    lead.review_status = "APPROVED"
+    lead.review_note = normalized_reason
+    lead.pending_reason = "RETURN_CORRECTED_REDISPATCH"
+    lead.snapshot_version += 1
+    db.flush()
+    dispatched = dispatch_manually_with_outcome(
+        db,
+        lead_id=lead.id,
+        company_id=company_id,
+        employee_user_id=employee_user_id,
+        assigned_by=principal.user_id,
+        idempotency_key=idempotency_key,
+        note=normalized_reason,
+    )
+    after = {
+        "customer_name": lead.customer_name,
+        "need_summary": lead.need_summary,
+        "consent_confirmed": lead.consent_confirmed,
+        "province": lead.province,
+        "city": lead.city,
+        "district": lead.district,
+        "region_code": lead.region_code,
+    }
+    assignment.release_reason = "V12_RETURN_CORRECTED_REDISPATCH"
+    db.add(
+        AssignmentEvent(
+            assignment_id=assignment.id,
+            event_type="V12_RETURN_CORRECTED_REDISPATCH",
+            actor_user_id=principal.user_id,
+            payload={
+                "return_request_id": request.id,
+                "new_assignment_id": dispatched.assignment.id,
+                "new_receiver_company_id": company_id,
+                "new_employee_user_id": employee_user_id,
+                "idempotency_key": idempotency_key,
+                "request_signature": signature,
+                "before": before,
+                "after": after,
+                "refund_ledger_id": review.refund_ledger.id,
+                "reason": normalized_reason,
+            },
+        )
+    )
+    db.flush()
+    return ReturnCorrectionRedispatchResult(
+        request=request,
+        refund_ledger=review.refund_ledger,
+        assignment=dispatched.assignment,
+        idempotent=not dispatched.created,
+    )
 
 
 def final_review_return(
@@ -1490,6 +1645,16 @@ def return_request_to_dict(
         "refund_points": item.refund_points,
         "refund_ledger_id": item.refund_ledger_id,
         "assignment_release_reason": assignment.release_reason if assignment else None,
+        "current_lead": {
+            "snapshot_version": lead.snapshot_version,
+            "customer_name": lead.customer_name,
+            "need_summary": lead.need_summary,
+            "consent_confirmed": lead.consent_confirmed,
+            "province": lead.province,
+            "city": lead.city,
+            "district": lead.district,
+            "region_code": lead.region_code,
+        } if lead else None,
     }
     if include_evidence:
         data["supplementary_evidence_count"] = _supplementary_evidence_count(db, item)

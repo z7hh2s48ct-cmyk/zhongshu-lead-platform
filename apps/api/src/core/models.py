@@ -204,6 +204,8 @@ class InviteToken(Base, TimestampMixin):
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    purpose: Mapped[str] = mapped_column(String(32), default="OWNER_BIND", nullable=False)
+    target_user_id: Mapped[str | None] = mapped_column(String(36))
     # P2-01：邀请发出时的展示对象快照——公司/负责人后续改名不影响历史追溯。
     invitee_name_snapshot: Mapped[str | None] = mapped_column(String(64))
     company_name_snapshot: Mapped[str | None] = mapped_column(String(128))
@@ -290,10 +292,12 @@ class Lead(Base, TimestampMixin):
     source_channel: Mapped[str | None] = mapped_column(String(64), index=True)
     source_detail: Mapped[str | None] = mapped_column(String(128))
     customer_name: Mapped[str] = mapped_column(String(64), nullable=False)
-    phone_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
-    phone_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    phone_encrypted: Mapped[str | None] = mapped_column(Text)
+    phone_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     # 2026-09-28 反馈第 2 条：脱敏展示本就含后四位，明文存后四位支持电销侧等值搜索。
     phone_tail4: Mapped[str | None] = mapped_column(String(4), index=True)
+    customer_wechat_encrypted: Mapped[str | None] = mapped_column(Text)
+    customer_wechat_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     province: Mapped[str | None] = mapped_column(String(64))
     city: Mapped[str | None] = mapped_column(String(64), index=True)
     district: Mapped[str | None] = mapped_column(String(64))

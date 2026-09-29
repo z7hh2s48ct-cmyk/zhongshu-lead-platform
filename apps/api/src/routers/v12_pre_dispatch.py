@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -11,7 +11,7 @@ from ..core.auth import CurrentPrincipal, require_permissions
 from ..core.database import get_db
 from ..core.enums import VerificationTaskStatus
 from ..core.errors import AppError
-from ..core.models import AuditLog, Lead, VerificationSubmission, VerificationTask
+from ..core.models import AuditLog, Lead, User, VerificationSubmission, VerificationTask
 from ..core.responses import ok, page
 from ..core.security import decrypt_text, hash_phone, mask_phone, normalize_phone
 from ..core.v12_enums import VerificationTaskType
@@ -23,6 +23,7 @@ from ..schemas.v12_lead_supply import (
     PreDispatchSubmitBody,
 )
 from ..services.audit import write_audit
+from ..services.phone_uniqueness import hash_customer_wechat
 from ..services.source_channel_options import get_source_channel_options
 from ..services.pre_dispatch_v12 import (
     assign_pre_dispatch_task,
@@ -51,6 +52,16 @@ _OPEN_TASK_STATUSES = (
 )
 
 
+def _mask_customer_wechat(value: str | None) -> str | None:
+    if not value:
+        return None
+    if len(value) <= 2:
+        return "**"
+    if len(value) <= 4:
+        return f"{value[0]}**{value[-1]}"
+    return f"{value[:2]}***{value[-2:]}"
+
+
 def _task_or_raise(db: Session, task_id: str) -> VerificationTask:
     task = db.scalar(
         select(VerificationTask).where(
@@ -65,6 +76,75 @@ def _task_or_raise(db: Session, task_id: str) -> VerificationTask:
     return task
 
 
+def _pre_dispatch_history(db: Session, lead_id: str) -> list[dict]:
+    tasks = list(
+        db.scalars(
+            select(VerificationTask)
+            .where(
+                VerificationTask.lead_id == lead_id,
+                VerificationTask.task_type
+                == VerificationTaskType.PRE_DISPATCH_VERIFY.value,
+            )
+            .order_by(VerificationTask.created_at, VerificationTask.id)
+        ).all()
+    )
+    if not tasks:
+        return []
+    submissions = list(
+        db.scalars(
+            select(VerificationSubmission)
+            .where(VerificationSubmission.task_id.in_([task.id for task in tasks]))
+            .order_by(
+                VerificationSubmission.created_at,
+                VerificationSubmission.id,
+            )
+        ).all()
+    )
+    latest_submission = {item.task_id: item for item in submissions}
+    user_ids = {
+        value
+        for value in (
+            *(task.assignee_user_id for task in tasks),
+            *(item.submitted_by for item in submissions),
+        )
+        if value
+    }
+    users = {
+        user.id: user
+        for user in db.scalars(select(User).where(User.id.in_(user_ids))).all()
+    }
+
+    def display_name(user_id: str | None) -> str | None:
+        user = users.get(user_id)
+        return (user.display_name or user.username) if user else None
+
+    return [
+        {
+            "task_id": task.id,
+            "status": task.status,
+            "assignee_user_id": task.assignee_user_id,
+            "assignee_name": display_name(task.assignee_user_id),
+            "contact_result": task.contact_result,
+            "conclusion": task.verification_conclusion,
+            "note": (
+                latest_submission[task.id].note
+                if task.id in latest_submission
+                else None
+            ),
+            "submitted_by_name": display_name(
+                latest_submission[task.id].submitted_by
+                if task.id in latest_submission
+                else None
+            ),
+            "created_at": task.created_at.isoformat(),
+            "assigned_at": task.assigned_at.isoformat() if task.assigned_at else None,
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "submitted_at": task.submitted_at.isoformat() if task.submitted_at else None,
+        }
+        for task in tasks
+    ]
+
+
 def _task_to_dict(
     db: Session,
     task: VerificationTask,
@@ -72,6 +152,7 @@ def _task_to_dict(
     *,
     include_phone: bool = False,
     include_verification_info: bool = False,
+    include_history: bool = False,
     leads_by_id: dict[str, Lead] | None = None,
     source_channel_labels: dict[str, str] | None = None,
 ) -> dict:
@@ -93,10 +174,11 @@ def _task_to_dict(
             or task.submitted_at is not None
         )
     )
-    can_view_phone = bool(
+    can_view_contact = bool(
         include_phone and (operation_can_view_phone or assignee_can_view_phone)
     )
-    phone = decrypt_text(lead.phone_encrypted) if lead and can_view_phone else None
+    phone = decrypt_text(lead.phone_encrypted) if lead and can_view_contact else None
+    customer_wechat_value = decrypt_text(lead.customer_wechat_encrypted) if lead else None
     next_owner = None
     if task.status in {
         VerificationTaskStatus.PENDING.value,
@@ -133,6 +215,8 @@ def _task_to_dict(
             "customer_name": lead.customer_name if lead else None,
             "phone": phone,
             "phone_masked": mask_phone(phone or decrypt_text(lead.phone_encrypted)) if lead else None,
+            "customer_wechat": customer_wechat_value if can_view_contact else None,
+            "customer_wechat_masked": _mask_customer_wechat(customer_wechat_value),
             "city": lead.city if lead else None,
             "district": lead.district if lead else None,
             "need_summary": lead.need_summary if lead else None,
@@ -142,6 +226,14 @@ def _task_to_dict(
     }
     if include_verification_info:
         result["verification_info"] = pre_dispatch_verification_info(db, task)
+    if include_history:
+        history = _pre_dispatch_history(db, task.lead_id)
+        current = next(
+            (item for item in history if item["task_id"] == task.id),
+            None,
+        )
+        result["assignee_name"] = current["assignee_name"] if current else None
+        result["verification_history"] = history
     return result
 
 
@@ -361,6 +453,36 @@ def get_telesales_dial_stats(
     return ok(request, {"period": "BEIJING_NATURAL", **stats})
 
 
+@router.post("/pre-dispatch-verifications/customer-wechat-exists")
+def customer_wechat_exists(
+    request: Request,
+    principal: CurrentPrincipal,
+    customer_wechat: str = Body(embed=True, min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+):
+    if not principal.has_any_role("TELESALES") or not principal.can("verification.task.read"):
+        raise AppError("FORBIDDEN", "无权查询客户微信号", 403)
+    if not customer_wechat.strip():
+        raise AppError("INVALID_CUSTOMER_WECHAT", "请输入客户微信号", 422)
+    fingerprint = hash_customer_wechat(customer_wechat)
+    exists = db.scalar(
+        select(Lead.id).where(
+            Lead.deleted_at.is_(None),
+            Lead.customer_wechat_hash == fingerprint,
+        ).limit(1)
+    ) is not None
+    write_audit(
+        db,
+        principal=principal,
+        action="V12_CUSTOMER_WECHAT_EXISTS_CHECK",
+        resource_type="lead",
+        metadata={"customer_wechat_hash": fingerprint, "exists": exists},
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    return ok(request, {"exists": exists})
+
+
 @router.get("/pre-dispatch-verifications/tasks")
 def list_pre_dispatch_tasks(
     request: Request,
@@ -525,6 +647,7 @@ def pre_dispatch_task_detail(
             principal,
             include_phone=True,
             include_verification_info=True,
+            include_history=True,
         ),
     )
 

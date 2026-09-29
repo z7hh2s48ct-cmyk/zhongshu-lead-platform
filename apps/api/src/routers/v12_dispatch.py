@@ -169,6 +169,10 @@ def _assignment_dict(
         "customer_name": lead.customer_name,
         "phone": phone,
         "phone_masked": phone_masked,
+        "has_customer_wechat": bool(lead.customer_wechat_encrypted),
+        "customer_wechat": (
+            decrypt_text(lead.customer_wechat_encrypted) if reveal_phone else None
+        ),
         "city": lead.city,
         "district": lead.district,
         "region_code": lead.region_code,
@@ -238,6 +242,7 @@ def _assignment_detail_projection(
             Assignment.internal_assigned_at,
             Lead.customer_name,
             Lead.phone_encrypted,
+            Lead.customer_wechat_encrypted,
             Lead.city,
             Lead.district,
             Lead.region_code,
@@ -309,6 +314,10 @@ def _projected_assignment_dict(
         "customer_name": row.customer_name,
         "phone": phone,
         "phone_masked": phone_masked,
+        "has_customer_wechat": bool(row.customer_wechat_encrypted),
+        "customer_wechat": (
+            decrypt_text(row.customer_wechat_encrypted) if reveal_phone else None
+        ),
         "city": row.city,
         "district": row.district,
         "region_code": row.region_code,

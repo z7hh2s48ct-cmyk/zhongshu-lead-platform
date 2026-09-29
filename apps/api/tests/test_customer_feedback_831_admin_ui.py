@@ -168,7 +168,7 @@ def test_new_lead_defaults_to_draft_and_can_be_sent_directly_to_telesales() -> N
     assert 'id="platform-lead-telesales-assignee"' in lead_form
     assert 'id="platform-lead-telesales-reason"' in lead_form
     assert "saveAndAssignNewLeadToTelesales" in lead_form
-    assert "手机号必填且必须为 11 位有效号码" in lead_form
+    assert "请填写有效手机号或客户微信号" in lead_form
     assert "/v1.2/platform/leads/pre-dispatch-verification" in lead_form
     assert "idempotency_key" in lead_form
     assert "submit.disabled=true" in lead_form

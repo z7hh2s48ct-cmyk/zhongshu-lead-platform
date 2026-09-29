@@ -213,7 +213,7 @@ async function supplyTermination(){
 const SUPPLY_SOURCES=[['供应商推荐','加盟商推荐'],['DOUYIN','抖音/信息流'],['WECHAT_VIDEO','视频号'],['XIAOHONGSHU','小红书'],['MANUAL','人工录入']];
 const SUPPLY_CATEGORIES=[['OLD_RENOVATION','旧房改造'],['SELF_BUILD','农村自建房'],['INTERIOR','室内装修']];
 const SUPPLY_STATUSES=['DRAFT','PENDING_REVIEW','PENDING_TELESALES_VERIFY','PENDING_OPERATION_DISPOSITION','PUBLIC_POOL','READY_DISPATCH','DUPLICATE','INVALID'];
-const supplyState={cities:[],districts:[]};
+const supplyState={provinces:[],cities:[],districts:[]};
 
 function supplyProgress(lead){
   if(lead.status==='DRAFT')return lead.pending_reason==='PRE_DISPATCH_REWORK_REQUIRED'?lead.review_note||'请根据运营说明补正资料后重新提交。':'资料尚未提交，可以继续补充或删除草稿。';
@@ -244,7 +244,8 @@ function supplyLeadActions(lead,canModify=true){
 async function loadSupplyCities(){
   if(!supplyState.cities.length){
     const tree=await api('/master-data/region-tree');
-    supplyState.cities=(tree.provinces||[]).flatMap(province=>(province.cities||[]).map(city=>({...city,province_name:province.name,option_name:`${province.name} · ${city.name}`})));
+    supplyState.provinces=tree.provinces||[];
+    supplyState.cities=supplyState.provinces.flatMap(province=>(province.cities||[]).map(city=>({...city,province_name:province.name,option_name:`${province.name} · ${city.name}`})));
   }
   return supplyState.cities;
 }
@@ -298,6 +299,8 @@ async function applySupplyDistrictSelection(city,district){
   if(!citySelect.isConnected)return;
   filterSupplyRegionOptions(citySelect,supplyState.cities,'','暂不确定，提交后由电销补充');
   citySelect.value=city.code;
+  const province=supplyState.provinces.find(item=>item.name===city.province_name);
+  if(province)document.querySelector('#supply-province').value=province.code;
   zsSetSafeHtml(districtSelect,`<option value="">暂不确定 / 全市范围</option>${supplyState.districts.map(row=>`<option value="${esc(row.code)}" ${row.code===district.code?'selected':''}>${esc(row.option_name||row.name)}</option>`).join('')}`);
   districtSelect.value=district.code;
   const districtSearch=document.querySelector('#supply-district-search');
@@ -349,6 +352,8 @@ const supplyBudgetToWan=amountToWan;
 const supplyBudgetFromWan=wanToAmount;
 
 function supplyPayload(){
+  const provinceCode=document.querySelector('#supply-province')?.value||'';
+  const province=supplyState.provinces.find(item=>item.code===provinceCode);
   const cityCode=document.querySelector('#supply-city')?.value||'';
   const districtCode=document.querySelector('#supply-district')?.value||'';
   const townshipCode=document.querySelector('#supply-township')?.value||'';
@@ -357,6 +362,8 @@ function supplyPayload(){
   return {
     customer_name:document.querySelector('#supply-name')?.value.trim()||'',
     phone:normalizeSupplyPhone(document.querySelector('#supply-phone')?.value||''),
+    province:province?.name||'',
+    customer_wechat:document.querySelector('#supply-customer-wechat')?.value.trim()||'',
     city:city?.name||'',
     district:district?.name||'',
     region_code:townshipCode||districtCode||cityCode,
@@ -380,7 +387,8 @@ function validateSupplyDraft(payload){
 
 function validateSupplySubmission(payload){
   const errors=validateSupplyDraft(payload);
-  if(!/^1\d{10}$/.test(payload.phone))errors.phone='请填写 11 位手机号';
+  if(!payload.phone&&!payload.customer_wechat)errors.phone='请填写手机号或客户微信号';
+  if(payload.province&&!payload.city)errors.city='仅知省份请先保存草稿，待补充城市后再提交';
   if(!payload.consent_confirmed)errors.consent_confirmed='请确认已获得客户授权';
   return errors;
 }
@@ -390,14 +398,14 @@ function showSupplyErrors(errors){
   const summary=document.querySelector('#supply-form-error');
   if(summary){summary.textContent=entries[0]||'';summary.hidden=!entries.length;}
   document.querySelectorAll('[data-supply-field]').forEach(field=>field.removeAttribute('aria-invalid'));
-  const fields={customer_name:'#supply-name',phone:'#supply-phone',city:'#supply-city',need_summary:'#supply-need',budget_min:'#supply-budget-min',budget_max:'#supply-budget-max',consent_confirmed:'#supply-consent'};
+  const fields={customer_name:'#supply-name',phone:'#supply-phone',customer_wechat:'#supply-customer-wechat',city:'#supply-city',need_summary:'#supply-need',budget_min:'#supply-budget-min',budget_max:'#supply-budget-max',consent_confirmed:'#supply-consent'};
   Object.keys(errors||{}).forEach(name=>document.querySelector(fields[name])?.setAttribute('aria-invalid','true'));
   const firstField=fields[Object.keys(errors||{})[0]];
   if(entries.length&&firstField)document.querySelector(firstField)?.focus({preventScroll:true});
 }
 
 function hasSupplyDraftContent(payload){
-  return Boolean(payload.customer_name||payload.phone||payload.city||payload.district||payload.category_code||payload.need_summary||payload.budget_min!==null||payload.budget_max!==null||payload.consent_confirmed);
+  return Boolean(payload.customer_name||payload.phone||payload.customer_wechat||payload.province||payload.city||payload.district||payload.category_code||payload.need_summary||payload.budget_min!==null||payload.budget_max!==null||payload.consent_confirmed);
 }
 
 function clearSupplyIntent(){
@@ -451,15 +459,18 @@ function supplyIdentityView(){
 async function openSupplyForm(item=null,intent=beginSheetIntent()){
   const cities=await loadSupplyCities();
   const selectedCity=cities.find(row=>row.name===item?.city||row.code===item?.region_code);
+  const selectedProvince=supplyState.provinces.find(row=>row.name===item?.province||row.name===selectedCity?.province_name);
   const districts=await loadSupplyDistricts(selectedCity?.code||'');
   const selectedDistrict=districts.find(row=>row.name===item?.district||row.code===item?.region_code);
   const townships=await loadSupplyTownships(selectedDistrict?.code||'');
   const selectedTownship=townships.find(row=>row.code===item?.region_code);
   const title=item?'完善客资资料':'上传客资';
   const note=(item?.review_note?`<div class="wb-notice">平台修改说明：${esc(item.review_note)}</div>`:'')+supplyIdentityView();
-  openSheet(title,`${note}<form class="wb-form wb-supply-form" id="supply-form" novalidate><div class="wb-form-error" id="supply-form-error" role="alert" hidden></div><section class="wb-supply-section"><h3>客户信息</h3><div class="wb-row"><div class="wb-field"><label for="supply-name">客户姓名</label><input class="wb-input" id="supply-name" data-supply-field maxlength="64" autocomplete="name" value="${esc(item?.customer_name==='未填写'?'':item?.customer_name||'')}"></div><div class="wb-field"><label for="supply-phone">客户手机号 *</label><input class="wb-input" id="supply-phone" data-supply-field inputmode="tel" maxlength="32" autocomplete="tel" placeholder="请输入 11 位手机号" value="${esc(item?.phone||'')}"></div></div><div class="wb-row"><div class="wb-field"><label for="supply-city">所在地城市</label><input class="wb-input wb-region-search" id="supply-city-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索城市或区县" aria-controls="supply-city"><select class="wb-select" id="supply-city" data-supply-field><option value="">暂不确定，提交后由电销补充</option>${cities.map(row=>`<option value="${esc(row.code)}" ${selectedCity?.code===row.code?'selected':''}>${esc(row.option_name||row.name)}</option>`).join('')}</select></div><div class="wb-field"><label for="supply-district">所在地区县</label><input class="wb-input wb-region-search" id="supply-district-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索区县" aria-controls="supply-district"><select class="wb-select" id="supply-district"><option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}" ${selectedDistrict?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></div><div class="wb-field"><label for="supply-township">所在地乡镇/街道</label><select class="wb-select" id="supply-township"><option value="">可选，精确到乡镇/街道</option>${townships.map(row=>`<option value="${esc(row.code)}" ${selectedTownship?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></section><section class="wb-supply-section"><h3>客户需求</h3><div class="wb-row"><div class="wb-field"><label for="supply-source">获客来源</label><select class="wb-select" id="supply-source">${supplyOptions(SUPPLY_SOURCES,item?.source_channel||'供应商推荐','请选择获客来源')}</select></div><div class="wb-field"><label for="supply-category">需求类型</label><select class="wb-select" id="supply-category">${supplyOptions(SUPPLY_CATEGORIES,item?.category_code||'','请选择需求类型')}</select></div></div><div class="wb-field"><label for="supply-need">需求说明</label><textarea class="wb-textarea" id="supply-need" data-supply-field maxlength="2000" placeholder="可填写建房或装修地点、计划、时间等关键信息">${esc(item?.need_summary||'')}</textarea></div><div class="wb-row"><div class="wb-field"><label for="supply-budget-min">预算最低（万元）</label><input class="wb-input" id="supply-budget-min" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_min))}"></div><div class="wb-field"><label for="supply-budget-max">预算最高（万元）</label><input class="wb-input" id="supply-budget-max" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_max))}"></div></div></section><label class="wb-choice wb-supply-consent"><input type="checkbox" id="supply-consent" data-supply-field ${item?.consent_confirmed?'checked':''}><span><b>我确认已获得客户授权 *</b><small>客户知晓其联系方式和需求将用于业务对接。</small></span></label><div class="wb-actions"><button class="wb-btn" type="button" id="supply-save-draft">保存草稿</button><button class="wb-btn primary" type="button" id="supply-submit">提交审核</button></div></form>`,()=>{
+  openSheet(title,`${note}<form class="wb-form wb-supply-form" id="supply-form" novalidate><div class="wb-form-error" id="supply-form-error" role="alert" hidden></div><section class="wb-supply-section"><h3>客户信息</h3><div class="wb-row"><div class="wb-field"><label for="supply-name">客户姓名</label><input class="wb-input" id="supply-name" data-supply-field maxlength="64" autocomplete="name" value="${esc(item?.customer_name==='未填写'?'':item?.customer_name||'')}"></div><div class="wb-field"><label for="supply-phone">客户手机号</label><input class="wb-input" id="supply-phone" data-supply-field inputmode="tel" maxlength="32" autocomplete="tel" placeholder="请输入 11 位手机号" value="${esc(item?.phone||'')}"></div><div class="wb-field"><label for="supply-customer-wechat">客户微信号</label><input class="wb-input" id="supply-customer-wechat" data-supply-field maxlength="64" placeholder="无手机号时填写客户微信号" value="${esc(item?.customer_wechat||'')}"></div></div><div class="wb-row"><div class="wb-field"><label for="supply-province">所在省份</label><select class="wb-select" id="supply-province" data-supply-field><option value="">请选择省份</option>${supplyState.provinces.map(row=>`<option value="${esc(row.code)}" ${selectedProvince?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div><div class="wb-field"><label for="supply-city">所在地城市</label><input class="wb-input wb-region-search" id="supply-city-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索城市或区县" aria-controls="supply-city"><select class="wb-select" id="supply-city" data-supply-field><option value="">暂不确定，提交后由电销补充</option>${cities.map(row=>`<option value="${esc(row.code)}" ${selectedCity?.code===row.code?'selected':''}>${esc(row.option_name||row.name)}</option>`).join('')}</select></div><div class="wb-field"><label for="supply-district">所在地区县</label><input class="wb-input wb-region-search" id="supply-district-search" type="search" inputmode="search" autocomplete="off" placeholder="搜索区县" aria-controls="supply-district"><select class="wb-select" id="supply-district"><option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}" ${selectedDistrict?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></div><div class="wb-field"><label for="supply-township">所在地乡镇/街道</label><select class="wb-select" id="supply-township"><option value="">可选，精确到乡镇/街道</option>${townships.map(row=>`<option value="${esc(row.code)}" ${selectedTownship?.code===row.code?'selected':''}>${esc(row.name)}</option>`).join('')}</select></div></section><section class="wb-supply-section"><h3>客户需求</h3><div class="wb-row"><div class="wb-field"><label for="supply-source">获客来源</label><select class="wb-select" id="supply-source">${supplyOptions(SUPPLY_SOURCES,item?.source_channel||'供应商推荐','请选择获客来源')}</select></div><div class="wb-field"><label for="supply-category">需求类型</label><select class="wb-select" id="supply-category">${supplyOptions(SUPPLY_CATEGORIES,item?.category_code||'','请选择需求类型')}</select></div></div><div class="wb-field"><label for="supply-need">需求说明</label><textarea class="wb-textarea" id="supply-need" data-supply-field maxlength="2000" placeholder="可填写建房或装修地点、计划、时间等关键信息">${esc(item?.need_summary||'')}</textarea></div><div class="wb-row"><div class="wb-field"><label for="supply-budget-min">预算最低（万元）</label><input class="wb-input" id="supply-budget-min" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_min))}"></div><div class="wb-field"><label for="supply-budget-max">预算最高（万元）</label><input class="wb-input" id="supply-budget-max" data-supply-field type="number" min="0" step="0.1" inputmode="decimal" value="${esc(supplyBudgetToWan(item?.budget_max))}"></div></div></section><label class="wb-choice wb-supply-consent"><input type="checkbox" id="supply-consent" data-supply-field ${item?.consent_confirmed?'checked':''}><span><b>我确认已获得客户授权 *</b><small>客户知晓其联系方式和需求将用于业务对接。</small></span></label><div class="wb-actions"><button class="wb-btn" type="button" id="supply-save-draft">保存草稿</button><button class="wb-btn primary" type="button" id="supply-submit">提交审核</button></div></form>`,()=>{
     document.querySelector('#supply-form').onsubmit=event=>event.preventDefault();
+    const provinceSelect=document.querySelector('#supply-province');
     const citySelect=document.querySelector('#supply-city');
+    provinceSelect.onchange=()=>{const filtered=supplyState.cities.filter(row=>row.province_name===supplyState.provinces.find(province=>province.code===provinceSelect.value)?.name);zsSetSafeHtml(citySelect,`<option value="">暂不确定，先保存待补资料</option>${filtered.map(row=>`<option value="${esc(row.code)}">${esc(row.option_name||row.name)}</option>`).join('')}`);citySelect.value='';document.querySelector('#supply-district').value='';document.querySelector('#supply-township').value=''};
     const districtSelect=document.querySelector('#supply-district');
     const districtSearch=document.querySelector('#supply-district-search');
     const citySearch=document.querySelector('#supply-city-search');
@@ -502,6 +513,9 @@ async function openSupplyForm(item=null,intent=beginSheetIntent()){
       }
       const districts=await loadSupplyDistricts(event.target.value);
       if(!citySelect.isConnected)return;
+      const selectedCity=supplyState.cities.find(row=>row.code===event.target.value);
+      const province=supplyState.provinces.find(row=>row.name===selectedCity?.province_name);
+      if(province)provinceSelect.value=province.code;
       districtSelect.value='';
       townshipSelect.value='';
       zsSetSafeHtml(districtSelect,`<option value="">暂不确定 / 全市范围</option>${districts.map(row=>`<option value="${esc(row.code)}">${esc(row.option_name||row.name)}</option>`).join('')}`);
@@ -552,6 +566,52 @@ function confirmSupplyLeadDeletion(id){
   });
 }
 
+async function downloadSupplierImportTemplate(button){
+  button.disabled=true;
+  try{
+    const response=await fetch(`${API}/v1.2/supplier/leads/import-template`,{credentials:'include'});
+    if(!response.ok){let payload={};try{payload=await response.json()}catch{}throw new Error(payload.message||'模板下载失败')}
+    const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');
+    link.href=url;
+    link.download='supplier-leads-import-template.xlsx';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }catch(error){toast(error.message||'模板下载失败',true)}
+  finally{if(button.isConnected)button.disabled=false}
+}
+
+function showSupplierImportResult(result){
+  const failures=(result.results||[]).filter(row=>row.status==='FAILED');
+  const drafts=(result.results||[]).filter(row=>row.status==='DRAFT');
+  const failureList=failures.map(row=>`<article class="wb-item"><div class="wb-item-top"><div><h3>第 ${esc(row.row_number)} 行 · ${esc(row.customer_name||'未填写姓名')}</h3><p>${esc(row.message||'导入失败')}</p></div>${badge('REJECTED','未导入')}</div></article>`).join('');
+  const draftList=drafts.map(row=>`<article class="wb-item"><div class="wb-item-top"><div><h3>第 ${esc(row.row_number)} 行 · ${esc(row.customer_name||'未填写姓名')}</h3><p>${esc(row.message||'已保存草稿')}</p></div>${badge('DRAFT','待补资料')}</div></article>`).join('');
+  const notice=`${num(result.success_count-(result.draft_count||0))} 条已提交审核，${num(result.draft_count||0)} 条已保存待补草稿，${num(result.failure_count)} 条导入失败。${failures.length?'失败行不会保存，请修改原 Excel 后重试。':''}`;
+  openSheet('导入结果',`<div class="wb-detail-grid"><div class="wb-detail"><small>总行数</small><b>${num(result.total)}</b></div><div class="wb-detail"><small>成功保存</small><b>${num(result.success_count)}</b></div><div class="wb-detail"><small>待补草稿</small><b>${num(result.draft_count||0)}</b></div><div class="wb-detail"><small>导入失败</small><b>${num(result.failure_count)}</b></div></div><div class="wb-notice">${notice}</div>${drafts.length?`<div class="wb-list">${draftList}</div>`:''}${failures.length?`<div class="wb-list">${failureList}</div>`:''}<div class="wb-actions"><button class="wb-btn primary" id="supplier-import-finish">返回供资列表</button></div>`,()=>{
+    document.querySelector('#supplier-import-finish').onclick=()=>{closeSheet();leads().catch(error=>toast(error.message,true))};
+  });
+}
+
+function openSupplierBulkImport(){
+  openSheet('Excel 批量导入',`<div class="wb-notice">先下载模板并按表头填写。手机号或客户微信号至少填写一项，授权列填“是”。每次最多 200 条；仅知省份的行保存为待补草稿，其余合格行提交审核。</div><form class="wb-form" id="supplier-import-form"><button class="wb-btn" type="button" id="supplier-import-template">下载 Excel 模板</button><div class="wb-field"><label for="supplier-import-file">选择已填写的 Excel</label><input class="wb-input" id="supplier-import-file" name="file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required></div><small class="wb-muted">导入时会逐行校验；失败行不会保存。</small><button class="wb-btn primary" id="supplier-import-submit" type="submit">开始导入</button></form>`,()=>{
+    const form=document.querySelector('#supplier-import-form'),submit=document.querySelector('#supplier-import-submit');
+    document.querySelector('#supplier-import-template').onclick=event=>downloadSupplierImportTemplate(event.currentTarget);
+    form.onsubmit=async event=>{
+      event.preventDefault();
+      const file=document.querySelector('#supplier-import-file').files?.[0];
+      if(!file){toast('请选择 Excel 文件',true);return}
+      if(!file.name.toLowerCase().endsWith('.xlsx')){toast('仅支持 .xlsx 格式',true);return}
+      if(file.size>2*1024*1024){toast('Excel 文件不得超过 2MB',true);return}
+      submit.disabled=true;
+      const body=new FormData();
+      body.append('file',file);
+      try{showSupplierImportResult(await api('/v1.2/supplier/leads/import',{method:'POST',body}))}
+      catch(error){if(form.isConnected)submit.disabled=false;toast(error.message||'批量导入失败',true)}
+    };
+  });
+}
+
 async function leads(){
   const status=S.supplyStatus||'';
   const query=new URLSearchParams({page:String(S.page),page_size:'20'});
@@ -563,13 +623,14 @@ async function leads(){
   const canUpload=Boolean(supplierCapability?.active&&supplierCapability?.review_status==='APPROVED'&&!cooperationStopped);
   const rows=page.items||[];
   const list=rows.map((lead,index)=>item(`序号 ${rowSequence(page,index)} · ${lead.customer_name==='未填写'?'未填写姓名':lead.customer_name||'未填写姓名'}`,lead.status,`<p>${esc(lead.phone_masked||'手机号待补充')} · ${esc(lead.city||'地区待补充')} ${esc(lead.district||'')}</p>${supplyProgress(lead)?`<p>${esc(supplyProgress(lead))}</p>`:''}`,supplyLeadActions(lead,!cooperationStopped))).join('');
-  const capabilityAction=canUpload?'<button class="wb-btn primary" id="supply-create">上传客资</button>':'';
+  const capabilityAction=canUpload?'<div class="wb-actions"><button class="wb-btn" id="supply-bulk-import">Excel 批量导入</button><button class="wb-btn primary" id="supply-create">上传客资</button></div>':'';
   const statusFilter=`<label class="wb-filter-field">进度<select class="wb-select" id="supply-status"><option value="">全部</option>${SUPPLY_STATUSES.map(value=>`<option value="${value}" ${status===value?'selected':''}>${esc(readableLabel(value))}</option>`).join('')}</select></label>`;
   const totalPages=Math.max(1,Math.ceil(Number(page.total||0)/20));
   const pager=totalPages>1?`<div class="wb-pager"><button class="wb-btn" id="supply-prev" ${S.page<=1?'disabled':''}>上一页</button><span class="wb-muted">第 ${S.page} / ${totalPages} 页</span><button class="wb-btn" id="supply-next" ${S.page>=totalPages?'disabled':''}>下一页</button></div>`:'';
   const empty=canUpload?'<div class="wb-empty">暂无供资记录<br><button class="wb-btn primary" id="supply-empty-create">上传第一条客资</button></div>':cooperationStopped?'<div class="wb-empty wb-feature-unavailable"><h2>已停止新增供资</h2><p>历史供资记录仍可查看，公司账号、接收和跟进功能继续保留。</p></div>':'<div class="wb-empty wb-feature-unavailable"><h2>供资暂未开通</h2></div>';
   const cooperationNotice=cooperationStopped?`<div class="wb-notice">当前处于${terminationState.cooperation_status==='TERMINATED'?'已终止':'终止处理中'}状态，不能新增或修改供资；历史供资记录仍可查看。${isFranchiseOwner()?'<button class="wb-btn" data-go="termination">查看终止进度</button>':''}</div>`:'';
   shell(`<section class="wb-page-head wb-supply-head"><div><h1>供资</h1>${rows.length?`<span>${num(page.total)} 条记录</span>`:''}</div>${capabilityAction}</section>${cooperationNotice}${rows.length||status?`<section class="wb-filter">${statusFilter}</section>`:''}<div class="wb-list">${list||empty}</div>${pager}`);
+  document.querySelector('#supply-bulk-import')?.addEventListener('click',openSupplierBulkImport);
   document.querySelector('#supply-create')?.addEventListener('click',()=>launchSupplyForm());
   document.querySelector('#supply-empty-create')?.addEventListener('click',()=>launchSupplyForm());
   document.querySelector('#supply-status')?.addEventListener('change',event=>{S.supplyStatus=event.target.value;S.page=1;leads();});
@@ -647,7 +708,7 @@ async function assignments(){
   document.querySelectorAll('[data-internal-assignment]').forEach(b=>b.onclick=()=>manageInternalAssignment(b.dataset.internalAssignment));
   if(S.id){const id=S.id;S.id='';assignmentDetail(id)}
 }
-async function assignmentDetail(id){const intent=beginSheetIntent();const [x,followups]=await Promise.all([api(`/v1.2/assignments/${id}`),api(`/followups/assignments/${id}`)]);const history=(followups||[]).map(row=>`<article class="wb-item"><div class="wb-item-top"><div><h3>${esc(readableLabel(row.status,'状态已更新'))}</h3><p>${esc(row.note||'无备注')}</p><p>记录时间 ${fmt(row.created_at)}${row.next_followup_at?` · 下次跟进 ${fmt(row.next_followup_at)}`:''}</p></div></div></article>`).join('');const currentFollow=x.current_follow_status||followups?.[0]?.status;const receiveConfirmation=x.receive_confirmation_status==='CONFIRMED'?`已确认${x.receive_confirmed_at?` · ${fmt(x.receive_confirmed_at)}`:''}`:'待确认';const correctionBlocked=x.lead_pending_reason==='CORRECTION_REVIEW_REQUIRED';const canFollow=!correctionBlocked&&['CLAIMED','FOLLOWING'].includes(x.status)&&can('followup.own.manage');openSheet('派发单详情',`${correctionBlocked?'<div class="wb-notice">客资信息已更正，当前接收资格需运营处理，处理前暂停确认接收和跟进。</div>':''}<div class="wb-detail-grid">${[['派发编号',recordCode(x.id,'PF')],['客户',x.customer_name],['电话',x.phone||x.phone_masked||'确认接收后查看'],['派发状态',readableLabel(x.status)],['客资状态',readableLabel(x.lead_status)],['接收确认',receiveConfirmation],['有效认定',assignmentEffectiveRecognition(x,currentFollow)],['当前跟进',currentFollow?readableLabel(currentFollow):'暂无'],[x.status==='PENDING_CLAIM'?'当前领取积分':'实际扣除积分',x.points_price],['派发时间',fmt(x.assigned_at)],['领取时间',fmt(x.claimed_at)],['领取截止',fmt(x.expires_at)],['48小时计时',returnAppealTiming(x)],['过期原因',x.release_reason?readableLabel(x.release_reason):'未过期']].map(([a,b])=>`<div class="wb-detail"><small>${a}</small><b>${esc(b||'--')}</b></div>`).join('')}</div>${x.status==='PENDING_CLAIM'?'<div class="wb-notice">领取前会再次核对后台最新积分；如金额变化，需您按新金额再次确认。</div>':''}<p class="wb-muted">${x.status==='PENDING_CLAIM'?deadlineNotice(x.expires_at,'领取截止'):esc(returnAppealTiming(x))}</p><div class="wb-actions">${!correctionBlocked&&x.status==='PENDING_CLAIM'&&canClaimAssignment()?`<button class="wb-btn primary" id="sheet-claim" ${deadlineButtonAttributes(x.expires_at)}>按 ${esc(x.points_price)} 积分确认接收</button><button class="wb-btn danger" id="sheet-refuse" ${deadlineButtonAttributes(x.expires_at)}>拒绝领取</button>`:''}${canFollow?`<button class="wb-btn primary" id="sheet-followup">新增跟进</button>`:''}${!correctionBlocked&&['CLAIMED','FOLLOWING','COMPLETED'].includes(x.status)&&can('return.own.manage')?`<button class="wb-btn danger" id="sheet-return" ${deadlineButtonAttributes(x.appeal_deadline_at)}>发起退回</button>`:''}</div><div class="wb-card"><h3>跟进历史</h3><div class="wb-list">${history||'<div class="wb-empty">暂无跟进记录</div>'}</div></div>`,()=>{document.querySelector('#sheet-claim')?.addEventListener('click',event=>claim(id,event.currentTarget,x.points_price));document.querySelector('#sheet-refuse')?.addEventListener('click',()=>refuseAssignment(id));document.querySelector('#sheet-followup')?.addEventListener('click',()=>followupDraft(id,x.appeal_deadline_at));document.querySelector('#sheet-return')?.addEventListener('click',()=>returnDraft(id,'',x.appeal_deadline_at))},intent)}
+async function assignmentDetail(id){const intent=beginSheetIntent();const [x,followups]=await Promise.all([api(`/v1.2/assignments/${id}`),api(`/followups/assignments/${id}`)]);const history=(followups||[]).map(row=>`<article class="wb-item"><div class="wb-item-top"><div><h3>${esc(readableLabel(row.status,'状态已更新'))}</h3><p>${esc(row.note||'无备注')}</p><p>记录时间 ${fmt(row.created_at)}${row.next_followup_at?` · 下次跟进 ${fmt(row.next_followup_at)}`:''}</p></div></div></article>`).join('');const currentFollow=x.current_follow_status||followups?.[0]?.status;const receiveConfirmation=x.receive_confirmation_status==='CONFIRMED'?`已确认${x.receive_confirmed_at?` · ${fmt(x.receive_confirmed_at)}`:''}`:'待确认';const correctionBlocked=x.lead_pending_reason==='CORRECTION_REVIEW_REQUIRED';const canFollow=!correctionBlocked&&['CLAIMED','FOLLOWING'].includes(x.status)&&can('followup.own.manage');openSheet('派发单详情',`${correctionBlocked?'<div class="wb-notice">客资信息已更正，当前接收资格需运营处理，处理前暂停确认接收和跟进。</div>':''}<div class="wb-detail-grid">${[['派发编号',recordCode(x.id,'PF')],['客户',x.customer_name],['电话',x.phone||x.phone_masked||(x.has_customer_wechat?'未填写':'确认接收后查看')],['客户微信号',x.customer_wechat||(x.has_customer_wechat?'领取后查看':'未填写')],['所在地',[x.city,x.district].filter(Boolean).join(' ')],['客户需求',x.need_summary],['派发状态',readableLabel(x.status)],['客资状态',readableLabel(x.lead_status)],['接收确认',receiveConfirmation],['有效认定',assignmentEffectiveRecognition(x,currentFollow)],['当前跟进',currentFollow?readableLabel(currentFollow):'暂无'],[x.status==='PENDING_CLAIM'?'当前领取积分':'实际扣除积分',x.points_price],['派发时间',fmt(x.assigned_at)],['领取时间',fmt(x.claimed_at)],['领取截止',fmt(x.expires_at)],['48小时计时',returnAppealTiming(x)],['过期原因',x.release_reason?readableLabel(x.release_reason):'未过期']].map(([a,b])=>`<div class="wb-detail"><small>${a}</small><b>${esc(b||'--')}</b></div>`).join('')}</div>${x.status==='PENDING_CLAIM'?'<div class="wb-notice">领取前会再次核对后台最新积分；如金额变化，需您按新金额再次确认。</div>':''}<p class="wb-muted">${x.status==='PENDING_CLAIM'?deadlineNotice(x.expires_at,'领取截止'):esc(returnAppealTiming(x))}</p><div class="wb-actions">${!correctionBlocked&&x.status==='PENDING_CLAIM'&&canClaimAssignment()?`<button class="wb-btn primary" id="sheet-claim" ${deadlineButtonAttributes(x.expires_at)}>按 ${esc(x.points_price)} 积分确认接收</button><button class="wb-btn danger" id="sheet-refuse" ${deadlineButtonAttributes(x.expires_at)}>拒绝领取</button>`:''}${canFollow?`<button class="wb-btn primary" id="sheet-followup">新增跟进</button>`:''}${!correctionBlocked&&['CLAIMED','FOLLOWING','COMPLETED'].includes(x.status)&&can('return.own.manage')?`<button class="wb-btn danger" id="sheet-return" ${deadlineButtonAttributes(x.appeal_deadline_at)}>发起退回</button>`:''}</div><div class="wb-card"><h3>跟进历史</h3><div class="wb-list">${history||'<div class="wb-empty">暂无跟进记录</div>'}</div></div>`,()=>{document.querySelector('#sheet-claim')?.addEventListener('click',event=>claim(id,event.currentTarget,x.points_price));document.querySelector('#sheet-refuse')?.addEventListener('click',()=>refuseAssignment(id));document.querySelector('#sheet-followup')?.addEventListener('click',()=>followupDraft(id,x.appeal_deadline_at));document.querySelector('#sheet-return')?.addEventListener('click',()=>returnDraft(id,'',x.appeal_deadline_at))},intent)}
 function normalizedClaimPoints(value){const points=Number(value);return Number.isSafeInteger(points)&&points>0?points:null}
 function openClaimPriceConfirmation(id,previousPoints,currentPoints,intent){return openSheet('领取积分已更新',`<div class="wb-notice">您刚才看到的领取积分为 ${esc(previousPoints)}，后台最新设置为 ${esc(currentPoints)}。本次将扣除 ${esc(currentPoints)} 积分，未确认前不会扣费。</div><div class="wb-actions"><button class="wb-btn primary" id="confirm-current-price-claim">按最新 ${esc(currentPoints)} 积分领取</button></div>`,()=>{document.querySelector('#confirm-current-price-claim')?.addEventListener('click',event=>claim(id,event.currentTarget,currentPoints,true))},intent)}
 async function claim(id,owner,displayedPoints,confirmedCurrentPrice=false){

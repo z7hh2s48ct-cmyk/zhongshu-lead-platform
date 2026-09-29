@@ -886,21 +886,20 @@ def test_final_reject_restores_following_and_remaining_reward_window(db) -> None
     ) is None
 
 
-def test_final_review_must_match_the_telesales_fact_conclusion(db) -> None:
+def test_final_review_can_override_the_telesales_fact_conclusion(db) -> None:
     setup = _workflow_setup(db)
     request, _ = _submit_and_verify(db, setup, conclusion="DOES_NOT_SUPPORT_RETURN")
     reviewer = _principal(setup["reviewer"], "return.review")
 
-    with pytest.raises(AppError) as exc_info:
-        final_review_return(
-            db,
-            return_id=request.id,
-            principal=reviewer,
-            decision="APPROVE",
-            note="不能在电销确认客资可用时仍批准退回",
-        )
+    result = final_review_return(
+        db,
+        return_id=request.id,
+        principal=reviewer,
+        decision="APPROVE",
+        note="运营结合完整资料决定同意退回",
+    )
 
-    assert exc_info.value.code == "RETURN_FINAL_DECISION_CONFLICT"
+    assert result.request.status == "APPROVED"
 
 
 @pytest.mark.parametrize(
@@ -911,7 +910,7 @@ def test_final_review_must_match_the_telesales_fact_conclusion(db) -> None:
         ("INCONCLUSIVE", "REJECT"),
     ],
 )
-def test_final_review_rejects_all_opposite_or_inconclusive_decisions(
+def test_final_review_accepts_operation_decision_after_any_submitted_conclusion(
     db,
     conclusion: str,
     decision: str,
@@ -920,16 +919,15 @@ def test_final_review_rejects_all_opposite_or_inconclusive_decisions(
     request, _ = _submit_and_verify(db, setup, conclusion=conclusion)
     reviewer = _principal(setup["reviewer"], "return.review")
 
-    with pytest.raises(AppError) as exc_info:
-        final_review_return(
-            db,
-            return_id=request.id,
-            principal=reviewer,
-            decision=decision,
-            note="终审不能越过电销事实结论",
-        )
+    result = final_review_return(
+        db,
+        return_id=request.id,
+        principal=reviewer,
+        decision=decision,
+        note="运营依据完整资料独立终审",
+    )
 
-    assert exc_info.value.code == "RETURN_FINAL_DECISION_CONFLICT"
+    assert result.request.status == ("APPROVED" if decision == "APPROVE" else "REJECTED")
 
 
 def test_need_more_allows_new_evidence_and_creates_second_verification_round(db) -> None:

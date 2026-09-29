@@ -288,6 +288,9 @@ def test_pre_dispatch_submitted_history_orders_by_submission_and_batches_leads(a
 def test_verified_platform_lead_correction_recomputes_dispatch_candidates(api_client) -> None:
     client, factory = api_client
     with factory() as db:
+        from apps.api.tests.test_public_pool_v12 import _receiver
+
+        _receiver(db, region_code="110000")
         company = db.scalar(select(Company).where(Company.code == "SH-DEMO"))
         telesales = db.scalar(select(User).where(User.username == "telesales"))
         assert company is not None and telesales is not None

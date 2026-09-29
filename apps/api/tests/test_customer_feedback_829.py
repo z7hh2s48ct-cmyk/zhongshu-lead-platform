@@ -490,19 +490,18 @@ def test_item_4_missing_one_current_city_district_does_not_expand_scope(
             if key not in {"company_id", "employee_user_id", "idempotency_key", "note"}
         },
     )
+    # 9.29 新口径：直派预览告知前端转入公海，由正式提交接口落库。
     assert preview.status_code == 200, preview.text
-    assert all(
-        item["company_id"] != company_id
-        for item in preview.json()["data"]["candidates"]
-    )
+    assert preview.json()["data"]["pool_target"] == "PUBLIC_POOL"
+    assert preview.json()["data"]["candidates"] == []
     dispatched = client.post(
         "/api/v1/v1.2/platform/leads/quick-dispatch",
         json=payload,
     )
     # 2026-09-23 口径：缺县不再前置 422；接收方服务区域不匹配仍然拦截。
     assert dispatched.status_code == 409, dispatched.text
-    assert dispatched.json()["code"] == "DISPATCH_CANDIDATE_INELIGIBLE"
-    assert dispatched.json()["details"]["reasons"] == ["SERVICE_REGION_MISMATCH"]
+    assert dispatched.json()["code"] == "LEAD_NOT_READY_DISPATCH"
+    assert dispatched.json()["details"]["status"] == "PUBLIC_POOL"
 
 
 def test_item_5_unassigned_platform_lead_can_be_corrected_directly(api_client) -> None:
@@ -521,7 +520,7 @@ def test_item_5_unassigned_platform_lead_can_be_corrected_directly(api_client) -
     submitted = client.post(
         f"/api/v1/v1.2/platform/leads/{draft['id']}/submit"
     ).json()["data"]["lead"]
-    assert submitted["status"] == "READY_DISPATCH"
+    assert submitted["status"] == "PUBLIC_POOL"
 
     corrected = client.patch(
         f"/api/v1/v1.2/platform/leads/{draft['id']}/correction",
@@ -533,7 +532,7 @@ def test_item_5_unassigned_platform_lead_can_be_corrected_directly(api_client) -
     assert corrected.status_code == 200, corrected.text
     data = corrected.json()["data"]
     assert data["customer_name"] == "更正后姓名"
-    assert data["status"] == "READY_DISPATCH"
+    assert data["status"] == "PUBLIC_POOL"
     assert data["snapshot_version"] == submitted["snapshot_version"] + 1
 
 

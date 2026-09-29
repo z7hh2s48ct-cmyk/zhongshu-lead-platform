@@ -39,10 +39,14 @@ from ..core.v12_enums import (
     VerificationTaskType,
 )
 from .company_profile_v12 import require_lead_capability
-from .phone_uniqueness import require_unique_lead_phone
+from .phone_uniqueness import (
+    hash_customer_wechat,
+    require_unique_customer_wechat,
+    require_unique_lead_phone,
+)
 from .lead_deletion_v12 import require_lead_not_deleted
 from .china_regions import region_by_code
-from .dedup_v12 import DedupResult, apply_submission_decision, evaluate_phone
+from .dedup_v12 import DedupResult, apply_submission_decision, evaluate_contact, evaluate_phone
 from .dispatch_v12 import (
     existing_receiver_correction_issues,
     lead_missing_district_region,
@@ -64,6 +68,7 @@ from .pre_dispatch_v12 import (
 EDITABLE_FIELDS = {
     "customer_name",
     "phone",
+    "customer_wechat",
     "province",
     "city",
     "district",
@@ -85,6 +90,7 @@ EDITABLE_FIELDS = {
 CORRECTION_READ_ONLY_FIELDS = frozenset(
     {
         "phone",
+        "customer_wechat",
         "category_code",
         "brand_code",
         "source_channel",
@@ -159,16 +165,15 @@ def create_draft(
         supplier_company_id = principal.company_id
     elif source_kind is LeadSourceKind.PLATFORM_MANUAL:
         is_test = values.get("is_test") is True
-    placeholder_phone = ""
     lead = Lead(
         source_type=source_kind.value,
         source_kind=source_kind.value,
         submitter_user_id=principal.user_id,
         supplier_company_id=supplier_company_id,
         customer_name="未填写",
-        phone_encrypted=encrypt_text(placeholder_phone),
-        phone_hash=hash_phone(placeholder_phone),
-        phone_tail4=phone_tail4(placeholder_phone),
+        phone_encrypted=None,
+        phone_hash=None,
+        phone_tail4=None,
         phone_fingerprint=None,
         consent_confirmed=False,
         is_test=is_test,
@@ -199,6 +204,11 @@ def update_draft(
 
 
 def _apply_editable_values(db: Session, lead: Lead, values: dict[str, Any]) -> None:
+    new_province = _clean_text(values.get("province")) if "province" in values else None
+    if new_province and new_province != lead.province and not values.get("city"):
+        lead.city = None
+        lead.district = None
+        lead.region_code = None
     for field, raw_value in values.items():
         if field not in EDITABLE_FIELDS:
             continue
@@ -212,10 +222,22 @@ def _apply_editable_values(db: Session, lead: Lead, values: dict[str, Any]) -> N
             )
             if normalized and (len(normalized) != 11 or not normalized.startswith("1")):
                 raise AppError("LEAD_PHONE_INVALID", "手机号格式错误", 422)
-            lead.phone_encrypted = encrypt_text(normalized)
-            lead.phone_hash = hash_phone(normalized)
-            lead.phone_tail4 = phone_tail4(normalized)
+            lead.phone_encrypted = encrypt_text(normalized) if normalized else None
+            lead.phone_hash = hash_phone(normalized) if normalized else None
+            lead.phone_tail4 = phone_tail4(normalized) if normalized else None
             lead.phone_fingerprint = fingerprint_phone(normalized) if normalized else None
+            continue
+        if field == "customer_wechat":
+            if raw_value is None:
+                continue
+            display_value = str(raw_value).strip()
+            normalized = require_unique_customer_wechat(
+                db,
+                customer_wechat=display_value,
+                exclude_lead_id=lead.id,
+            )
+            lead.customer_wechat_encrypted = encrypt_text(display_value) if normalized else None
+            lead.customer_wechat_hash = hash_customer_wechat(normalized) if normalized else None
             continue
         if field in {"budget_min", "budget_max", "acquisition_cost_cents"}:
             setattr(lead, field, raw_value)
@@ -224,6 +246,10 @@ def _apply_editable_values(db: Session, lead: Lead, values: dict[str, Any]) -> N
             lead.consent_confirmed = bool(raw_value)
             continue
         setattr(lead, field, _clean_text(raw_value))
+    if lead.province and not lead.city and not lead.region_code:
+        lead.pending_reason = "LOCATION_PROVINCE_ONLY"
+    elif lead.pending_reason == "LOCATION_PROVINCE_ONLY":
+        lead.pending_reason = None
     lead.source_channel = _clean_text(lead.source_channel)
     if lead.source_channel:
         lead.source_channel = lead.source_channel.upper()
@@ -234,8 +260,13 @@ def _apply_editable_values(db: Session, lead: Lead, values: dict[str, Any]) -> N
 
 
 def _editable_fact_snapshot(lead: Lead) -> dict[str, Any]:
-    snapshot = {field: getattr(lead, field) for field in EDITABLE_FIELDS if field != "phone"}
+    snapshot = {
+        field: getattr(lead, field)
+        for field in EDITABLE_FIELDS
+        if field not in {"phone", "customer_wechat"}
+    }
     snapshot["phone"] = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
+    snapshot["customer_wechat"] = decrypt_text(lead.customer_wechat_encrypted) or ""
     return snapshot
 
 
@@ -283,6 +314,7 @@ def _correction_audit_snapshot(lead: Lead) -> dict[str, Any]:
         "customer_name": lead.customer_name,
         "phone_masked": mask_phone(phone),
         "contact_fingerprint": lead.phone_fingerprint
+        or lead.customer_wechat_hash
         or fingerprint_phone(phone or ""),
         "province": lead.province,
         "city": lead.city,
@@ -764,11 +796,7 @@ def correct_platform_lead(
     if (
         not has_dispatch_history
         and (phone_changed or region_changed)
-        and original_status
-        in {
-            LeadV12Status.PENDING_TELESALES_VERIFY.value,
-            LeadV12Status.PENDING_OPERATION_DISPOSITION.value,
-        }
+        and original_status == LeadV12Status.PENDING_TELESALES_VERIFY.value
     ):
         restart_pre_dispatch_after_correction(db, lead=lead)
         verification_restarted = True
@@ -1345,9 +1373,14 @@ def release_misdispatched_lead_for_redispatch(
 
 def _validate_submission(db: Session, lead: Lead) -> str:
     phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
+    customer_wechat = decrypt_text(lead.customer_wechat_encrypted) or ""
     errors: dict[str, str] = {}
-    if len(phone) != 11 or not phone.startswith("1"):
-        errors["phone"] = "手机号必填且必须为 11 位有效号码"
+    if phone and (len(phone) != 11 or not phone.startswith("1")):
+        errors["phone"] = "手机号必须为 11 位有效号码"
+    if not phone and not customer_wechat:
+        errors["contact"] = "手机号或客户微信号至少填写一项"
+    if lead.province and not lead.city and not lead.region_code:
+        errors["region_code"] = "仅知省份时请先保存草稿，待补充城市后再提交"
     if lead.region_code and not db.scalar(
         select(Region.code).where(Region.code == lead.region_code, Region.active.is_(True))
     ):
@@ -1480,7 +1513,7 @@ def submit_draft(
     now = datetime.now(timezone.utc)
     lead.submitted_at = now
     lead.imported_at = lead.imported_at or now
-    result = evaluate_phone(db, lead=lead, normalized_phone=phone, checkpoint=checkpoint, now=now)
+    result = evaluate_contact(db, lead=lead, normalized_phone=phone, checkpoint=checkpoint, now=now)
     apply_submission_decision(lead, result)
     if not result.blocks_dispatch:
         if _has_known_location(db, lead):
@@ -1553,7 +1586,7 @@ def review_supplier_lead(
         return None
 
     phone = _validate_submission(db, lead)
-    result = evaluate_phone(
+    result = evaluate_contact(
         db,
         lead=lead,
         normalized_phone=phone,
@@ -1685,7 +1718,8 @@ def lead_supply_to_dict(
     supplier_cooperation_status: str | None = None,
 ) -> dict[str, Any]:
     phone = decrypt_text(lead.phone_encrypted)
-    can_view_phone = bool(
+    customer_wechat = decrypt_text(lead.customer_wechat_encrypted)
+    can_view_contact = bool(
         principal
         and (
             principal.can("*")
@@ -1718,8 +1752,9 @@ def lead_supply_to_dict(
         "supplier_company_id": lead.supplier_company_id,
         "supplier_company_name": supplier_company_name,
         "customer_name": lead.customer_name,
-        "phone": phone if can_view_phone else None,
+        "phone": phone if can_view_contact else None,
         "phone_masked": mask_phone(phone),
+        "customer_wechat": customer_wechat if can_view_contact else None,
         "province": lead.province,
         "city": lead.city,
         "district": lead.district,

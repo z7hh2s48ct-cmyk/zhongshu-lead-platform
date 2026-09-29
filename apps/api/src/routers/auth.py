@@ -44,6 +44,7 @@ from ..services.auth_service import (
     authenticate_internal,
     build_invite_copy_text,
     create_company_invite,
+    create_owner_wechat_rebind_invite,
     list_company_invites,
     login_or_bind_wechat,
     revoke_company_invite,
@@ -318,8 +319,13 @@ def _request_session_principal(request: Request, db: Session) -> CurrentPrincipa
     return load_current_principal(db, payload.get("sub"), payload.get("sv"))
 
 
-def _require_clean_binding_session(request: Request, db: Session) -> None:
-    if _request_session_principal(request, db) is not None:
+def _require_clean_binding_session(request: Request, db: Session, invite: InviteToken | None = None) -> None:
+    current = _request_session_principal(request, db)
+    if current is not None and not (
+        invite is not None
+        and invite.purpose == "OWNER_WECHAT_REBIND"
+        and current.user_id == invite.target_user_id
+    ):
         raise AppError(
             "AUTH_BINDING_REQUIRES_CLEAN_SESSION",
             "当前浏览器已登录账号，请先退出后再用负责人本人微信打开邀请",
@@ -603,6 +609,36 @@ def create_invite(
     )
 
 
+@router.post("/companies/{company_id}/owner-wechat-rebind-invites")
+def create_owner_rebind_invite(
+    company_id: str,
+    body: InviteCreateBody,
+    request: Request,
+    principal=Depends(require_permissions("company.account.manage")),
+    db: Session = Depends(get_db),
+):
+    invite, raw, superseded_ids = create_owner_wechat_rebind_invite(
+        db, company_id, principal.user_id, body.expires_hours
+    )
+    write_audit(
+        db, principal=principal, action="WECHAT_REBIND_INVITE_CREATE",
+        resource_type="invite", resource_id=invite.id, company_id=company_id,
+        metadata={"target_user_id": invite.target_user_id, "superseded_invite_ids": superseded_ids},
+        request_id=request.state.request_id,
+    )
+    db.commit()
+    company = db.get(Company, company_id)
+    assert company is not None
+    url = f"{settings.app_base_url.rstrip('/')}/h5/invite.html#invite={raw}"
+    expires_at = invite.expires_at.isoformat()
+    return ok(request, {
+        "invite_id": invite.id, "token": raw, "url": url,
+        "company_name": company.name, "owner_name": company.owner_name,
+        "copy_text": f"{company.owner_name or '负责人'}，请使用新的微信打开此链接完成账号换绑：{url}，有效期至：{expires_at}",
+        "expires_at": expires_at, "revoked_invite_count": len(superseded_ids),
+    })
+
+
 @router.post("/invites/confirm-start")
 def invite_confirm_start(
     body: InviteConfirmStartBody,
@@ -611,13 +647,12 @@ def invite_confirm_start(
 ):
     """Exchange a confirmed invite for a short-lived binding OAuth intent (P0-04)."""
 
-    _require_clean_binding_session(request, db)
-
     # I15：限流在邀请校验之前——无效邀请的探测请求同样计数，防枚举刷。
     if _confirm_start_rate_limited(body.invite, _request_ip(request)):
         raise AppError("AUTH_RATE_LIMITED", "操作过于频繁，请稍后再试", 429)
 
     invite = validate_invite(db, raw_token=body.invite)
+    _require_clean_binding_session(request, db, invite)
     return_url = _sanitize_binding_return_url(body.return_url)
     # I12：绑定预授权 state 显式收紧 TTL，不依赖 create_signed_state 的通用默认值。
     state = create_signed_state(
@@ -720,7 +755,7 @@ def wechat_mock_callback(body: WechatMockCallbackBody, request: Request, respons
     # mock 通道与生产回调同一合同：绑定必须携带确认后的 signed state（P0-07）
     invite_id, expected_company_id, _ = _resolve_binding_intent(body.state)
     if invite_id:
-        _require_clean_binding_session(request, db)
+        _require_clean_binding_session(request, db, db.get(InviteToken, invite_id))
     user, token = login_or_bind_wechat(
         db,
         openid=body.openid,
@@ -728,7 +763,8 @@ def wechat_mock_callback(body: WechatMockCallbackBody, request: Request, respons
         invite_id=invite_id,
         expected_company_id=expected_company_id,
     )
-    write_audit(db, principal=None, action="WECHAT_BIND", resource_type="user", resource_id=user.id, company_id=user.company_id, request_id=request.state.request_id)
+    purpose = db.get(InviteToken, invite_id).purpose if invite_id else None
+    write_audit(db, principal=None, action="WECHAT_REBIND" if purpose == "OWNER_WECHAT_REBIND" else "WECHAT_BIND", resource_type="user", resource_id=user.id, company_id=user.company_id, metadata={"invite_id": invite_id, "purpose": purpose} if invite_id else None, request_id=request.state.request_id)
     db.commit()
     response.set_cookie("access_token", token, httponly=True, secure=False, samesite="lax", max_age=settings.jwt_expire_minutes * 60, path="/")
     return ok(request, {"token": token, "user_id": user.id, "company_id": user.company_id})
@@ -890,7 +926,7 @@ def wechat_callback(
             raise AppError("AUTH_FAILED", "微信授权码缺失，请重新发起授权", 400)
         invite_id, expected_company_id, return_url = _resolve_binding_intent(state)
         if invite_id:
-            _require_clean_binding_session(request, db)
+            _require_clean_binding_session(request, db, db.get(InviteToken, invite_id))
         identity = WechatOAuthClient().exchange_code(code)
         user, token = login_or_bind_wechat(
             db,
@@ -903,14 +939,15 @@ def wechat_callback(
         # I4：区分首次绑定与重登——绑定意图（signed bind state）记 WECHAT_BIND
         # 并保留 invite_id 追溯；legacy 普通登录记 WECHAT_OAUTH_LOGIN，与 mock 通道对齐。
         if invite_id:
+            invite_purpose = db.get(InviteToken, invite_id).purpose
             write_audit(
                 db,
                 principal=None,
-                action="WECHAT_BIND",
+                action="WECHAT_REBIND" if invite_purpose == "OWNER_WECHAT_REBIND" else "WECHAT_BIND",
                 resource_type="user",
                 resource_id=user.id,
                 company_id=user.company_id,
-                metadata={"invite_id": invite_id},
+                metadata={"invite_id": invite_id, "purpose": invite_purpose},
                 request_id=request.state.request_id,
                 ip_address=_request_ip(request),
                 user_agent=request.headers.get("user-agent"),

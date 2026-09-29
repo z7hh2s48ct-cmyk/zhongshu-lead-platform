@@ -68,16 +68,16 @@ def test_state_machine_allows_pool_to_telesales_round_trip() -> None:
     assert LeadV12Status.PUBLIC_POOL in verifying
 
 
-def test_pool_target_prefers_dispatch_pool_even_when_district_missing(db) -> None:
+def test_platform_lead_without_receiver_enters_public_pool_even_when_district_missing(db) -> None:
     setup = _workflow_setup(db, suffix="FB922F")
     lead = setup["lead"]
-    # 平台客资缺县 -> 直接 READY_DISPATCH（不再转电销）。
+    # 9.29 新口径：平台客资无人可承接也进公海，不因缺县转电销。
     lead.source_kind = "PLATFORM_MANUAL"
     lead.region_code = "420900"
-    assert approved_lead_pool_target(db, lead) is LeadV12Status.READY_DISPATCH
+    assert approved_lead_pool_target(db, lead) is LeadV12Status.PUBLIC_POOL
 
 
-def test_route_approved_keeps_missing_county_lead_dispatchable(db) -> None:
+def test_route_approved_platform_lead_without_receiver_enters_public_pool(db) -> None:
     setup = _workflow_setup(db, suffix="FB922G")
     lead = setup["lead"]
     lead.status = LeadV12Status.PENDING_REVIEW.value
@@ -85,8 +85,8 @@ def test_route_approved_keeps_missing_county_lead_dispatchable(db) -> None:
     lead.region_code = "420900"
     target = route_approved_lead_to_pool(db, lead)
     db.commit()
-    assert target is LeadV12Status.READY_DISPATCH
-    assert lead.pending_reason is None
+    assert target is LeadV12Status.PUBLIC_POOL
+    assert lead.pending_reason == "PUBLIC_POOL_NO_LOCAL_RECEIVER"
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ def test_disposition_approve_routes_missing_county_lead_to_pool(db) -> None:
     assert lead.pending_reason != "DISTRICT_PENDING_VERIFY"
 
 
-def test_reopen_closed_lead_goes_back_to_dispatch_pool_when_district_missing(db) -> None:
+def test_reopen_closed_lead_without_receiver_enters_public_pool(db) -> None:
     setup = _workflow_setup(
         db, lead_status=LeadV12Status.CLOSED.value, suffix="FB922I"
     )
@@ -156,8 +156,8 @@ def test_reopen_closed_lead_goes_back_to_dispatch_pool_when_district_missing(db)
     )
     db.commit()
 
-    assert lead.status == LeadV12Status.READY_DISPATCH.value
-    assert lead.pending_reason == "REOPENED_FOR_REDISPATCH"
+    assert lead.status == LeadV12Status.PUBLIC_POOL.value
+    assert lead.pending_reason == "PUBLIC_POOL_NO_LOCAL_RECEIVER"
 
 
 # ---------------------------------------------------------------------------

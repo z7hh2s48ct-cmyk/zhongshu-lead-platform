@@ -386,8 +386,9 @@ async function verify() {
   const filters = { q: (query.get('q') || '').trim(), channel: query.get('channel') || '' };
   const [tasks, channels] = await Promise.all([loadTasks(status, filters), loadSourceChannelOptions()]);
   const items = tasks.filter((item) => item.status !== 'SUBMITTED');
-  const searchBar = `<form class="task-search" id="verify-search"><input id="verify-q" type="search" autocomplete="off" placeholder="客户姓名 / 手机号后四位" value="${esc(filters.q)}"><select id="verify-channel"><option value="">全部来源</option>${channels.map((channel) => `<option value="${esc(channel.code)}" ${filters.channel === channel.code ? 'selected' : ''}>${esc(channel.label)}</option>`).join('')}</select><button class="btn small primary" type="submit">查询</button></form>`;
-  zsSetSafeHtml(app, shell(`<h1>核验任务</h1>${searchBar}<div class="filters" role="tablist">${[['', '全部'], ['ASSIGNED', '待开始'], ['IN_PROGRESS', '核验中']].map(([value, label]) => `<button class="btn small ${status === value ? 'primary' : 'outline'}" data-filter="${value}">${label}</button>`).join('')}</div>${items.length ? items.map(taskCard).join('') : emptyState('暂无符合条件的任务', filters.q || filters.channel ? '换个关键词或来源再试。' : '这里只显示运营已派发给您的任务。')}`, 'verify', '核验任务'));
+  const searchBar = `<form class="task-search" id="verify-search"><input id="verify-q" type="search" autocomplete="off" placeholder="客户姓名 / 手机号后四位" value="${esc(filters.q)}"><select id="verify-channel"><option value="">全部来源</option>${channels.map((channel) => `<option value="${esc(channel.code)}" ${filters.channel === channel.code ? 'selected' : ''}>${esc(channel.label)}</option>`).join('')}</select><button class="btn small primary" type="submit">查询任务</button></form>`;
+  const wechatLookup = '<form class="task-search" id="wechat-exists-search"><input id="wechat-exists-value" type="search" autocomplete="off" maxlength="64" placeholder="输入完整客户微信号，查询是否已录入" aria-label="客户微信号"><button class="btn small outline" type="submit">查重</button></form><p id="wechat-exists-result" class="muted" role="status"></p>';
+  zsSetSafeHtml(app, shell(`<h1>核验任务</h1>${searchBar}${wechatLookup}<div class="filters" role="tablist">${[['', '全部'], ['ASSIGNED', '待开始'], ['IN_PROGRESS', '核验中']].map(([value, label]) => `<button class="btn small ${status === value ? 'primary' : 'outline'}" data-filter="${value}">${label}</button>`).join('')}</div>${items.length ? items.map(taskCard).join('') : emptyState('暂无符合条件的任务', filters.q || filters.channel ? '换个关键词或来源再试。' : '这里只显示运营已派发给您的任务。')}`, 'verify', '核验任务'));
   bind();
   bindTaskCards();
   const searchForm = document.querySelector('#verify-search');
@@ -397,6 +398,19 @@ async function verify() {
       location.hash = buildVerifyHash(status, (document.querySelector('#verify-q').value || '').trim(), document.querySelector('#verify-channel').value);
     };
   }
+  document.querySelector('#wechat-exists-search').onsubmit = async (event) => {
+    event.preventDefault();
+    const value = document.querySelector('#wechat-exists-value').value.trim();
+    const result = document.querySelector('#wechat-exists-result');
+    if (!value) { result.textContent = '请输入完整客户微信号'; return; }
+    result.textContent = '查询中…';
+    try {
+      const match = await api('/v1.2/pre-dispatch-verifications/customer-wechat-exists', { method: 'POST', body: JSON.stringify({ customer_wechat: value }) });
+      result.textContent = match.exists ? '系统中已存在该微信号，请勿重复录入。' : '系统中未查到该微信号。';
+    } catch (error) {
+      result.textContent = error.message || '查询失败，请重试';
+    }
+  };
   document.querySelectorAll('[data-filter]').forEach((node) => { node.onclick = () => { location.hash = buildVerifyHash(node.dataset.filter, filters.q, filters.channel); }; });
 }
 
@@ -522,10 +536,10 @@ async function task(kind, id) {
   const readonlyReturnEvidence = availableEvidence.length ? `<section class="card"><h2>加盟商提交的退回证据</h2><p class="muted">开始核验前可先查看；预览失败不影响继续处理。</p><div class="return-evidence-list">${availableEvidence.map((item) => returnEvidenceChoice(item, false)).join('')}</div></section>` : '';
   const verificationEvidenceItems = data.verification_info?.evidences || [];
   const verificationEvidence = verificationEvidenceItems.length ? `<div class="return-evidence-list">${verificationEvidenceItems.map((item) => returnEvidenceChoice(item, false)).join('')}</div>` : '';
-  const action = data.status === 'ASSIGNED' ? `${readonlyReturnEvidence}<section class="card"><h2>开始核验</h2><p class="muted">该任务已由运营派发给您。开始后可查看完整手机号；参考时间不限制继续处理。</p><button class="btn primary block" id="start">开始核验</button></section>` : data.status === 'IN_PROGRESS' ? taskForm(kind, data) : `<section class="card"><h2>已提交结论</h2><dl class="detail"><div><dt>联系结果</dt><dd>${esc(contactLabels[data.contact_result] || '待确认')}</dd></div><div><dt>事实结论</dt><dd>${esc(TASK_KIND[kind].conclusions[data.conclusion] || '待确认')}</dd></div><div><dt>核验备注</dt><dd>${esc(data.verification_info?.note || '暂无核验备注')}</dd></div></dl>${readonlyReturnEvidence}${verificationEvidence ? `<h3>本次核验证据</h3>${verificationEvidence}` : ''}<p class="muted">结论已经提交运营人员处置，不能由电销人员直接改变客资状态。</p></section>`;
-  const contactActions = canContact ? `<div class="detail-actions"><button id="dial" class="btn gold">${icon('phone')}<span>一键拨号</span></button><button id="copy-phone" class="btn outline">复制号码</button></div>` : '';
-  const guide = canContact ? '<section class="quick-guide"><b>核验说明</b><span>拨号由您主动确认；桌面端可复制号码，只提交事实结论，不决定派发、退款或终审。</span><a href="#result-form">填写结果</a></section>' : '';
-  zsSetSafeHtml(app, shell(`<button class="btn small outline" data-history-back>返回</button><section class="detail-hero"><div><p class="eyebrow">${esc(TASK_KIND[kind].label)}</p><h1>${esc(lead.customer_name || '待核验客户')}</h1><span class="badge ${statusClass(displayStatus)}">${esc(statusLabel(displayStatus))}</span></div>${contactActions}</section>${guide}<section class="card compact"><dl class="detail"><div><dt>手机号</dt><dd><strong>${esc(lead.phone || lead.phone_masked || '--')}</strong></dd></div><div><dt>地区</dt><dd>${esc(lead.city || '--')} ${esc(lead.district || '')}</dd></div>${details}</dl></section>${action}`, data.submitted_at ? 'records' : 'verify', '核验详情'));
+  const action = data.status === 'ASSIGNED' ? `${readonlyReturnEvidence}<section class="card"><h2>开始核验</h2><p class="muted">该任务已由运营派发给您。开始后可查看完整手机号或客户微信号；参考时间不限制继续处理。</p><button class="btn primary block" id="start">开始核验</button></section>` : data.status === 'IN_PROGRESS' ? taskForm(kind, data) : `<section class="card"><h2>已提交结论</h2><dl class="detail"><div><dt>联系结果</dt><dd>${esc(contactLabels[data.contact_result] || '待确认')}</dd></div><div><dt>事实结论</dt><dd>${esc(TASK_KIND[kind].conclusions[data.conclusion] || '待确认')}</dd></div><div><dt>核验备注</dt><dd>${esc(data.verification_info?.note || '暂无核验备注')}</dd></div></dl>${readonlyReturnEvidence}${verificationEvidence ? `<h3>本次核验证据</h3>${verificationEvidence}` : ''}<p class="muted">结论已经提交运营人员处置，不能由电销人员直接改变客资状态。</p></section>`;
+  const contactActions = canContact && lead.phone ? `<div class="detail-actions"><button id="dial" class="btn gold">${icon('phone')}<span>一键拨号</span></button><button id="copy-phone" class="btn outline">复制号码</button></div>` : '';
+  const guide = canContact ? `<section class="quick-guide"><b>核验说明</b><span>${lead.phone ? '拨号由您主动确认；桌面端可复制号码。' : '可通过客户微信号联系并记录核验事实。'}只提交事实结论，不决定派发、退款或终审。</span><a href="#result-form">填写结果</a></section>` : '';
+  zsSetSafeHtml(app, shell(`<button class="btn small outline" data-history-back>返回</button><section class="detail-hero"><div><p class="eyebrow">${esc(TASK_KIND[kind].label)}</p><h1>${esc(lead.customer_name || '待核验客户')}</h1><span class="badge ${statusClass(displayStatus)}">${esc(statusLabel(displayStatus))}</span></div>${contactActions}</section>${guide}<section class="card compact"><dl class="detail"><div><dt>手机号</dt><dd><strong>${esc(lead.phone || lead.phone_masked || '--')}</strong></dd></div><div><dt>客户微信号</dt><dd><strong>${esc(lead.customer_wechat || lead.customer_wechat_masked || '--')}</strong></dd></div><div><dt>地区</dt><dd>${esc(lead.city || '--')} ${esc(lead.district || '')}</dd></div>${details}</dl></section>${action}`, data.submitted_at ? 'records' : 'verify', '核验详情'));
   bind();
   bindReturnEvidencePreviewErrors(app);
   bindTaskActions(kind, id, lead.phone);

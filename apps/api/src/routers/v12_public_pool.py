@@ -9,15 +9,16 @@ from sqlalchemy.orm import Session
 from ..core.auth import require_permissions
 from ..core.database import get_db
 from ..core.errors import AppError
-from ..core.models import Lead
+from ..core.models import Lead, Region
 from ..core.responses import ok, page
 from ..core.security import hash_phone
-from ..core.v12_enums import CustomerSource
+from ..core.v12_enums import CustomerSource, LeadSourceKind, LeadV12Status
 from ..integrations.feishu import FeishuClient
 from ..schemas.v12_lead_supply import LeadDraftBody, LeadDraftUpdateBody
 from ..schemas.v12_public_pool import PublicPoolFeishuImportBody
 from ..schemas.v12_reports import normalize_exact_phone
 from ..services.audit import write_audit
+from ..services.dispatch_v12 import receiver_coverage_for_leads
 from ..services.lead_supply_v12 import lead_supply_list_to_dict, lead_supply_to_dict
 from ..services.public_pool_v12 import (
     create_public_pool_lead,
@@ -88,10 +89,24 @@ def public_pool_list(
         page_size=page_size,
     )
     data = lead_supply_list_to_dict(db, items, principal)
+    region_codes = {item.region_code for item in items if item.region_code}
+    active_region_codes: set[str] = set()
+    if region_codes:
+        active_region_codes = set(db.scalars(
+            select(Region.code).where(
+                Region.code.in_(region_codes), Region.active.is_(True)
+            )
+        ).all())
+    coverage_by_area = receiver_coverage_for_leads(db, items)
     for item, serialized in zip(items, data, strict=True):
+        coverage = None
+        if item.source_kind == LeadSourceKind.SUPPLIER_H5.value or item.status == LeadV12Status.PUBLIC_POOL.value:
+            coverage = coverage_by_area[(item.region_code, item.supplier_company_id)]
         serialized["public_pool_validation_errors"] = public_pool_validation_errors(
             db,
             item,
+            receiver_coverage=coverage,
+            active_region_codes=active_region_codes,
         )
     return ok(request, page(data, total, page_no, page_size))
 
