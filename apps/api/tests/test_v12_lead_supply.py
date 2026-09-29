@@ -24,6 +24,7 @@ from apps.api.src.services.lead_supply_v12 import (
     submit_draft,
     update_draft,
 )
+from apps.api.tests.test_public_pool_auto_rematch import _receiver
 
 
 def _principal(user_id: str, company_id: str | None = None, *permissions: str) -> Principal:
@@ -86,7 +87,7 @@ def test_dedup_window_boundaries() -> None:
     assert classify_age(366)[0] is DuplicateDecision.CLEAR
 
 
-def test_platform_manual_submission_enters_ready_pool_without_pre_verification(db) -> None:
+def test_platform_manual_submission_without_receiver_enters_public_pool(db) -> None:
     db.add(Region(code="420100", name="武汉市", level="CITY", aliases=[], active=True))
     _, user = _seed_identity(db)
     principal = _principal(user.id, None, "lead.manual.manage")
@@ -100,8 +101,8 @@ def test_platform_manual_submission_enters_ready_pool_without_pre_verification(d
     db.commit()
 
     assert result.decision is DuplicateDecision.CLEAR
-    assert lead.status == LeadV12Status.READY_DISPATCH.value
-    assert lead.pending_reason is None
+    assert lead.status == LeadV12Status.PUBLIC_POOL.value
+    assert lead.pending_reason == "PUBLIC_POOL_NO_LOCAL_RECEIVER"
     assert lead.review_status == "APPROVED"
     assert lead.phone_fingerprint
 
@@ -170,6 +171,7 @@ def test_operation_can_reopen_an_unflowed_platform_lead_without_changing_creator
         source_kind=LeadSourceKind.PLATFORM_MANUAL,
         values=_valid_values("13800138009"),
     )
+    _receiver(db, code="PLATFORM-REOPEN-RECEIVER", region_code="420102")
     submit_draft(db, lead=lead, principal=creator_principal)
     assert lead.status == LeadV12Status.READY_DISPATCH.value
 
@@ -191,6 +193,7 @@ def test_operation_cannot_reopen_a_platform_lead_after_any_dispatch_history(db) 
         source_kind=LeadSourceKind.PLATFORM_MANUAL,
         values=_valid_values("13800138010"),
     )
+    _receiver(db, code="PLATFORM-FLOWED-RECEIVER", region_code="420102")
     submit_draft(db, lead=lead, principal=principal)
     db.add(
         Assignment(
@@ -360,11 +363,11 @@ def test_supplier_submission_without_location_enters_telesales_but_only_phone_an
 @pytest.mark.parametrize(
     ("values", "field"),
     [
-        ({"consent_confirmed": True}, "phone"),
+        ({"consent_confirmed": True}, "contact"),
         ({"phone": "13700137003"}, "consent_confirmed"),
     ],
 )
-def test_formal_submission_requires_phone_and_customer_authorization(db, values, field) -> None:
+def test_formal_submission_requires_contact_and_customer_authorization(db, values, field) -> None:
     company, user = _seed_identity(db, company_code=f"SUP-REQUIRED-{field}")
     _approve_supplier_capability(db, company, user)
     principal = _principal(user.id, company.id, "supplier.lead.manage")

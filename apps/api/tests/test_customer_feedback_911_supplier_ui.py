@@ -85,9 +85,9 @@ def test_supplier_form_displays_read_only_identity_from_logged_in_user() -> None
 def test_supplier_workbench_assets_are_cache_busted_for_feedback_911() -> None:
     html = WORKBENCH_HTML.read_text(encoding="utf-8")
 
-    assert "v12-workbench.css?v=20260911-feedback-911" in html
+    assert "v12-workbench.css?v=20260930-feedback-929" in html
     # 2026-09-23 反馈第 2 条：版本号随 H5 地区搜索改动刷新
-    assert "v12-workbench.js?v=20260923-feedback-922-region-search" in html
+    assert "v12-workbench.js?v=20260930-feedback-929" in html
 
 
 def test_supplier_customer_name_is_optional_and_blank_is_submitted_unchanged() -> None:

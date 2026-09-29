@@ -526,3 +526,24 @@ button.metric:focus-visible{outline:3px solid rgba(199,161,96,.32);outline-offse
 }
 
 .callDialStats .metric small{display:block;margin-top:4px;color:var(--muted);font-size:10px}
+
+/* 2026-09-28 反馈第 2 条：核验任务搜索栏与来源标签。 */
+.task-search{
+  display:flex;
+  gap:7px;
+  margin:12px 0 4px;
+}
+.task-search input,.task-search select{
+  flex:1;
+  min-width:0;
+  border:1px solid var(--line);
+  border-radius:12px;
+  padding:11px 13px;
+  font-size:14px;
+  background:var(--paper);
+  color:var(--ink);
+}
+.task-search input:focus,.task-search select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 4px rgba(199,161,96,.14)}
+.task-search button{flex:none}
+.badge-group{display:inline-flex;gap:6px;align-items:center}
+.badge.source{background:#efe6f7;color:#6b46a5}

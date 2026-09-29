@@ -29,6 +29,7 @@ def _preview_invite(request: Request, invite: str, db: Session):
         {
             "company_name": company.name,
             "owner_name": company.owner_name,
+            "purpose": invite_row.purpose,
             "level_code": company.level_code,
             "region_codes": [row.region_code for row in company.service_regions if row.active],
             "capability_codes": [row.category_code for row in company.capabilities if row.active],

@@ -119,11 +119,15 @@ def reopen_closed_lead(
             409,
         )
     lead.current_assignment_id = None
-    # 2026-09-23 口径：缺县不再硬性转电销，重新启用后直接回派发池，
-    # 运营可直派（软提醒）或主动转电销补县。
-    assert_lead_transition(lead.status, LeadV12Status.READY_DISPATCH)
-    lead.status = LeadV12Status.READY_DISPATCH.value
-    lead.pending_reason = "REOPENED_FOR_REDISPATCH"
+    # 重新启用不因缺县自动转电销；当地无人承接时进入公海等待匹配。
+    target = approved_lead_pool_target(db, lead)
+    assert_lead_transition(lead.status, target)
+    lead.status = target.value
+    lead.pending_reason = (
+        "PUBLIC_POOL_NO_LOCAL_RECEIVER"
+        if target is LeadV12Status.PUBLIC_POOL
+        else "REOPENED_FOR_REDISPATCH"
+    )
     lead.review_status = "APPROVED"
     lead.review_note = normalized_reason
     lead.reviewed_at = _now()
@@ -507,10 +511,11 @@ def assign_pre_dispatch_task(
     elif lead.status not in allowed_statuses:
         raise AppError("PRE_DISPATCH_LEAD_STATE_INVALID", "当前客资不可派发前置电销核验", 409)
     phone = normalize_phone(decrypt_text(lead.phone_encrypted) or "")
-    if len(phone) != 11 or not phone.startswith("1"):
+    customer_wechat = (decrypt_text(lead.customer_wechat_encrypted) or "").strip()
+    if not customer_wechat and (len(phone) != 11 or not phone.startswith("1")):
         raise AppError(
-            "PRE_DISPATCH_PHONE_REQUIRED",
-            "手机号必填且必须为 11 位有效号码",
+            "PRE_DISPATCH_CONTACT_REQUIRED",
+            "手机号或客户微信号至少填写一项",
             422,
         )
     if lead.duplicate_status not in {None, "", "CLEAR"}:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..core.v12_enums import ReturnReasonCode
 
@@ -116,6 +116,45 @@ class ReturnRegionRedispatchBody(BaseModel):
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip() if isinstance(value, str) else value
+
+
+class ReturnCorrectionRedispatchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: str = Field(min_length=1, max_length=36)
+    employee_user_id: str | None = Field(default=None, min_length=1, max_length=36)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    expected_snapshot_version: int | None = Field(default=None, ge=1)
+    customer_name: str | None = Field(default=None, min_length=1, max_length=64)
+    need_summary: str | None = Field(default=None, max_length=2000)
+    consent_confirmed: bool | None = None
+    province_code: str | None = Field(default=None, min_length=1, max_length=32)
+    city_code: str | None = Field(default=None, min_length=1, max_length=32)
+    district_code: str | None = Field(default=None, min_length=1, max_length=32)
+    reason: str = Field(min_length=2, max_length=1000)
+
+    @field_validator(
+        "company_id",
+        "employee_user_id",
+        "idempotency_key",
+        "customer_name",
+        "need_summary",
+        "province_code",
+        "city_code",
+        "district_code",
+        "reason",
+        mode="before",
+    )
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def require_complete_region(self) -> "ReturnCorrectionRedispatchBody":
+        region = (self.province_code, self.city_code, self.district_code)
+        if any(region) and not all(region):
+            raise ValueError("修改地址时请选择完整省、市、区县")
+        return self
 
 
 class ReturnFinalReviewBody(BaseModel):

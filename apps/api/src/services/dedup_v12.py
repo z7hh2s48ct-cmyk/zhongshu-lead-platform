@@ -98,6 +98,27 @@ def evaluate_phone(
     )
 
 
+def evaluate_contact(
+    db: Session,
+    *,
+    lead: Lead,
+    normalized_phone: str,
+    checkpoint: str,
+    now: datetime | None = None,
+) -> DedupResult:
+    """Keep the phone age-window policy while allowing WeChat-only leads."""
+
+    if not normalized_phone:
+        return DedupResult(decision=DuplicateDecision.CLEAR)
+    return evaluate_phone(
+        db,
+        lead=lead,
+        normalized_phone=normalized_phone,
+        checkpoint=checkpoint,
+        now=now,
+    )
+
+
 def reevaluate_existing_phone_identity(
     db: Session,
     *,

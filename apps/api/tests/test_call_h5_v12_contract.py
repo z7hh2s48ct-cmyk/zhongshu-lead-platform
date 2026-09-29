@@ -188,7 +188,7 @@ def test_call_h5_uses_only_v12_assigned_verification_contracts() -> None:
     assert "自主领取" in source
     assert "go('home');route()" not in source
     assert "/admin/index.html" not in source
-    assert "app.js?v=20260916-feedback-915" in index
+    assert "app.js?v=20260930-feedback-929" in index
 
 
 def test_call_h5_home_first_screen_has_personal_task_summary_without_team_finance() -> None:

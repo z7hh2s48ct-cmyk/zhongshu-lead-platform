@@ -101,6 +101,18 @@ def normalize_phone(value: str) -> str:
     return digits
 
 
+def phone_tail4(value: str | None) -> str | None:
+    """脱敏号码 `138****8000` 本就展示后四位，明文存后四位用于等值搜索不扩大暴露面。
+
+    归一化后不足 4 位（脏号/占位）返回 None，不可搜索。
+    """
+
+    if not value:
+        return None
+    normalized = normalize_phone(value)
+    return normalized[-4:] if len(normalized) >= 4 else None
+
+
 def _phone_hmac(value: str, secret: str) -> str:
     normalized = normalize_phone(value)
     return hmac.new(secret.encode("utf-8"), normalized.encode("utf-8"), hashlib.sha256).hexdigest()

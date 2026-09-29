@@ -13,6 +13,7 @@ from apps.api.src.core.v12_enums import (
     LeadSourceKind,
     LeadV12Status,
 )
+from apps.api.src.services.phone_uniqueness import hash_customer_wechat
 from apps.api.src.integrations.feishu import FeishuRecord
 from apps.api.src.services.dispatch_v12 import has_receiver_coverage
 from apps.api.src.services.lead_supply_v12 import (
@@ -27,9 +28,30 @@ from apps.api.src.services.public_pool_v12 import (
     create_public_pool_lead,
     import_feishu_customer_view,
     list_public_pool_leads,
+    public_pool_lead_conditions,
     transfer_public_pool_lead,
     update_public_pool_lead,
 )
+
+
+def test_wechat_only_public_pool_lead_is_not_incomplete(db) -> None:
+    lead = Lead(
+        source_type="SUPPLIER_H5",
+        source_kind="SUPPLIER_H5",
+        customer_name="仅微信公海客户",
+        customer_wechat_hash=hash_customer_wechat("wx-pool-929"),
+        region_code="420102",
+        consent_confirmed=True,
+        status=LeadV12Status.PUBLIC_POOL.value,
+        raw_payload={},
+    )
+    db.add(lead)
+    db.flush()
+
+    complete_ids = set(db.scalars(select(Lead.id).where(*public_pool_lead_conditions(completeness="COMPLETE"))).all())
+    incomplete_ids = set(db.scalars(select(Lead.id).where(*public_pool_lead_conditions(completeness="INCOMPLETE"))).all())
+    assert lead.id in complete_ids
+    assert lead.id not in incomplete_ids
 
 
 def _principal(user_id: str, *permissions: str) -> Principal:
@@ -157,6 +179,7 @@ class FakeCustomerViewClient:
 
 def test_manual_and_inline_entries_share_public_pool_and_transfer_revalidates(db) -> None:
     _seed_region(db)
+    _receiver(db)
     _, principal = _operation(db)
     lead = create_public_pool_lead(
         db,
@@ -203,6 +226,7 @@ def test_manual_and_inline_entries_share_public_pool_and_transfer_revalidates(db
 
 def test_customer_name_is_optional_when_other_dispatch_fields_are_complete(db) -> None:
     _seed_region(db)
+    _receiver(db)
     _, principal = _operation(db)
     lead = create_public_pool_lead(
         db,
@@ -237,6 +261,7 @@ def test_customer_name_is_optional_when_other_dispatch_fields_are_complete(db) -
 )
 def test_rework_reason_stays_until_successful_dispatch_transfer(db, source_kind) -> None:
     _seed_region(db)
+    _receiver(db)
     _, principal = _operation(db)
     lead = create_public_pool_lead(
         db,
@@ -482,6 +507,7 @@ def test_feishu_dispatch_target_retains_incomplete_rows_and_is_idempotent(db, mo
     import apps.api.src.services.public_pool_v12 as module
 
     _seed_region(db)
+    _receiver(db)
     _, principal = _operation(db)
     monkeypatch.setattr(module.settings, "feishu_app_token", "base-token")
     monkeypatch.setattr(module.settings, "feishu_table_id", "table-customer")
@@ -632,6 +658,9 @@ def test_public_pool_http_is_shared_by_admin_and_operation_but_forbidden_to_fran
     monkeypatch,
 ) -> None:
     client, factory = api_client
+    with factory() as db:
+        _receiver(db, region_code="310101")
+        db.commit()
 
     def login(username: str, password: str) -> dict[str, str]:
         response = client.post(

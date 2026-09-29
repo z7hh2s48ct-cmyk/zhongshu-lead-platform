@@ -373,6 +373,47 @@ def create_company_invite(
     return invite, raw, superseded_ids
 
 
+def create_owner_wechat_rebind_invite(
+    db: Session,
+    company_id: str,
+    created_by: str | None,
+    expires_hours: int,
+) -> tuple[InviteToken, str, list[str]]:
+    company = db.scalar(select(Company).where(Company.id == company_id).with_for_update())
+    if company is None:
+        raise AppError("COMPANY_NOT_AVAILABLE", "加盟商公司不存在", 404)
+    if company.status != "ACTIVE":
+        raise AppError("AUTH_COMPANY_DISABLED", "加盟商公司不可用", 403)
+    owner = db.get(User, company.primary_user_id) if company.primary_user_id else None
+    if owner is None or owner.status != "ACTIVE" or role_codes_for_user(owner) != ["FRANCHISE_OWNER"]:
+        raise AppError("AUTH_OWNER_NOT_BOUND", "负责人账号未完成绑定", 409)
+    identity = db.scalar(select(WechatIdentity).where(WechatIdentity.user_id == owner.id))
+    if identity is None:
+        raise AppError("AUTH_OWNER_NOT_BOUND", "负责人微信尚未绑定", 409)
+    now = utcnow()
+    superseded_ids = [row.id for row in db.execute(
+        update(InviteToken).where(
+            InviteToken.company_id == company_id,
+            InviteToken.revoked_at.is_(None),
+            InviteToken.used_at.is_(None),
+            InviteToken.expires_at > now,
+        ).values(revoked_at=now).returning(InviteToken.id)
+    ).all()]
+    if superseded_ids:
+        db.expire_all()
+    raw = generate_token(32)
+    invite = InviteToken(
+        token_hash=hash_token(raw), company_id=company_id,
+        purpose="OWNER_WECHAT_REBIND", target_user_id=owner.id,
+        created_by=created_by, expires_at=now + timedelta(hours=expires_hours),
+        invitee_name_snapshot=company.owner_name,
+        company_name_snapshot=company.name,
+    )
+    db.add(invite)
+    db.flush()
+    return invite, raw, superseded_ids
+
+
 def build_invite_copy_text(
     owner_name: str | None,
     company_name: str | None,
@@ -659,6 +700,14 @@ def login_or_bind_wechat(
     invite_id: str | None = None,
     expected_company_id: str | None = None,
 ) -> tuple[User, str]:
+    if invite_token or invite_id:
+        invite = validate_invite(db, raw_token=invite_token, invite_id=invite_id)
+        if invite.purpose == "OWNER_WECHAT_REBIND":
+            return _rebind_owner_wechat(
+                db, invite=invite, openid=openid, unionid=unionid, nickname=nickname,
+                invite_token=invite_token, invite_id=invite_id,
+                expected_company_id=expected_company_id,
+            )
     identity = db.scalar(select(WechatIdentity).where(WechatIdentity.openid == openid))
     if identity:
         return _login_bound_identity(
@@ -745,6 +794,53 @@ def login_or_bind_wechat(
         )
     token = create_access_token(user.id, user.session_version, role_codes_for_user(user), company.id)
     return user, token
+
+
+def _rebind_owner_wechat(
+    db: Session,
+    *,
+    invite: InviteToken,
+    openid: str,
+    unionid: str | None,
+    nickname: str | None,
+    invite_token: str | None,
+    invite_id: str | None,
+    expected_company_id: str | None,
+) -> tuple[User, str]:
+    if expected_company_id and invite.company_id != expected_company_id:
+        raise AppError("AUTH_INVITE_INVALID", "邀请已失效，请联系平台", 400)
+    company = db.scalar(select(Company).where(Company.id == invite.company_id).with_for_update())
+    if company is None or company.status != "ACTIVE":
+        raise AppError("AUTH_COMPANY_DISABLED", "加盟商公司不可用", 403)
+    owner = db.get(User, invite.target_user_id) if invite.target_user_id else None
+    if owner is None or owner.status != "ACTIVE" or owner.company_id != company.id or company.primary_user_id != owner.id:
+        raise AppError("AUTH_OWNER_CHANGED", "负责人账号已变化，请重新发起换绑", 409)
+    roles = role_codes_for_user(owner)
+    if roles != ["FRANCHISE_OWNER"]:
+        raise AppError("AUTH_OWNER_CHANGED", "负责人账号已变化，请重新发起换绑", 409)
+    identity = db.scalar(select(WechatIdentity).where(WechatIdentity.user_id == owner.id).with_for_update())
+    if identity is None:
+        raise AppError("AUTH_OWNER_NOT_BOUND", "负责人微信尚未绑定", 409)
+    occupied = db.scalar(select(WechatIdentity).where(WechatIdentity.openid == openid))
+    if occupied is not None:
+        raise AppError("AUTH_WECHAT_ALREADY_BOUND", "该微信已绑定账号，请使用未绑定的微信", 409)
+    _consume_invite(
+        db, raw_token=invite_token, invite_id=invite_id,
+        expected_company_id=company.id, used_by_user_id=owner.id,
+    )
+    identity.openid = openid
+    identity.unionid = unionid
+    identity.nickname = nickname
+    owner.session_version += 1
+    owner.last_login_at = utcnow()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        if _is_openid_unique_conflict(exc):
+            raise AppError("AUTH_WECHAT_ALREADY_BOUND", "该微信已绑定账号，请使用未绑定的微信", 409) from exc
+        raise
+    return owner, create_access_token(owner.id, owner.session_version, roles, company.id)
 
 
 def bind_wechat_by_invite(db: Session, raw_token: str, openid: str, nickname: str) -> tuple[User, str]:
