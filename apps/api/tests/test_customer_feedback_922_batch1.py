@@ -60,7 +60,7 @@ def test_h5_city_search_goes_through_backend_region_search() -> None:
 
 def test_h5_static_cache_version_bumped_for_region_search() -> None:
     html = H5_HTML.read_text(encoding="utf-8")
-    assert "20260928-feedback-928" in html
+    assert "20260930-feedback-929" in html
 
 
 def test_region_search_returns_feidong_county(api_client) -> None:

@@ -104,5 +104,5 @@ def test_export_hint_mentions_return_pending_exclusion(api_client) -> None:
     assert 'class="wb-export-wrap"' in snippet
     # 样式与缓存版本同步。
     assert ".wb-export-wrap" in styles
-    assert "v12-workbench.js?v=20260928-feedback-928" in html
-    assert "v12-workbench.css?v=20260928-feedback-928" in html
+    assert "v12-workbench.js?v=20260930-feedback-929" in html
+    assert "v12-workbench.css?v=20260930-feedback-929" in html
