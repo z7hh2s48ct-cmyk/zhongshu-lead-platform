@@ -317,3 +317,53 @@ def test_supplier_import_reader_supports_excel_shared_strings(tmp_path: Path) ->
         "phone": "13900139922",
         "consent_confirmed": True,
     }
+
+
+def test_supplier_import_rejects_oversized_column_before_allocating_rows() -> None:
+    import pytest
+    from apps.api.src.services.supplier_lead_import_v12 import _column_index
+
+    with pytest.raises(ValueError, match="column"):
+        _column_index("ZZZZZZ1")
+
+
+def test_supplier_import_accepts_last_template_column() -> None:
+    from apps.api.src.services.supplier_lead_import_v12 import _column_index
+
+    assert _column_index("M201") == 13
+
+
+def test_supplier_import_rejects_xml_entities(tmp_path: Path) -> None:
+    from io import BytesIO
+    import pytest
+    from apps.api.src.core.errors import AppError
+
+    path = _workbook(tmp_path, [{"手机号": "13900139922"}])
+    output = BytesIO()
+    with ZipFile(path) as source, ZipFile(output, "w") as target:
+        for name in source.namelist():
+            content = source.read(name)
+            if name == "xl/workbook.xml":
+                content = content.replace(b"<workbook ", b'<!DOCTYPE workbook [<!ENTITY payload "test">]><workbook ', 1)
+            target.writestr(name, content)
+    with pytest.raises(AppError) as error:
+        parse_supplier_import_xlsx(output.getvalue())
+    assert error.value.code == "SUPPLIER_IMPORT_FILE_INVALID"
+
+
+def test_supplier_import_stops_collecting_rows_at_limit(tmp_path: Path) -> None:
+    from io import BytesIO
+    import pytest
+    from apps.api.src.services.supplier_lead_import_v12 import _first_worksheet_rows
+
+    path = _workbook(tmp_path, [])
+    output = BytesIO()
+    with ZipFile(path) as source, ZipFile(output, "w") as target:
+        for name in source.namelist():
+            content = source.read(name)
+            if name == "xl/worksheets/sheet1.xml":
+                data_row = b'<row><c r="A2" t="inlineStr"><is><t>test</t></is></c></row>'
+                content = content.replace(b"</sheetData>", data_row * 201 + b"</sheetData>")
+            target.writestr(name, content)
+    with ZipFile(output) as workbook, pytest.raises(ValueError, match="rows"):
+        _first_worksheet_rows(workbook)

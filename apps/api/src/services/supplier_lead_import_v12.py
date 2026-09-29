@@ -5,9 +5,9 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
-from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
+from defusedxml import ElementTree
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -276,14 +276,22 @@ def _first_worksheet_rows(workbook: ZipFile) -> list[list[str]]:
     shared_strings = _shared_strings(workbook)
     sheet_root = ElementTree.fromstring(workbook.read(sheet_path))
     rows: list[list[str]] = []
+    nonempty_data_rows = 0
     for row in sheet_root.findall(f".//{{{_XLSX_MAIN_NS}}}row"):
         values: list[str] = []
-        for cell in row.findall(f"{{{_XLSX_MAIN_NS}}}c"):
+        cells = row.findall(f"{{{_XLSX_MAIN_NS}}}c")
+        if len(cells) > len(_HEADER_FIELDS):
+            raise ValueError("too many import columns")
+        for cell in cells:
             reference = cell.attrib.get("r", "A1")
             column = _column_index(reference)
             while len(values) < column - 1:
                 values.append("")
             values.append(_cell_value(cell, shared_strings))
+        if rows and any(values):
+            nonempty_data_rows += 1
+            if nonempty_data_rows > MAX_IMPORT_ROWS:
+                raise ValueError("too many import rows")
         rows.append(values)
     return rows
 
@@ -298,7 +306,7 @@ def _shared_strings(workbook: ZipFile) -> list[str]:
     ]
 
 
-def _cell_value(cell: ElementTree.Element, shared_strings: list[str]) -> str:
+def _cell_value(cell: Any, shared_strings: list[str]) -> str:
     if cell.attrib.get("t") == "inlineStr":
         return "".join(
             node.text or "" for node in cell.findall(f".//{{{_XLSX_MAIN_NS}}}t")
@@ -313,7 +321,12 @@ def _cell_value(cell: ElementTree.Element, shared_strings: list[str]) -> str:
 def _column_index(reference: str) -> int:
     index = 0
     for character in reference:
-        if not character.isalpha():
+        if not ("A" <= character.upper() <= "Z"):
             break
         index = index * 26 + ord(character.upper()) - ord("A") + 1
+        # Reject sparse malicious references before allocating missing cells.
+        if index > len(_HEADER_FIELDS):
+            raise ValueError("import column exceeds supported template")
+    if index < 1:
+        raise ValueError("invalid import column")
     return index

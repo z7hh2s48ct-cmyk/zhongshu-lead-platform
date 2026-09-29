@@ -13,3 +13,4 @@ python-multipart==0.0.32
 boto3==1.43.18
 pytest==9.1.1
 pytest-cov==7.0.0
+defusedxml==0.7.1

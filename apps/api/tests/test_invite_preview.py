@@ -77,3 +77,8 @@ def test_production_proxy_rate_limits_preview_without_logging_legacy_query_token
         assert "limit_req zone=auth_login_limit" in preview
         assert "limit_req_status 429" in preview
         assert "access_log off" in preview
+
+
+def test_invite_page_refreshes_script_for_wechat_rebind() -> None:
+    html = (ROOT / "apps" / "h5" / "public" / "invite.html").read_text(encoding="utf-8")
+    assert 'invite.js?v=20260930-feedback-929' in html
